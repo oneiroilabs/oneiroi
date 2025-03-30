@@ -1,0 +1,15 @@
+---
+source: oneiroi/src/mesh/tests.rs
+expression: "BoxV1::default()"
+snapshot_kind: text
+---
+size:
+  Value:
+    - 1
+    - 1
+    - 1
+origin:
+  Value:
+    - 0
+    - 0
+    - 0

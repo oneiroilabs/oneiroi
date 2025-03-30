@@ -1,0 +1,26 @@
+[package]
+name = "oneiroi-godot"
+version = "0.0.1"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"] # Compile this crate to a dynamic C library.
+
+[dependencies]
+godot = { git = "https://github.com/godot-rust/gdext", branch = "master", features = [
+    'api-4-4',
+    'experimental-godot-api',
+    'experimental-threads',
+    'register-docs',
+] }
+#TODO remove this to build on native suite api
+#Oneiroi-mesh = { path = "../Oneiroi-mesh", version = "*" }
+oneiroi = {path = "../oneiroi", version = "*"}
+
+
+[features]
+only_runtime = ["oneiroi/only_runtime"]
+
+
+#[profile.editor]
+#inherits = "release"

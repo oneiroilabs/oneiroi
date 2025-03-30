@@ -1,0 +1,53 @@
+[package]
+name = "oneiroi"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+#slotmap = {package = "slotmap",version = "1.0"}
+#bytes = {package = "bytes",version = "1.7"}
+
+#Math Library
+glam = { version = "0.30", features = ["serde"] }
+#bitvec = "1"
+
+itertools = "0.14"
+
+#Immutable Data Structures
+im = { version = "15", features = ["serde"] }
+
+#Efficent Vecs for Mesh
+smallvec = { version = "=2.0.0-alpha.10", features = ['serde'] }
+
+#Notify Graph of changes
+#futures-signals ="0.3"
+
+#Graph Library
+petgraph = { version = "0.7", features = ["serde-1"] }
+
+#Serialization
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+#toml = "0.8"
+
+#Parallel computation
+#rayon =" 1.10"
+
+#Parsing for scripts
+nom = "8"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+insta = { version = "1.38.0", features = ["yaml"] }
+cargo-insta = "1.41.1"
+# TODO explore the possibilities with this
+rstest = "0.24"
+
+[[bench]]
+name = "my_benchmark"
+harness = false
+
+[features]
+#If this feature is enabled we only build the components which are required for the runtime
+#results in no editing functionality
+only_runtime = []
