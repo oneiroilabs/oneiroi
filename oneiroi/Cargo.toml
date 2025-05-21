@@ -1,7 +1,12 @@
 [package]
 name = "oneiroi"
-version = "0.0.1"
+version = "0.0.0"
 edition = "2024"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+description.workspace = true
 
 [dependencies]
 #slotmap = {package = "slotmap",version = "1.0"}
