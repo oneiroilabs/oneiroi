@@ -1,0 +1,583 @@
+{
+  "graph": {
+    "nodes": [
+      [
+        {
+          "name": "",
+          "postition": [
+            0.0,
+            0.0
+          ]
+        },
+        "Expose"
+      ],
+      [
+        {
+          "name": "Output",
+          "postition": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "SocketOutput": {}
+        }
+      ],
+      [
+        {
+          "name": "Box",
+          "postition": [
+            -460.0,
+            0.0
+          ]
+        },
+        {
+          "BoxV1": {
+            "size": [
+              1.0,
+              1.265,
+              1.0
+            ],
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "subdivisions": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Input",
+          "postition": [
+            -320.0,
+            180.0
+          ]
+        },
+        {
+          "SocketInput": {
+            "runtime": false
+          }
+        }
+      ],
+      [
+        {
+          "name": "Output",
+          "postition": [
+            176.83997,
+            182.38
+          ]
+        },
+        {
+          "SocketOutput": {}
+        }
+      ],
+      [
+        {
+          "name": "SampleCurve",
+          "postition": [
+            -200.0,
+            200.0
+          ]
+        },
+        {
+          "SampleCurveV1": {
+            "number": 5,
+            "distance": 0.25,
+            "equidistant": true
+          }
+        }
+      ],
+      [
+        {
+          "name": "InstancesFromTransforms",
+          "postition": [
+            0.0,
+            380.0
+          ]
+        },
+        {
+          "InstancesFromTransformsV1": {
+            "transform": [
+              0.0,
+              0.0,
+              -1.0,
+              0.0,
+              1.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Cylinder",
+          "postition": [
+            -340.0,
+            400.0
+          ]
+        },
+        {
+          "CylinderV1": {
+            "radius": 0.1,
+            "height": 2.0,
+            "segments": 9,
+            "has_caps": false
+          }
+        }
+      ],
+      [
+        {
+          "name": "Material",
+          "postition": [
+            -647.16016,
+            471.0
+          ]
+        },
+        {
+          "MaterialV1": {
+            "albedo": {
+              "cs": "Srgb",
+              "flags": {
+                "missing": 0,
+                "name": 0
+              },
+              "components": [
+                0.6509804,
+                0.0,
+                0.0,
+                1.0
+              ]
+            }
+          }
+        }
+      ],
+      [
+        {
+          "name": "SetMaterial",
+          "postition": [
+            -373.16016,
+            650.0
+          ]
+        },
+        {
+          "SetMaterialV1": {}
+        }
+      ],
+      [
+        {
+          "name": "SetMaterial",
+          "postition": [
+            -226.98682,
+            -15.633301
+          ]
+        },
+        {
+          "SetMaterialV1": {}
+        }
+      ],
+      [
+        {
+          "name": "Box",
+          "postition": [
+            -620.0,
+            720.0
+          ]
+        },
+        {
+          "BoxV1": {
+            "size": [
+              0.2,
+              2.0,
+              0.1
+            ],
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "subdivisions": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Sweep",
+          "postition": [
+            3.857788,
+            688.374
+          ]
+        },
+        {
+          "SweepV1": {}
+        }
+      ],
+      [
+        {
+          "name": "Output",
+          "postition": [
+            275.30627,
+            682.35596
+          ]
+        },
+        {
+          "SocketOutput": {}
+        }
+      ],
+      [
+        {
+          "name": "Polygon",
+          "postition": [
+            -285.5996,
+            914.59827
+          ]
+        },
+        {
+          "PolygonV1": {}
+        }
+      ],
+      [
+        {
+          "name": "CreateInstance",
+          "postition": [
+            158.41772,
+            878.84863
+          ]
+        },
+        {
+          "CreateInstanceV1": {
+            "position": [
+              3.245,
+              2.1,
+              2.125
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Output",
+          "postition": [
+            399.6333,
+            897.84863
+          ]
+        },
+        {
+          "SocketOutput": {}
+        }
+      ],
+      [
+        {
+          "name": "SampleCurve",
+          "postition": [
+            -60.0,
+            1100.0
+          ]
+        },
+        {
+          "SampleCurveV1": {
+            "number": 5,
+            "distance": 3.0,
+            "equidistant": true
+          }
+        }
+      ],
+      [
+        {
+          "name": "InstancesFromPoints",
+          "postition": [
+            240.0,
+            1080.0
+          ]
+        },
+        {
+          "InstancesFromTransformsV1": {
+            "transform": [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Box",
+          "postition": [
+            -29.0,
+            1282.0
+          ]
+        },
+        {
+          "BoxV1": {
+            "size": [
+              0.08,
+              2.0,
+              0.08
+            ],
+            "origin": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "subdivisions": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          }
+        }
+      ],
+      [
+        {
+          "name": "Output",
+          "postition": [
+            562.0,
+            1068.0
+          ]
+        },
+        {
+          "SocketOutput": {}
+        }
+      ],
+      [
+        {
+          "name": "Bevel",
+          "postition": [
+            -502.50317,
+            699.8342
+          ]
+        },
+        {
+          "BevelV1": {
+            "query": {
+              "literal": "1"
+            },
+            "segments": 1
+          }
+        }
+      ]
+    ],
+    "node_holes": [],
+    "edge_property": "directed",
+    "edges": [
+      [
+        2,
+        10,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        9,
+        6,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 1
+          }
+        }
+      ],
+      [
+        5,
+        6,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        3,
+        5,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        6,
+        4,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        21,
+        9,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        8,
+        9,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 1
+          }
+        }
+      ],
+      [
+        8,
+        10,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 1
+          }
+        }
+      ],
+      [
+        10,
+        13,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        3,
+        12,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        12,
+        1,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        14,
+        12,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 1
+          }
+        }
+      ],
+      [
+        12,
+        15,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        15,
+        16,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        19,
+        18,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 1
+          }
+        }
+      ],
+      [
+        17,
+        18,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        18,
+        20,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        3,
+        17,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ],
+      [
+        11,
+        21,
+        {
+          "Socket": {
+            "source": 0,
+            "target": 0
+          }
+        }
+      ]
+    ]
+  },
+  "property_scripts": {},
+  "exposed_property_order": [],
+  "embedded_assets": []
+}

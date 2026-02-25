@@ -1,21 +1,20 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use oneiroi::{
     asset::Asset,
-    data_types::Property,
-    mesh::OneiroiMesh,
-    operations::{Operation, PropertyInterface, producers::cylinder::CylinderV1},
+    nodes::PropertyInterface,
+    type_system::{OwnedDataType, data_types::Mesh},
 };
 
 use std::time::Duration;
 
-fn construct_box_extrude() -> OneiroiMesh {
+fn construct_box_extrude() -> Mesh {
     /* let ps_box = BoxV1::default().compute(());
 
     let new_mesh = ExtrudeV1::default().compute(ps_box);
 
     new_mesh */
     //TODO
-    OneiroiMesh::default()
+    Mesh::default()
 }
 
 fn construct_extrude_graph() -> Asset {
@@ -28,12 +27,22 @@ fn construct_extrude_graph() -> Asset {
 }
 
 fn compute_cylinder_500() {
-    let mut cyl = CylinderV1::default();
-    _ = cyl.try_set_property(
-        "segments",
-        oneiroi::data_types::DataTypeInstance::Int(Property::new(500)),
-    );
-    cyl.compute(vec![]);
+    //Asset::default()
+    /* let mut cyl = CylinderV1::default();
+    _ = cyl.try_set_property("segments", OwnedDataType::Int(500)); */
+    // cyl.compute(None);
+}
+
+fn compute_cylinder_5000() {
+    /* let mut cyl = CylinderV1::default();
+    _ = cyl.try_set_property("segments", OwnedDataType::Int(5000)); */
+    // cyl.compute(None);
+}
+
+fn compute_cylinder_50000() {
+    /* let mut cyl = CylinderV1::default();
+    _ = cyl.try_set_property("segments", OwnedDataType::Int(50000)); */
+    //cyl.compute(None);
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
@@ -43,6 +52,12 @@ fn criterion_benchmark(c: &mut Criterion) {
         b.iter(construct_extrude_graph)
     }); */
     c.bench_function("Compute_Cylinder_500Sub", |b| b.iter(compute_cylinder_500));
+    c.bench_function("Compute_Cylinder_5000Sub", |b| {
+        b.iter(compute_cylinder_5000)
+    });
+    c.bench_function("Compute_Cylinder_50000Sub", |b| {
+        b.iter(compute_cylinder_50000)
+    });
 }
 
 /* fn criterion_benchmark2(c: &mut Criterion) {

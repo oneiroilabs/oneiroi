@@ -1,11 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["oneiroi-godot", "oneiroi"]
-package.authors = ["Mr.Joermungandr"]
+members = ["oneiroi-godot", "oneiroi", "oneiroi-cpp"]
+package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
 package.license = "GPL-3.0-only"
 package.readme = "README.md"
 package.description = "An engine-agnostic node-based procedural modeling library."
+package.version = "0.1.0"
+package.edition = "2024"
 
 [profile.dev.package]
 insta.opt-level = 3
@@ -15,3 +17,8 @@ similar.opt-level = 3
 strip = true
 lto = true
 codegen-units = 1
+
+[workspace.dependencies]
+oneiroi = { path = "./oneiroi" }
+oneiroi-cpp = { path = "./oneiroi-cpp" }
+oneiroi-godot = { path = "./oneiroi-godot" }

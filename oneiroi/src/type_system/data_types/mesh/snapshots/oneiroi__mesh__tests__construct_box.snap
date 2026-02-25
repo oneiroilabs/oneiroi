@@ -1,0 +1,19 @@
+---
+source: oneiroi/src/mesh/tests.rs
+expression: "BoxV1::default()"
+---
+size:
+  Value:
+    - 1
+    - 1
+    - 1
+origin:
+  Value:
+    - 0
+    - 0
+    - 0
+subdivisions:
+  Value:
+    - 1
+    - 1
+    - 1

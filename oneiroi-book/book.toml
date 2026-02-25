@@ -1,0 +1,11 @@
+[book]
+authors = ["Kilian Strunz (kistz)"]
+language = "en"
+multilingual = false
+src = "src"
+title = "The Oneiroi book"
+description = "The Oneiroi book introduces you to the framework and provides you with a learning path."
+
+[output.html]
+git-repository-url = "https://github.com/oneiroilabs/oneiroi"
+smart-punctuation = true

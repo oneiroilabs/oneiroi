@@ -66,13 +66,62 @@ impl ITree for AddNodeTree {
             .base_mut()
             .create_item()
             .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "Input");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
         item.set_text(0, "Output");
         let mut item = self
             .base_mut()
             .create_item()
             .expect("Couldnt generate new Tree Item");
-        item.set_text(0, "SubGraph");
-
+        item.set_text(0, "EmbeddedAsset");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "CreateInstance");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "DistributePoints");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "InstancesFromPoints");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "SampleCurve");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "Material");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "SetMaterial");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "Sweep");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "Polygon");
+        let mut item = self
+            .base_mut()
+            .create_item()
+            .expect("Couldnt generate new Tree Item");
+        item.set_text(0, "Bevel");
         //subscribe to item activated signal and connect it to on_item_activated
         let item_activated_handler = self.base().callable("on_item_activated");
         self.base_mut()

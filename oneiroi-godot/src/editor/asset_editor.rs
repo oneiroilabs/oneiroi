@@ -48,7 +48,7 @@ impl IEditorPlugin for OneiroiAssetEditor {
     }
 
     fn get_plugin_name(&self) -> GString {
-        "OneiroiEditor".into()
+        "Oneiroi".into()
     }
     fn make_visible(&mut self, is_visible: bool) {
         if is_visible {

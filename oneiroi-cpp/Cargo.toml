@@ -1,0 +1,18 @@
+[package]
+name = "oneiroi-cpp"
+version = "0.0.1"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+cxx = { version = "1.0", features = ['c++20'] }
+#cxx = { git = "https://github.com/dtolnay/cxx", branch = "master" }
+#cxx = { git = "https://github.com/Ryex/cxx/", rev = "fc58c24a92ee1480bd9f74b4c5dbe66450da7091", features = [
+#   "c++20",
+#] }
+oneiroi.workspace = true
+
+[build-dependencies]
+cxx-build = "1.0"

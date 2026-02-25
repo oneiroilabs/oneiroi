@@ -2,6 +2,8 @@ use godot::classes::{EditorInspectorPlugin, EditorPlugin, IEditorInspectorPlugin
 use godot::{global, prelude::*};
 use script_plugin::OneiroiScriptPlugin;
 
+use crate::editor::asset_editor::node_editor::node_proxy::OneiroiNode;
+
 mod script_editor;
 mod script_plugin;
 
@@ -16,15 +18,13 @@ impl IEditorInspectorPlugin for OneiroiNodeInspectorPlugin {
     fn parse_property(
         &mut self,
         object: Option<Gd<Object>>, // object that is being inspected
-        value_type: VariantType,
+        _value_type: VariantType,
         name: GString,
         _hint_type: global::PropertyHint,
         _hit_string: GString,
         _flags: global::PropertyUsageFlags,
         _wide: bool,
     ) -> bool {
-        _ = object.clone();
-
         //remove the build in resource editors
         if name == "resource_local_to_scene".into()
             || name == "resource_path".into()
@@ -34,36 +34,32 @@ impl IEditorInspectorPlugin for OneiroiNodeInspectorPlugin {
             return false;
         }
 
-        //TODO make the script editor available again
-        if let Ok(vec) = object.as_ref().unwrap().get(name.arg()).try_to::<Vector3>() {
-            //godot_print!("Property {:?} was {:?}", name, vec);
-            self.base_mut()
-                .add_property_editor_ex(&name, &OneiroiScriptPlugin::new_alloc())
-                .add_to_end(true)
-                .done();
-        }
-        if let Ok(vec) = object.as_ref().unwrap().get(name.arg()).try_to::<bool>() {
-            //godot_print!("Property {:?} was {:?}", name, vec);
-            self.base_mut()
-                .add_property_editor_ex(&name, &OneiroiScriptPlugin::new_alloc())
-                .add_to_end(true)
-                .done();
-        }
-        if let Ok(vec) = object.as_ref().unwrap().get(name.arg()).try_to::<i64>() {
-            //godot_print!("Property {:?} was {:?}", name, vec);
-            self.base_mut()
-                .add_property_editor_ex(&name, &OneiroiScriptPlugin::new_alloc())
-                .add_to_end(true)
-                .done();
-        }
-        if let Ok(vec) = object.as_ref().unwrap().get(name.arg()).try_to::<f32>() {
-            //godot_print!("Property {:?} was {:?}", name, vec);
-            self.base_mut()
-                .add_property_editor_ex(&name, &OneiroiScriptPlugin::new_alloc())
-                .add_to_end(true)
-                .done();
-        }
+        let object = object.unwrap().cast::<OneiroiNode>();
+        let id = object.bind().get_index();
 
+        match object.get(name.arg()).get_type() {
+            VariantType::VECTOR3 => self
+                .base_mut()
+                .add_property_editor_ex(&name, &OneiroiScriptPlugin::init_with_node_id(id))
+                .add_to_end(true)
+                .done(),
+            VariantType::BOOL => self
+                .base_mut()
+                .add_property_editor_ex(&name, &OneiroiScriptPlugin::init_with_node_id(id))
+                .add_to_end(true)
+                .done(),
+            VariantType::INT => self
+                .base_mut()
+                .add_property_editor_ex(&name, &OneiroiScriptPlugin::init_with_node_id(id))
+                .add_to_end(true)
+                .done(),
+            VariantType::FLOAT => self
+                .base_mut()
+                .add_property_editor_ex(&name, &OneiroiScriptPlugin::init_with_node_id(id))
+                .add_to_end(true)
+                .done(),
+            _ => (),
+        }
         false
     }
 
@@ -88,8 +84,8 @@ impl IEditorPlugin for InspectorEditorPlugin {
     fn enter_tree(&mut self) {
         // Create our inspector plugin and save it.
         let plugin = OneiroiNodeInspectorPlugin::new_gd();
-        self.inspector = plugin.clone();
         self.base_mut().add_inspector_plugin(&plugin);
+        self.inspector = plugin;
     }
 
     fn exit_tree(&mut self) {

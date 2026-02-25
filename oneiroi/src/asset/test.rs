@@ -1,8 +1,8 @@
-use super::Asset;
+use super::EditableAsset;
 
 #[test]
 pub fn get_graph_instance() {
-    let mut result = Asset::default();
+    let mut result = EditableAsset::default();
     /* let node1 = result.add_node(
         Nodes::BoxV1(Box::new(BoxV1::default())),
         super::OneiroiNode {

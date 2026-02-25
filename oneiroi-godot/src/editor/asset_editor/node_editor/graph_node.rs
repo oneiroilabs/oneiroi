@@ -7,12 +7,9 @@ use godot::{
     },
     prelude::*,
 };
-use oneiroi::{
-    asset::{NodeIndex, NodeMetadata},
-    operations::Nodes,
-};
+use oneiroi::asset::{NodeIndex, NodeMetadata};
 
-use super::node_proxy::OneiroiNodeProxy;
+use super::node_proxy::OneiroiNode;
 
 #[derive(GodotClass)]
 #[class(tool,no_init,internal, base=GraphNode)]
@@ -20,14 +17,14 @@ pub struct OneiroiGraphNode {
     base: Base<GraphNode>,
 
     #[var]
-    resource: Gd<OneiroiNodeProxy>,
+    resource: Gd<OneiroiNode>,
 }
 
 #[godot_api]
 impl IGraphNode for OneiroiGraphNode {
     fn ready(&mut self) {
         //get the metadata of given node
-        let base_props = self.resource.bind().get_info();
+        let base_props = self.resource.bind().get_metadata();
         let static_metadata = self.resource.bind().static_metadata();
 
         let color = Color::from_html(static_metadata.color).unwrap();
@@ -66,8 +63,9 @@ impl IGraphNode for OneiroiGraphNode {
         self.base_mut()
             .add_theme_stylebox_override("titlebar_selected", &titlebar_selected);
 
-        let node_idx = self.resource.bind().get_node_id().index().to_string();
+        let node_idx = self.resource.bind().get_index().index().to_string();
 
+        //TODO add name in separate
         let title = node_idx + " " + &base_props.get_name();
         self.base_mut().set_title(&title);
 
@@ -82,28 +80,28 @@ impl IGraphNode for OneiroiGraphNode {
         self.base_mut().connect("dragged", &on_dragged);
 
         //setup slots
-        let sockets = self.resource.bind().get_sockets();
-        let controls = std::cmp::max(sockets.1.len(), sockets.0.len());
+        let (inputs, outputs) = self.resource.bind().get_sockets();
+        let controls = std::cmp::max(inputs.len(), outputs.len());
         for _ in 0..controls {
             let mut control = Control::new_alloc();
             control.set_custom_minimum_size(Vector2 { x: 0., y: 25. });
             self.base_mut().add_child(&control);
         }
-        for (index, slot) in sockets.1.into_iter().enumerate() {
-            self.base_mut().set_slot_enabled_right(index as i32, true);
-            let color = slot.get_color();
-            self.base_mut()
-                .set_slot_color_right(index as i32, Color::from_rgb(color.x, color.y, color.z));
-            self.base_mut()
-                .set_slot_type_right(index as i32, slot as i32);
-        }
-        for (index, slot) in sockets.0.into_iter().enumerate() {
+        for (index, slot) in inputs.into_iter().enumerate() {
             self.base_mut().set_slot_enabled_left(index as i32, true);
             let color = slot.get_color();
             self.base_mut()
                 .set_slot_color_left(index as i32, Color::from_rgb(color.x, color.y, color.z));
             self.base_mut()
-                .set_slot_type_left(index as i32, slot as i32);
+                .set_slot_type_left(index as i32, slot.get_type() as i32);
+        }
+        for (index, slot) in outputs.into_iter().enumerate() {
+            self.base_mut().set_slot_enabled_right(index as i32, true);
+            let color = slot.get_color();
+            self.base_mut()
+                .set_slot_color_right(index as i32, Color::from_rgb(color.x, color.y, color.z));
+            self.base_mut()
+                .set_slot_type_right(index as i32, slot.get_type() as i32);
         }
 
         //TODO fill with preview button
@@ -135,12 +133,12 @@ impl OneiroiGraphNode {
     //#[func]
     //TODO most likely init with index
     pub fn init_with_node(
-        node: Rc<(RefCell<NodeMetadata>, RefCell<Nodes>)>,
+        //node: Rc<(RefCell<NodeMetadata>, RefCell<Nodes>)>,
         node_index: NodeIndex,
     ) -> Gd<Self> {
         Gd::from_init_fn(|base| Self {
             base,
-            resource: OneiroiNodeProxy::init_with_node(node, node_index),
+            resource: OneiroiNode::init_with_node(/* node, */ node_index),
         })
     }
 
@@ -148,7 +146,7 @@ impl OneiroiGraphNode {
         //TODO cast to right dings maybe not
         Gd::from_init_fn(|base| Self {
             base,
-            resource: OneiroiNodeProxy::init_with_id(node_index),
+            resource: OneiroiNode::init_with_id(node_index),
             // properties: Vec::new(),
             // resource,
             //TODO

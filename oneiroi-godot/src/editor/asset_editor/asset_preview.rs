@@ -1,5 +1,5 @@
 use godot::{
-    classes::{DirectionalLight3D, ISubViewport, SubViewport},
+    classes::{Camera3D, DirectionalLight3D, ISubViewport, SubViewport},
     prelude::*,
 };
 

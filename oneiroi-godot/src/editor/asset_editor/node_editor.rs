@@ -11,11 +11,13 @@ use godot::{
     prelude::*,
 };
 use graph_node::OneiroiGraphNode;
-use node_proxy::OneiroiNodeProxy;
+use node_proxy::OneiroiNode;
 use oneiroi::{
-    asset::{NodeIndex, NodeMetadata},
-    data_types::DataTypeType,
-    operations::Nodes,
+    asset::{
+        NodeIndex,
+        editable::{AssetEditorMethods, NonTrivialEditorAction},
+    },
+    type_system::data_types::DataTypeKind,
 };
 
 use crate::core::asset::OneiroiAsset;
@@ -50,14 +52,19 @@ impl IGraphEdit for OneiroiNodeEditor {
         self.base_mut().set_name(&name.get_file().split(".")[0]);
 
         //get the underlying nodes
-        let nodes = self.asset.bind().get_inner().get_nodes();
+        let nodes = self.asset.bind().get_editable().get_nodes();
+        let internal_embedded_asset_nodes =
+            self.asset.bind().get_editable().get_embedded_asset_nodes();
 
         //reconstruct saved resource nodes to display nodes
         for node_index in nodes {
-            //initialize new node with saved resource
-            let graph_node = self.asset.bind().get_inner().get_node(node_index).clone();
-            //.into_resource();
-            let mut node = OneiroiGraphNode::init_with_node(graph_node, node_index);
+            let mut node = OneiroiGraphNode::init_with_node(node_index);
+
+            /* if internal_embedded_asset_nodes.contains(&node_index) {
+                self.asset.bind().get_inner()
+                let sub_graph= OneiroiNodeEditor::init_with_asset(OneiroiAsset::init_from_inner())
+                self.base_mut().add_child(&node);
+            } */
 
             //set the name of the node to the index in the graph
             node.bind_mut()
@@ -74,23 +81,33 @@ impl IGraphEdit for OneiroiNodeEditor {
         }
 
         //reconstruct connections to display
-        let connections = self.asset.bind().get_inner().get_node_connections();
+        let connections = self.asset.bind().get_editable().get_node_connections();
         for index in connections {
-            let nodes = self.asset.bind().get_inner().get_edge_endpoints(index);
-            let connection = self.asset.bind().get_inner().get_connection(index);
+            let nodes = self.asset.bind().get_editable().get_edge_endpoints(index);
+            let connection = self.asset.bind().get_editable().get_connection(index);
 
             //add the conenction in the graph
             self.base_mut().connect_node(
                 &nodes.0.index().to_string(),
-                connection.port_from() as i32,
+                connection.0 as i32,
                 &nodes.1.index().to_string(),
-                connection.port_to() as i32,
+                connection.1 as i32,
             );
         }
 
         //add valid connections to the graph
         self.base_mut()
-            .add_valid_connection_type(DataTypeType::Mesh as i32, DataTypeType::Omni as i32);
+            .add_valid_connection_type(DataTypeKind::Mesh as i32, DataTypeKind::Omni as i32);
+        self.base_mut()
+            .add_valid_connection_type(DataTypeKind::Instance as i32, DataTypeKind::Omni as i32);
+        self.base_mut()
+            .add_valid_connection_type(DataTypeKind::Collection as i32, DataTypeKind::Omni as i32);
+        self.base_mut()
+            .add_valid_connection_type(DataTypeKind::Omni as i32, DataTypeKind::Curve as i32);
+        self.base_mut()
+            .add_valid_connection_type(DataTypeKind::Omni as i32, DataTypeKind::CubicBezier as i32);
+        self.base_mut()
+            .add_valid_connection_type(DataTypeKind::Mesh as i32, DataTypeKind::Omni as i32);
 
         //connect the signal from NodeTree
         let node_instantiated_handler = self.base().callable("on_node_instantiated");
@@ -137,9 +154,9 @@ impl IGraphEdit for OneiroiNodeEditor {
     fn is_node_hover_valid(
         &mut self,
         from_node: StringName,
-        from_port: i32,
+        from_socket: i32,
         to_node: StringName,
-        to_port: i32,
+        to_socket: i32,
     ) -> bool {
         let fni: u16 = from_node
             .to_string()
@@ -152,16 +169,18 @@ impl IGraphEdit for OneiroiNodeEditor {
             .parse()
             .expect("Parsing to index was not successfull");
         let tni = NodeIndex::from(tni);
-        !self
-            .asset
-            .bind()
-            .get_inner()
-            .allow_connection(fni, from_port as u8, tni, to_port as u8)
+        !self.asset.bind().get_editable().is_connection_allowed(
+            fni,
+            from_socket as u8,
+            tni,
+            to_socket as u8,
+        )
     }
 
-    fn physics_process(&mut self, _: f64) {
+    //TODO think of recomputation
+    /* fn physics_process(&mut self, _: f64) {
         self.asset.bind_mut().get_inner_mut().recompute();
-    }
+    } */
 }
 
 #[godot_api]
@@ -173,18 +192,20 @@ impl OneiroiNodeEditor {
         let index = self
             .asset
             .bind_mut()
-            .get_inner_mut()
+            .get_edit_mut()
             .add_node(&alias.to_string());
 
-        let node = self.asset.bind().get_inner().get_node(index).clone();
-        node.0.borrow_mut().set_position(oneiroi::asset::Vec2 {
-            x: position.x,
-            y: position.y,
-        });
+        self.asset.bind_mut().get_edit_mut().try_set_node_position(
+            index,
+            oneiroi::asset::Vec2 {
+                x: position.x,
+                y: position.y,
+            },
+        );
 
         //add and register in graph
         /* let mut node: Gd<OneiroiGraphNode> = */
-        let mut node = OneiroiGraphNode::init_with_node(node, index);
+        let mut node = OneiroiGraphNode::init_with_node(/* node, */ index);
 
         //set the name of the node to the index in the graph
         node.bind_mut()
@@ -215,9 +236,9 @@ impl OneiroiNodeEditor {
     fn on_connection_request(
         &mut self,
         from_node: StringName,
-        from_port: i32,
+        from_socket: i32,
         to_node: StringName,
-        to_port: i32,
+        to_socket: i32,
     ) {
         let fni: u16 = from_node
             .to_string()
@@ -232,23 +253,22 @@ impl OneiroiNodeEditor {
         let tni = NodeIndex::from(tni);
 
         //try committing the connection
-        let added_connection = self.asset.bind_mut().get_inner_mut().add_node_connection(
-            fni,
-            from_port as u8,
-            tni,
-            to_port as u8,
-        );
+        let added_connection = self
+            .asset
+            .bind_mut()
+            .get_edit_mut()
+            .try_add_node_connection(fni, from_socket as u8, tni, to_socket as u8);
 
         if added_connection.is_ok() {
             self.base_mut()
-                .connect_node(&from_node, from_port, &to_node, to_port);
+                .connect_node(&from_node, from_socket, &to_node, to_socket);
         } else {
             godot_error!(
-                " Cannot connect {} port {} to {} port {}",
+                " Cannot connect {} socket {} to {} socket {}",
                 from_node,
-                from_port,
+                from_socket,
                 to_node,
-                to_port
+                to_socket
             )
         }
     }
@@ -262,12 +282,12 @@ impl OneiroiNodeEditor {
     #[func]
     fn on_node_deselected(&mut self, node: Gd<Node>) {
         //Safety: This clone is necessary! Otherwise godot frees the node/resource for some reason?
-        let _ = node
-            .clone()
-            .cast::<OneiroiGraphNode>()
-            .bind()
-            .get_resource()
-            .clone();
+        /* let _ = node
+        .clone()
+        .cast::<OneiroiGraphNode>()
+        .bind()
+        .get_resource()
+        .clone(); */
         //let __ = node.clone();
         //let ___ = node.clone();
         //let ____ = node.clone();
@@ -283,7 +303,7 @@ impl OneiroiNodeEditor {
         godot_print!("{nodes}");
         for node in nodes.iter_shared() {
             let idx = NodeIndex::new(node.to_string().parse::<u16>().unwrap().into());
-            let Ok(_) = self.asset.bind_mut().get_inner_mut().delete_node(idx) else {
+            let Ok(_) = self.asset.bind_mut().get_edit_mut().delete_node(idx) else {
                 return;
             };
             //SAFETY: Node has to be there since it was passed us by Godot in this fn
@@ -299,8 +319,7 @@ impl OneiroiNodeEditor {
         //let index = node.cast::<OneiroiGraphNode>().bind().graph_index;
         //godot_print!("{:?}", node);
 
-        EditorInterface::singleton()
-            .edit_resource(&node.get("resource").to::<Gd<OneiroiNodeProxy>>());
+        EditorInterface::singleton().edit_resource(&node.get("resource").to::<Gd<OneiroiNode>>());
 
         //TODO this was most likely for the Geometry sheet
         /* godot::classes::Engine::singleton()
@@ -314,9 +333,9 @@ impl OneiroiNodeEditor {
     fn on_disconnection_request(
         &mut self,
         from_node: StringName,
-        from_port: i32,
+        from_socket: i32,
         to_node: StringName,
-        to_port: i32,
+        to_socket: i32,
     ) {
         let from: u16 = from_node
             .to_string()
@@ -330,14 +349,14 @@ impl OneiroiNodeEditor {
             .expect("Parsing to index was not successfull");
         let to = NodeIndex::from(to);
         self.base_mut()
-            .disconnect_node(&from_node, from_port, &to_node, to_port);
+            .disconnect_node(&from_node, from_socket, &to_node, to_socket);
         println!(
             "{:?}",
-            self.asset.bind_mut().get_inner_mut().delete_connection(
+            self.asset.bind_mut().get_edit_mut().delete_connection(
                 from,
-                from_port as u8,
+                from_socket as u8,
                 to,
-                to_port as u8,
+                to_socket as u8,
             )
         );
     }
