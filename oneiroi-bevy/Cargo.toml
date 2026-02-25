@@ -1,6 +1,6 @@
 [package]
 name = "oneiroi-bevy"
-description = "Bevy integration for the Oneiroi procedural-modeling tool."
+description = "Bevy integration for the procedural-modeling tool: Oneiroi."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
