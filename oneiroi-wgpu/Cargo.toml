@@ -1,6 +1,6 @@
 [package]
-name = "oneiroi-bevy"
-description = "Bevy integration for the procedural-modeling tool: Oneiroi."
+name = "oneiroi-wgpu"
+description = ""
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -10,5 +10,4 @@ readme.workspace = true
 publish = true
 
 [dependencies]
-bevy = "0.19.0-rc.3"
 oneiroi.workspace = true

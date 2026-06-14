@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["oneiroi-godot", "oneiroi", "oneiroi-cpp", "oneiroi-bevy"]
+members = [
+    "oneiroi-godot",
+    "oneiroi",
+    "oneiroi-cpp",
+    "oneiroi-bevy",
+    "oneiroi-wgpu",
+]
 package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
 package.license = "GPL-3.0-only"
