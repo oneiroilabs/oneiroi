@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use oneiroi_bevy::Oneiroi;
 
 fn main() {
     App::new()
@@ -16,6 +17,7 @@ fn main() {
             DefaultPlugins.set(ImagePlugin::default_nearest()),
             #[cfg(not(target_arch = "wasm32"))]
             WireframePlugin::default(),
+            Oneiroi,
         ))
         .add_systems(Startup, setup)
         .add_systems(
