@@ -217,7 +217,7 @@ fn init_compute_pipeline(
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
-    let layout = BindGroupLayoutDescriptor::new(
+    /* let layout = BindGroupLayoutDescriptor::new(
         "",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
@@ -238,7 +238,43 @@ fn init_compute_pipeline(
         shader: shader.clone(),
         ..default()
     });
-    commands.insert_resource(ComputePipeline { layout, pipeline });
+    commands.insert_resource(ComputePipeline { layout, pipeline }); */
+    pipeline_cache.queue_render_pipeline(descriptor)
+    //let shader = ass.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    let shader = asset_server.load(SHADER_ASSET_PATH);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            task: Some(wgpu::TaskState {
+                module: &shader,
+                entry_point: Some("ts_main"),
+                compilation_options: Default::default(),
+            }),
+            mesh: wgpu::MeshState {
+                module: &shader,
+                entry_point: Some("ms_main"),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.view_formats[0].into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
 }
 
 // A uniform that holds the vertex and index offsets
@@ -344,4 +380,11 @@ fn compute_mesh(
 
         pass.pop_debug_group();
     }
+
+    let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
 }
