@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use wgpu::SurfaceConfiguration;
+use wgpu::{Backends, SurfaceConfiguration};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -17,7 +17,7 @@ struct State {
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
 
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Option<wgpu::RenderPipeline>,
 }
 
 impl State {
@@ -25,14 +25,38 @@ impl State {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
             Box::new(display),
         ));
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .unwrap();
+
+        let required_features =
+            wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS;
+
+        let adapters = instance.enumerate_adapters(Backends::all()).await;
+
+        let mut chosen_adapter = None;
+        for adapter in adapters {
+            /* if let Some(surface) = surface {
+                if !adapter.is_surface_supported(surface) {
+                    continue;
+                }
+            } */
+
+            let adapter_features = adapter.features();
+            if !adapter_features.contains(required_features) {
+                continue;
+            } else {
+                chosen_adapter = Some(adapter);
+                break;
+            }
+        }
+
+        let adapter = chosen_adapter.expect("No suitable GPU adapters found on the system!");
+        /* let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .unwrap(); */
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::EXPERIMENTAL_MESH_SHADER
-                    | wgpu::Features::PASSTHROUGH_SHADERS,
+                required_features,
                 required_limits: wgpu::Limits::defaults()
                     .using_recommended_minimum_mesh_shader_values(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
@@ -46,44 +70,7 @@ impl State {
         let surface = instance.create_surface(window.clone()).unwrap();
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
-
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            task: Some(wgpu::TaskState {
-                module: &shader,
-                entry_point: Some("ts_main"),
-                compilation_options: Default::default(),
-            }),
-            mesh: wgpu::MeshState {
-                module: &shader,
-                entry_point: Some("ms_main"),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(
-                    surface.get_configuration().unwrap().view_formats[0].into(),
-                )],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
-        let state = State {
+        let mut state = State {
             instance,
             window,
             device,
@@ -91,11 +78,57 @@ impl State {
             size,
             surface,
             surface_format,
-            pipeline,
+            pipeline: None,
         };
 
         // Configure surface for the first time
         state.configure_surface();
+
+        let shader = state
+            .device
+            .create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let pipeline_layout =
+            state
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[],
+                    immediate_size: 0,
+                });
+        let pipeline = state
+            .device
+            .create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+                label: None,
+                layout: Some(&pipeline_layout),
+                task: Some(wgpu::TaskState {
+                    module: &shader,
+                    entry_point: Some("ts_main"),
+                    compilation_options: Default::default(),
+                }),
+                mesh: wgpu::MeshState {
+                    module: &shader,
+                    entry_point: Some("ms_main"),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(
+                        state.surface.get_configuration().unwrap().view_formats[0].into(),
+                    )],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        state.pipeline = Some(pipeline);
 
         state
     }
@@ -182,7 +215,7 @@ impl State {
         });
 
         rpass.push_debug_group("Prepare data for draw.");
-        rpass.set_pipeline(&self.pipeline);
+        rpass.set_pipeline(self.pipeline.as_ref().unwrap());
         rpass.pop_debug_group();
         rpass.insert_debug_marker("Draw!");
         rpass.draw_mesh_tasks(1, 1, 1);
