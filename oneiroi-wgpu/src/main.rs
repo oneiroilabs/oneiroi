@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use renderdoc::{InputButton, RenderDoc, V110, V141};
 use wgpu::{Backends, SurfaceConfiguration};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    keyboard::{KeyCode, NativeKeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -204,7 +206,7 @@ impl State {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -299,5 +301,8 @@ fn main() {
     // event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::default();
+    let mut renderdoc: RenderDoc<V110> = RenderDoc::new().unwrap();
+    renderdoc.start_frame_capture(std::ptr::null(), std::ptr::null());
     event_loop.run_app(&mut app).unwrap();
+    renderdoc.end_frame_capture(std::ptr::null(), std::ptr::null());
 }
