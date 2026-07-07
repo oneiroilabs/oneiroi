@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use wgpu::SurfaceConfiguration;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -15,6 +16,8 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
+
+    pipeline: wgpu::RenderPipeline,
 }
 
 impl State {
@@ -27,7 +30,13 @@ impl State {
             .await
             .unwrap();
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::EXPERIMENTAL_MESH_SHADER
+                    | wgpu::Features::PASSTHROUGH_SHADERS,
+                required_limits: wgpu::Limits::defaults()
+                    .using_recommended_minimum_mesh_shader_values(),
+                ..Default::default()
+            })
             .await
             .unwrap();
 
@@ -37,6 +46,42 @@ impl State {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            task: Some(wgpu::TaskState {
+                module: &shader,
+                entry_point: Some("ts_main"),
+                compilation_options: Default::default(),
+            }),
+            mesh: wgpu::MeshState {
+                module: &shader,
+                entry_point: Some("ms_main"),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(
+                    surface.get_configuration().unwrap().view_formats[0].into(),
+                )],
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
         let state = State {
             instance,
             window,
@@ -45,6 +90,7 @@ impl State {
             size,
             surface,
             surface_format,
+            pipeline,
         };
 
         // Configure surface for the first time
@@ -117,7 +163,7 @@ impl State {
         // Renders a GREEN screen
         let mut encoder = self.device.create_command_encoder(&Default::default());
         // Create the renderpass which will clear the screen.
-        let renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &texture_view,
@@ -134,10 +180,16 @@ impl State {
             multiview_mask: None,
         });
 
+        rpass.push_debug_group("Prepare data for draw.");
+        rpass.set_pipeline(&self.pipeline);
+        rpass.pop_debug_group();
+        rpass.insert_debug_marker("Draw!");
+        rpass.draw_mesh_tasks(1, 1, 1);
+
         // If you wanted to call any drawing commands, they would go here.
 
         // End the renderpass.
-        drop(renderpass);
+        drop(rpass);
 
         // Submit the command in the queue to execute
         self.queue.submit([encoder.finish()]);

@@ -11,7 +11,10 @@ publish = true
 
 [dependencies]
 oneiroi.workspace = true
-wgpu = { version = "30.0.0", default-features = false, features = ["dx12"] }
+wgpu = { version = "30.0.0", default-features = false, features = [
+    "dx12",
+    "wgsl",
+] }
 # Temp winit stuff
 winit = { version = "0.30.8", features = ["android-native-activity"] }
 env_logger = "0.11"
