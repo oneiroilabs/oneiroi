@@ -35,6 +35,7 @@ impl State {
                     | wgpu::Features::PASSTHROUGH_SHADERS,
                 required_limits: wgpu::Limits::defaults()
                     .using_recommended_minimum_mesh_shader_values(),
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 ..Default::default()
             })
             .await
