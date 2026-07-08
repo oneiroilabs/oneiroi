@@ -4119,6 +4119,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "mach-dxcompiler-rs"
+version = "0.1.4+2024.11.22-df583a3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e3cd67e8ea2ba061339150970542cf1c60ba44c6d17e31279cbc133a4b018f8"
+
+[[package]]
 name = "mach2"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4210,8 +4216,7 @@ dependencies = [
 [[package]]
 name = "naga"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23bf0a141a9ab6f07dbb492db53245e464bc9db42f407772d9ae03d83a2c1033"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "arrayvec",
  "bit-set 0.10.0",
@@ -4235,8 +4240,7 @@ dependencies = [
 [[package]]
 name = "naga-types"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "658200ddc25c6c7b860747516d132d1b284c0fafb7a380233acee9a72fb30e11"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -6667,8 +6671,7 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d8f4bd44d92da5270f03409dba9f952dab24f128e05d6a554926101d1bf9114"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "arrayvec",
  "bitflags 2.11.0",
@@ -6725,8 +6728,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08763620e76fc980bca7bf84de82568614487a53172dd968d89187282eb87fa2"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "arrayvec",
  "bit-set 0.10.0",
@@ -6793,8 +6795,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f76bc9c1c186ff3d9054e0d224c93c8c1c79d6653907c5249a5c1ea1a2cb1e43"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "wgpu-hal 30.0.0",
 ]
@@ -6856,8 +6857,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf765132d8d5f50e192e7880464890c13f4e7457aafe8e5466e8174586e9f101"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "arrayvec",
  "bit-set 0.10.0",
@@ -6869,6 +6869,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "libloading",
  "log",
+ "mach-dxcompiler-rs",
  "naga 30.0.0",
  "naga-types",
  "once_cell",
@@ -6901,8 +6902,7 @@ dependencies = [
 [[package]]
 name = "wgpu-naga-bridge"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9eaac644e5008925c78567d272b9d66ef83da55a53cc17fc7daade7bb6e66e5"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "naga 30.0.0",
  "wgpu-types 30.0.0",
@@ -6926,8 +6926,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "30.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a9c93c2b35edde326df60ffdee4c0f5864eac3011d6768b70d43f028ad93565"
+source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#875cfdcc9595f54911a403b11e7afd591a440e0c"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",

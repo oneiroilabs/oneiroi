@@ -29,7 +29,7 @@ impl State {
         ));
 
         let required_features =
-            wgpu::Features::EXPERIMENTAL_MESH_SHADER | wgpu::Features::PASSTHROUGH_SHADERS;
+            wgpu::Features::EXPERIMENTAL_WORK_GRAPHS | wgpu::Features::PASSTHROUGH_SHADERS;
 
         let adapters = instance.enumerate_adapters(Backends::all()).await;
 
@@ -40,8 +40,9 @@ impl State {
                     continue;
                 }
             } */
-
             let adapter_features = adapter.features();
+            println!("{:?}", adapter.get_info());
+            println!("{adapter_features}");
             if !adapter_features.contains(required_features) {
                 continue;
             } else {
@@ -301,8 +302,8 @@ fn main() {
     // event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = App::default();
-    let mut renderdoc: RenderDoc<V110> = RenderDoc::new().unwrap();
-    renderdoc.start_frame_capture(std::ptr::null(), std::ptr::null());
+    //let mut renderdoc: RenderDoc<V110> = RenderDoc::new().unwrap();
+    //renderdoc.start_frame_capture(std::ptr::null(), std::ptr::null());
     event_loop.run_app(&mut app).unwrap();
-    renderdoc.end_frame_capture(std::ptr::null(), std::ptr::null());
+    //renderdoc.end_frame_capture(std::ptr::null(), std::ptr::null());
 }
