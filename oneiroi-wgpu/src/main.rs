@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use renderdoc::{InputButton, RenderDoc, V110, V141};
-use wgpu::{Backends, SurfaceConfiguration};
+use wgpu::{
+    Backends, PassthroughShaderEntryPoint, SurfaceConfiguration,
+    wgt::CreateShaderModuleDescriptorPassthrough,
+};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -28,8 +31,9 @@ impl State {
             Box::new(display),
         ));
 
-        let required_features =
-            wgpu::Features::EXPERIMENTAL_WORK_GRAPHS | wgpu::Features::PASSTHROUGH_SHADERS;
+        let required_features = wgpu::Features::EXPERIMENTAL_MESH_SHADER
+            | wgpu::Features::EXPERIMENTAL_WORK_GRAPHS
+            | wgpu::Features::PASSTHROUGH_SHADERS;
 
         let adapters = instance.enumerate_adapters(Backends::all()).await;
 
@@ -132,6 +136,18 @@ impl State {
             });
 
         state.pipeline = Some(pipeline);
+
+        let wg_shader = unsafe {
+            device.create_shader_module_passthrough(CreateShaderModuleDescriptorPassthrough {
+                label: Some("work-graph-shader"),
+                entry_points: std::borrow::Cow::Owned([PassthroughShaderEntryPoint {
+                    name: todo!(),
+                    workgroup_size: todo!(),
+                }]),
+                hlsl: Some(Cow::Borrowed("shader.hlsl")),
+                ..Default::default()
+            })
+        };
 
         state
     }

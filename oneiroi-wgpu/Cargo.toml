@@ -14,7 +14,7 @@ oneiroi.workspace = true
 wgpu = { version = "30.0.0", default-features = false, features = [
     "dx12",
     "wgsl",
-    "static-dxc",
+    #"renderdoc",
 ], branch = "work-graphs", git = "https://github.com/kistz/wgpu.git" }
 # Temp winit stuff
 winit = { version = "0.30.8", features = ["android-native-activity"] }
