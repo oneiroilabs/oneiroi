@@ -23,7 +23,9 @@ pub unsafe fn setup_work_graph(
     // 2. Load and Compile Shader Library (Pre-compiled or via DXC)
     // -------------------------------------------------------------
     // For production, load your compiled DXIL bytecode (.bin) file containing SM 6.8
-    let dxil_bytecode: Vec<u8> = std::fs::read("work_graph.dxil").expect("Failed to load DXIL");
+    let dxil_bytecode: Vec<u8> =
+        std::fs::read(env!("CARGO_MANIFEST_DIR").to_string() + "/src/output.dxil")
+            .expect("Failed to load DXIL");
 
     // -------------------------------------------------------------
     // 3. Define the State Object Subobjects to assemble the Work Graph

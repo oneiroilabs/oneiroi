@@ -3,7 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 use oneiroi_wgpu::{dispatch_graph, setup_work_graph};
 use renderdoc::{InputButton, RenderDoc, V110, V141};
 use wgpu::{
-    Backends, PassthroughShaderEntryPoint, SurfaceConfiguration,
+    Backends, PassthroughShaderEntryPoint, SurfaceConfiguration, wgc::api::Dx12,
     wgt::CreateShaderModuleDescriptorPassthrough,
 };
 use windows::{
@@ -269,7 +269,7 @@ impl State {
         self.queue.present(surface_texture); */
 
         unsafe {
-            encoder.as_hal_mut(|h: Option<&mut wgpu::hal::dx12::CommandEncoder>| unsafe {
+            encoder.as_hal_mut::<Dx12, _, _>(|h| unsafe {
                 let cmd_list_10: ID3D12GraphicsCommandList10 =
                     h.unwrap().raw_list().cast().unwrap();
 
