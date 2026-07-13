@@ -1,4 +1,4 @@
-//! This example shows how to initialize an empty mesh with a Handle
+/* //! This example shows how to initialize an empty mesh with a Handle
 //! and a render-world only usage. That buffer is then filled by a
 //! compute shader on the GPU without transferring data back
 //! to the CPU.
@@ -388,3 +388,6 @@ fn compute_mesh(
         immediate_size: 0,
     });
 }
+ */
+
+fn main() {}

@@ -1,4 +1,5 @@
-use bevy::ecs::resource::Resource;
+/* use bevy::ecs::resource::Resource;
 
 #[derive(Resource)]
 struct OneiroiSingleton;
+ */

@@ -1,9 +1,16 @@
 use std::{borrow::Cow, sync::Arc};
 
+use oneiroi_wgpu::{dispatch_graph, setup_work_graph};
 use renderdoc::{InputButton, RenderDoc, V110, V141};
 use wgpu::{
     Backends, PassthroughShaderEntryPoint, SurfaceConfiguration,
     wgt::CreateShaderModuleDescriptorPassthrough,
+};
+use windows::{
+    Win32::Graphics::Direct3D12::{
+        self, ID3D12CommandList, ID3D12GraphicsCommandList10, ID3D12Resource, ID3D12StateObject,
+    },
+    core::Interface,
 };
 use winit::{
     application::ApplicationHandler,
@@ -21,8 +28,9 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
-
-    pipeline: Option<wgpu::RenderPipeline>,
+    // pipeline: Option<wgpu::RenderPipeline>,
+    state_object: ID3D12StateObject,
+    backing_mem: ID3D12Resource,
 }
 
 impl State {
@@ -77,21 +85,10 @@ impl State {
         let surface = instance.create_surface(window.clone()).unwrap();
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
-        let mut state = State {
-            instance,
-            window,
-            device,
-            queue,
-            size,
-            surface,
-            surface_format,
-            pipeline: None,
-        };
 
         // Configure surface for the first time
-        state.configure_surface();
 
-        let shader = state
+        /* let shader = state
             .device
             .create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout =
@@ -133,22 +130,44 @@ impl State {
                 multisample: Default::default(),
                 multiview: None,
                 cache: None,
-            });
+            }); */
 
-        state.pipeline = Some(pipeline);
+        /* state.pipeline = Some(pipeline); */
 
         let wg_shader = unsafe {
             device.create_shader_module_passthrough(CreateShaderModuleDescriptorPassthrough {
                 label: Some("work-graph-shader"),
-                entry_points: std::borrow::Cow::Owned([PassthroughShaderEntryPoint {
-                    name: todo!(),
-                    workgroup_size: todo!(),
-                }]),
                 hlsl: Some(Cow::Borrowed("shader.hlsl")),
                 ..Default::default()
             })
         };
 
+        let what = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() };
+
+        let temp_device = what
+            .unwrap()
+            .raw_device()
+            .cast::<Direct3D12::ID3D12Device5>()
+            .unwrap();
+
+        /* let what =
+        unsafe { device.CreateStateObject::<ID3D12StateObject>(&state_object) }.unwrap(); */
+
+        let (state_object, backing_mem) = unsafe { setup_work_graph(&temp_device) }.unwrap();
+
+        let mut state = State {
+            instance,
+            window,
+            device,
+            queue,
+            size,
+            surface,
+            surface_format,
+            state_object,
+            backing_mem,
+            //pipeline: None,
+        };
+        state.configure_surface();
         state
     }
 
@@ -216,7 +235,7 @@ impl State {
         // Renders a GREEN screen
         let mut encoder = self.device.create_command_encoder(&Default::default());
         // Create the renderpass which will clear the screen.
-        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        /*  let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &texture_view,
@@ -247,7 +266,16 @@ impl State {
         // Submit the command in the queue to execute
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
-        self.queue.present(surface_texture);
+        self.queue.present(surface_texture); */
+
+        unsafe {
+            encoder.as_hal_mut(|h: Option<&mut wgpu::hal::dx12::CommandEncoder>| unsafe {
+                let cmd_list_10: ID3D12GraphicsCommandList10 =
+                    h.unwrap().raw_list().cast().unwrap();
+
+                dispatch_graph(&cmd_list_10, &self.state_object, &self.backing_mem)
+            });
+        }
     }
 }
 
