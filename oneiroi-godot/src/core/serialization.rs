@@ -104,11 +104,11 @@ impl IResourceFormatLoader for OneiroiAssetLoader {
     }
 
     fn handles_type(&self, typ: StringName) -> bool {
-        typ == "OneiroiAsset".into()
+        typ == "OneiroiAsset"
     }
 
     fn get_resource_type(&self, path: GString) -> GString {
-        if path.get_extension().to_lower() == ".oni".into() {
+        if path.get_extension().to_lower() == ".oni" {
             "OneiroiAsset".into()
         } else {
             "".into()

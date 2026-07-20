@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use add_node_popup::AddNodePopup;
 use godot::{
     classes::{
@@ -307,7 +305,7 @@ impl OneiroiNodeEditor {
                 return;
             };
             //SAFETY: Node has to be there since it was passed us by Godot in this fn
-            let node = self.base_mut().find_child(node.arg()).unwrap();
+            let node = self.base_mut().find_child(&node.to_gstring()).unwrap();
             self.base_mut().remove_child(&node);
             EditorInterface::singleton().edit_node(Gd::null_arg());
         }

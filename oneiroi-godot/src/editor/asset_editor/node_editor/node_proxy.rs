@@ -3,9 +3,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use godot::classes::Engine;
-use godot::global::PropertyUsageFlags;
-use godot::meta::{ClassName, PropertyHintInfo, PropertyInfo};
 use godot::prelude::*;
+use godot::register::info::{PropertyHintInfo, PropertyInfo, PropertyUsageFlags};
 use godot::{classes::Resource, obj::Gd};
 
 use oneiroi::asset::editable::AssetEditorMethods;
@@ -34,7 +33,7 @@ impl Drop for OneiroiNode {
 
 #[godot_api]
 impl IResource for OneiroiNode {
-    fn get_property_list(&mut self) -> Vec<PropertyInfo> {
+    fn on_get_property_list(&mut self) -> Vec<PropertyInfo> {
         let mut properties = Vec::<PropertyInfo>::new();
 
         for prop in self
@@ -45,7 +44,7 @@ impl IResource for OneiroiNode {
         {
             properties.push(PropertyInfo {
                 variant_type: prop.get_type().variant_type(),
-                class_name: ClassName::none(),
+                class_name: StringName::default(),
                 property_name: prop.name().into(),
                 hint_info: PropertyHintInfo::none(),
                 usage: PropertyUsageFlags::EDITOR,
@@ -64,7 +63,7 @@ impl IResource for OneiroiNode {
         None
     } */
 
-    fn get_property(&self, property: StringName) -> Option<Variant> {
+    fn on_get(&self, property: StringName) -> Option<Variant> {
         if let Ok(prop) = self
             .asset
             .bind()
@@ -81,7 +80,7 @@ impl IResource for OneiroiNode {
         None
     }
 
-    fn set_property(&mut self, property: StringName, value: Variant) -> bool {
+    fn on_set(&mut self, property: StringName, value: Variant) -> bool {
         //godot_print!("Called Set Property");
         let Ok(_) = self.asset.bind_mut().get_edit_mut().try_set_node_property(
             self.node_index,

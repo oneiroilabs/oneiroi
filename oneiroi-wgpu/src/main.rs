@@ -39,8 +39,8 @@ impl State {
             Box::new(display),
         ));
 
-        let required_features = wgpu::Features::EXPERIMENTAL_MESH_SHADER
-            | wgpu::Features::EXPERIMENTAL_WORK_GRAPHS
+        let required_features = /* wgpu::Features::EXPERIMENTAL_MESH_SHADER
+            | */ wgpu::Features::EXPERIMENTAL_WORK_GRAPHS
             | wgpu::Features::PASSTHROUGH_SHADERS;
 
         let adapters = instance.enumerate_adapters(Backends::all()).await;

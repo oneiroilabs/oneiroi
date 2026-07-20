@@ -1,5 +1,6 @@
 use godot::classes::{EditorInspectorPlugin, EditorPlugin, IEditorInspectorPlugin, IEditorPlugin};
-use godot::{global, prelude::*};
+use godot::prelude::*;
+use godot::register::info::{PropertyHint, PropertyUsageFlags};
 use script_plugin::OneiroiScriptPlugin;
 
 use crate::editor::asset_editor::node_editor::node_proxy::OneiroiNode;
@@ -20,16 +21,16 @@ impl IEditorInspectorPlugin for OneiroiNodeInspectorPlugin {
         object: Option<Gd<Object>>, // object that is being inspected
         _value_type: VariantType,
         name: GString,
-        _hint_type: global::PropertyHint,
+        _hint_type: PropertyHint,
         _hit_string: GString,
-        _flags: global::PropertyUsageFlags,
+        _flags: PropertyUsageFlags,
         _wide: bool,
     ) -> bool {
         //remove the build in resource editors
-        if name == "resource_local_to_scene".into()
-            || name == "resource_path".into()
-            || name == "resource_name".into()
-            || name == "script".into()
+        if name == "resource_local_to_scene"
+            || name == "resource_path"
+            || name == "resource_name"
+            || name == "script"
         {
             return false;
         }
@@ -37,7 +38,7 @@ impl IEditorInspectorPlugin for OneiroiNodeInspectorPlugin {
         let object = object.unwrap().cast::<OneiroiNode>();
         let id = object.bind().get_index();
 
-        match object.get(name.arg()).get_type() {
+        match object.get(&name.to_string_name()).get_type() {
             VariantType::VECTOR3 => self
                 .base_mut()
                 .add_property_editor_ex(&name, &OneiroiScriptPlugin::init_with_node_id(id))

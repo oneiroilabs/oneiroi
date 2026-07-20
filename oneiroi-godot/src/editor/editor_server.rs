@@ -11,7 +11,7 @@ pub struct OneiroiEditorServer {
     base: Base<Object>,
     preview_world: Gd<World3D>,
     registered_assets: Vec<Gd<OneiroiAsset>>,
-    #[var]
+    #[var(pub)]
     active_asset: Option<Gd<OneiroiAsset>>,
 }
 
@@ -58,8 +58,8 @@ pub fn register_preview_server() {
     );
 }
 
-pub fn unregister_preview_server(level: InitLevel) {
-    if level == InitLevel::Scene {
+pub fn unregister_preview_server(level: InitStage) {
+    if level == InitStage::Scene {
         // Get the `Engine` instance and `StringName` for your singleton.
         let mut engine = Engine::singleton();
         //TODO rename this most likely

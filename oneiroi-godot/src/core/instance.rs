@@ -5,9 +5,8 @@ use godot::{
         ArrayMesh, Curve3D, Material, Path3D, RenderingServer, notify::Node3DNotification,
         rendering_server::MultimeshTransformFormat,
     },
-    global::PropertyUsageFlags,
-    meta::{ClassName, PropertyHintInfo, PropertyInfo},
     prelude::*,
+    register::info::{PropertyHintInfo, PropertyInfo, PropertyUsageFlags},
 };
 use oneiroi::{
     asset::{NodeIndex, instance::AssetInstance},
@@ -36,7 +35,7 @@ pub struct OneiroiInstance {
     asset_instance: Option<AssetInstance>,
 
     /// The associated asset this OneiroiInstance processes.
-    #[var(get,set=set_asset)]
+    #[var(set=set_asset)]
     #[export]
     asset: Option<Gd<OneiroiAsset>>,
 
@@ -63,7 +62,7 @@ impl INode3D for OneiroiInstance {
         }
     }
 
-    fn get_property_list(&mut self) -> Vec<PropertyInfo> {
+    fn on_get_property_list(&mut self) -> Vec<PropertyInfo> {
         let mut properties = Vec::<PropertyInfo>::new();
         if self.asset.is_none() || self.asset_instance.is_none() {
             return properties;
@@ -72,7 +71,7 @@ impl INode3D for OneiroiInstance {
         for prop in self.asset_instance.as_ref().unwrap().get_properties() {
             properties.push(PropertyInfo {
                 variant_type: prop.get_type().variant_type(),
-                class_name: ClassName::none(), //prop.get_type().get_class_name(), //instead we get the class name
+                class_name: StringName::default(), //prop.get_type().get_class_name(), //instead we get the class name
                 property_name: prop.name().into(),
                 hint_info: PropertyHintInfo::none(),
                 usage: PropertyUsageFlags::DEFAULT,
@@ -81,7 +80,7 @@ impl INode3D for OneiroiInstance {
         properties
     }
 
-    fn property_get_revert(&self, property: StringName) -> Option<Variant> {
+    fn on_property_get_revert(&self, property: StringName) -> Option<Variant> {
         self.asset_instance.as_ref()?;
         for prop in self.asset_instance.as_ref().unwrap().get_properties() {
             if prop.name() == property.to_string() {
@@ -92,7 +91,7 @@ impl INode3D for OneiroiInstance {
         None
     }
 
-    fn get_property(&self, property: StringName) -> Option<Variant> {
+    fn on_get(&self, property: StringName) -> Option<Variant> {
         self.asset_instance.as_ref()?;
         if let Ok(prop) = self
             .asset_instance
@@ -105,7 +104,7 @@ impl INode3D for OneiroiInstance {
         None
     }
 
-    fn set_property(&mut self, property: StringName, value: Variant) -> bool {
+    fn on_set(&mut self, property: StringName, value: Variant) -> bool {
         if self.asset_instance.is_none() {
             return false;
         }
@@ -393,12 +392,8 @@ impl OneiroiInstance {
 
                         self.base_mut().add_child(&gd_path);
 
-                        let scene_root = self
-                            .base_mut()
-                            .get_tree()
-                            .unwrap()
-                            .get_edited_scene_root()
-                            .unwrap();
+                        let scene_root =
+                            self.base_mut().get_tree().get_edited_scene_root().unwrap();
                         gd_path.set_owner(&scene_root);
                         godot_print!("{:?}", gd_path)
                     }

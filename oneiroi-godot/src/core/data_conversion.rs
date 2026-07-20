@@ -1,7 +1,7 @@
 use std::mem;
 
 use godot::{
-    builtin::{Color as GDColor, Variant, VariantArray, VariantType, Vector3},
+    builtin::{Color as GDColor, VarArray, Variant, VariantType, Vector3},
     classes::{
         ArrayMesh, Curve3D, Material as GDMaterial, StandardMaterial3D,
         mesh::{ArrayType, PrimitiveType},
@@ -97,7 +97,7 @@ impl TypeConvert for Mesh {
 
         let mut mesh = ArrayMesh::new_gd();
 
-        let mut surface = VariantArray::new();
+        let mut surface = VarArray::new();
         surface.resize(ArrayType::MAX.ord().try_into().unwrap(), &Variant::nil());
         surface.set(
             ArrayType::VERTEX.ord().try_into().unwrap(),
@@ -568,7 +568,7 @@ impl TypeConvert for Variant {
             VariantType::OBJECT => {
                 let object = self.to::<Gd<Object>>();
                 //Godots Curve3D uses Cubic Bezier curves internally
-                if object.get_class() == "Curve3D".into() {
+                if object.get_class() == "Curve3D" {
                     let curve = object.cast::<Curve3D>();
                     OwnedDataType::CubicBezier(Box::new(curve.convert()))
                 } else {
