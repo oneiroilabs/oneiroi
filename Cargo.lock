@@ -1467,7 +1467,6 @@ dependencies = [
 [[package]]
 name = "naga"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -1491,7 +1490,6 @@ dependencies = [
 [[package]]
 name = "naga-types"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -3014,7 +3012,6 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.0",
@@ -3037,7 +3034,6 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -3068,7 +3064,6 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "wgpu-hal",
 ]
@@ -3076,7 +3071,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -3110,7 +3104,6 @@ dependencies = [
 [[package]]
 name = "wgpu-naga-bridge"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "naga",
  "wgpu-types",
@@ -3119,7 +3112,6 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "30.0.0"
-source = "git+https://github.com/kistz/wgpu.git?branch=work-graphs#f24fa0eb87b01edcc7731b3c7bcc83d11937ced9"
 dependencies = [
  "bitflags 2.13.0",
  "bytemuck",

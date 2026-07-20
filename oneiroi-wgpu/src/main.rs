@@ -270,10 +270,9 @@ impl State {
 
         unsafe {
             encoder.as_hal_mut::<Dx12, _, _>(|h| unsafe {
-                let cmd_list_10: ID3D12GraphicsCommandList10 =
-                    h.unwrap().raw_list().cast().unwrap();
+                let cmd_list_10 = h.unwrap().raw_list();
 
-                dispatch_graph(&cmd_list_10, &self.state_object, &self.backing_mem)
+                dispatch_graph(cmd_list_10, &self.state_object, &self.backing_mem)
             });
         }
     }

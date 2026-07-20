@@ -94,8 +94,15 @@ pub unsafe fn setup_work_graph(
     let huh = work_graph_properties.GetNumEntrypoints(graph_index);
     let aha = work_graph_properties.GetProgramName(graph_index);
     let mut memory_requirements = D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS::default();
-    println!("{graph_index}, {huh}, {}", aha.to_string().unwrap());
-    work_graph_properties.GetWorkGraphMemoryRequirements(graph_index, &mut memory_requirements);
+    unsafe {
+        work_graph_properties.GetWorkGraphMemoryRequirements(graph_index, &mut memory_requirements)
+    };
+    println!(
+        "{graph_index}, {huh}, {},{}",
+        aha.to_string().unwrap(),
+        memory_requirements.MaxSizeInBytes
+    );
+
     println!("HMM");
     // Allocate a raw GPU buffer matched exactly to 'memory_requirements.MaxSizeInBytes'
     let backing_memory_buffer = create_gpu_buffer(device, memory_requirements.MaxSizeInBytes)?;
@@ -106,9 +113,11 @@ pub unsafe fn setup_work_graph(
 // Utility function to instantiate raw default-heap buffers natively
 unsafe fn create_gpu_buffer(
     device: &ID3D12Device,
-    size: u64,
+    mut size: u64,
 ) -> Result<ID3D12Resource, windows::core::Error> {
     println!("{size}");
+
+    size = 1024;
     let mut resource: Option<ID3D12Resource> = None;
     let heap_properties = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_DEFAULT,
@@ -120,7 +129,7 @@ unsafe fn create_gpu_buffer(
         Height: 1,
         DepthOrArraySize: 1,
         MipLevels: 1,
-        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
             Count: 1,
@@ -140,12 +149,13 @@ unsafe fn create_gpu_buffer(
 }
 
 pub unsafe fn dispatch_graph(
-    command_list: &ID3D12GraphicsCommandList,
+    command_list: &mut ID3D12GraphicsCommandList,
     state_object: &ID3D12StateObject,
     backing_memory: &ID3D12Resource,
 ) -> Result<(), windows::core::Error> {
     // 1. Cast command list up to Interface version 10 to expose DispatchGraph
     let cmd_list_10: ID3D12GraphicsCommandList10 = command_list.cast()?;
+    println!("UHM");
 
     // 2. Provide the GPU memory pointer where the graph schedules nodes
     let program_identifier = state_object
@@ -168,5 +178,6 @@ pub unsafe fn dispatch_graph(
     // 3. Dispatch the workload autonomously outside of any render pass or draw scopes
     cmd_list_10.DispatchGraph(&dispatch_desc);
 
+    println!("YEP");
     Ok(())
 }
