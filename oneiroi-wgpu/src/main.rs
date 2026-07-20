@@ -147,7 +147,7 @@ impl State {
         let temp_device = what
             .unwrap()
             .raw_device()
-            .cast::<Direct3D12::ID3D12Device5>()
+            .cast::<Direct3D12::ID3D12Device14>()
             .unwrap();
 
         /* let what =
