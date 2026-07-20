@@ -60,6 +60,7 @@ static const uint c_numEntryRecords = 4;
 [NodeMaxDispatchGrid(16,1,1)] // Contrived value, input records from the app only top out at grid size of 4.  
                               // This declaration should be as accurate as possible, but not too small (undefined behavior).
 [NumThreads(2,1,1)]
+[NodeIsProgramEntry]
 void firstNode(
     DispatchNodeInputRecord<entryRecord> inputData,
     [MaxRecords(2)] NodeOutput<secondNodeInput> secondNode,

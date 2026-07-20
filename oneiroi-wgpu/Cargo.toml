@@ -15,7 +15,7 @@ wgpu = { version = "30.0.0", default-features = false, features = [
     "dx12",
     "wgsl",
     #"renderdoc",
-], branch = "work-graphs", git = "https://github.com/kistz/wgpu.git" }
+], path = "../../wgpu/wgpu" }
 
 windows = { version = "0", features = [
     "Win32_Graphics_Direct3D12",

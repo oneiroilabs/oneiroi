@@ -1,9 +1,11 @@
+use std::println;
+
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Interface, PCSTR};
 
 pub unsafe fn setup_work_graph(
-    device: &ID3D12Device5,
+    device: &ID3D12Device14,
 ) -> Result<(ID3D12StateObject, ID3D12Resource), windows::core::Error> {
     // -------------------------------------------------------------
     // 1. Query the device for Work Graph API Support (Shader Model 6.8)
@@ -26,6 +28,8 @@ pub unsafe fn setup_work_graph(
     let dxil_bytecode: Vec<u8> =
         std::fs::read(env!("CARGO_MANIFEST_DIR").to_string() + "/src/output.dxil")
             .expect("Failed to load DXIL");
+    let root_sig: ID3D12RootSignature = device.CreateRootSignature(0, &dxil_bytecode).unwrap();
+    let root_sig_ptr = root_sig.as_raw();
 
     // -------------------------------------------------------------
     // 3. Define the State Object Subobjects to assemble the Work Graph
@@ -47,8 +51,13 @@ pub unsafe fn setup_work_graph(
         pDesc: &dxil_lib_desc as *const _ as *const _,
     });
 
+    subobjects.push(D3D12_STATE_SUBOBJECT {
+        Type: D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE,
+        pDesc: &root_sig_ptr as *const _ as *const std::ffi::c_void,
+    });
+
     // B. Explicitly define the Work Graph Config
-    let graph_name = windows::core::w!("MyWorkGraph");
+    let graph_name = windows::core::w!("HelloWorkGraphs");
     let work_graph_desc = D3D12_WORK_GRAPH_DESC {
         ProgramName: graph_name,
         Flags: D3D12_WORK_GRAPH_FLAG_NONE,
@@ -67,34 +76,48 @@ pub unsafe fn setup_work_graph(
     // 4. Create the final Executable State Object
     // -------------------------------------------------------------
     let state_object_desc = D3D12_STATE_OBJECT_DESC {
-        Type: D3D12_STATE_OBJECT_TYPE_COLLECTION,
+        Type: D3D12_STATE_OBJECT_TYPE_EXECUTABLE,
         NumSubobjects: subobjects.len() as u32,
         pSubobjects: subobjects.as_ptr(),
     };
-
+    println!("H");
     let state_object: ID3D12StateObject = unsafe { device.CreateStateObject(&state_object_desc)? };
+    println!("HM");
 
     // -------------------------------------------------------------
     // 5. Query Graph Properties and Allocate Backing Memory
     // -------------------------------------------------------------
     // Work Graphs require scratch memory allocated by the CPU for internal GPU scheduling data
     let work_graph_properties: ID3D12WorkGraphProperties = state_object.cast()?;
+    println!("{work_graph_properties:?}");
     let graph_index = work_graph_properties.GetWorkGraphIndex(graph_name);
-
+    let huh = work_graph_properties.GetNumEntrypoints(graph_index);
+    let aha = work_graph_properties.GetProgramName(graph_index);
     let mut memory_requirements = D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS::default();
-    work_graph_properties.GetWorkGraphMemoryRequirements(graph_index, &mut memory_requirements);
+    unsafe {
+        work_graph_properties.GetWorkGraphMemoryRequirements(graph_index, &mut memory_requirements)
+    };
+    println!(
+        "{graph_index}, {huh}, {},{}",
+        aha.to_string().unwrap(),
+        memory_requirements.MaxSizeInBytes
+    );
 
+    println!("HMM");
     // Allocate a raw GPU buffer matched exactly to 'memory_requirements.MaxSizeInBytes'
     let backing_memory_buffer = create_gpu_buffer(device, memory_requirements.MaxSizeInBytes)?;
-
+    println!("HMMM");
     Ok((state_object, backing_memory_buffer))
 }
 
 // Utility function to instantiate raw default-heap buffers natively
 unsafe fn create_gpu_buffer(
     device: &ID3D12Device,
-    size: u64,
+    mut size: u64,
 ) -> Result<ID3D12Resource, windows::core::Error> {
+    println!("{size}");
+
+    size = 1024;
     let mut resource: Option<ID3D12Resource> = None;
     let heap_properties = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_DEFAULT,
@@ -108,6 +131,10 @@ unsafe fn create_gpu_buffer(
         MipLevels: 1,
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         ..Default::default()
     };
     device.CreateCommittedResource(
@@ -122,12 +149,13 @@ unsafe fn create_gpu_buffer(
 }
 
 pub unsafe fn dispatch_graph(
-    command_list: &ID3D12GraphicsCommandList,
+    command_list: &mut ID3D12GraphicsCommandList,
     state_object: &ID3D12StateObject,
     backing_memory: &ID3D12Resource,
 ) -> Result<(), windows::core::Error> {
     // 1. Cast command list up to Interface version 10 to expose DispatchGraph
     let cmd_list_10: ID3D12GraphicsCommandList10 = command_list.cast()?;
+    println!("UHM");
 
     // 2. Provide the GPU memory pointer where the graph schedules nodes
     let program_identifier = state_object
@@ -150,5 +178,6 @@ pub unsafe fn dispatch_graph(
     // 3. Dispatch the workload autonomously outside of any render pass or draw scopes
     cmd_list_10.DispatchGraph(&dispatch_desc);
 
+    println!("YEP");
     Ok(())
 }
