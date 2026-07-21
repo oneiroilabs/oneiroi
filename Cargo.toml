@@ -6,6 +6,7 @@ members = [
     "oneiroi-cpp",
     "oneiroi-bevy",
     "oneiroi-wgpu",
+    "oneiroi-core",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
@@ -28,3 +29,6 @@ codegen-units = 1
 oneiroi = { path = "./oneiroi" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
+
+
+glam = { version = "0.33" }
