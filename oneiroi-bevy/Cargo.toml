@@ -10,6 +10,7 @@ readme.workspace = true
 publish = true
 
 [dependencies]
-bevy = "0.18.0"
+bevy = { version = "0.19", features = ["free_camera"] }
 #wgpu = "29.0.3"
 oneiroi.workspace = true
+oneiroi-core.workspace = true

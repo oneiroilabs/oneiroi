@@ -32,4 +32,4 @@ oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 
 
-glam = { version = "0.33" }
+glam = { version = "=0.32.1" }

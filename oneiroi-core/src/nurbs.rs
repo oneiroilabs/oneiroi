@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 
 pub struct CubicNurbs {
     /// The control points of the Curve
@@ -119,6 +119,72 @@ impl CubicNurbs {
             horner_eval.z / horner_eval.w,
         )
     }
+
+    pub fn evaluate_derivatives(&self, t: f32) -> (Vec3, Vec3, Vec3) {
+        let knots = &self.knots_followed_by_weights;
+        let weights = &self.knots_followed_by_weights[self.points.len() + 4..];
+        let points = &self.points;
+        let r = self.span(t);
+
+        let t_r = knots[r];
+        let t_r1 = knots[r + 1];
+        let dt = t_r1 - t_r;
+        let u = (t - t_r) / dt;
+
+        let a_matrix = self.mardsen_cache[r - 3];
+
+        // 1. Extract the 4 relevant control points in homogeneous coordinates
+        let mut p_h = [Vec4::ZERO; 4];
+        for (idx, i) in (r - 3..=r).enumerate() {
+            let w = weights[i];
+            p_h[idx] = Vec4::new(points[i].x * w, points[i].y * w, points[i].z * w, w);
+        }
+
+        // 2. Compute polynomial coefficients via Marsden matrix
+        let mut c = [Vec4::ZERO; 4];
+        for j in 0..4 {
+            let row = a_matrix.col(j);
+            c[j] = p_h[0] * row.x + p_h[1] * row.y + p_h[2] * row.z + p_h[3] * row.w;
+        }
+
+        // 3. Evaluate homogeneous position and its derivatives w.r.t local parameter u
+        let p_hom = c[0] + u * (c[1] + u * (c[2] + u * c[3]));
+        let dp_du = c[1] + u * (2.0 * c[2] + 3.0 * u * c[3]);
+        let d2p_du2 = 2.0 * c[2] + 6.0 * u * c[3];
+
+        // 4. Transform derivatives to global parameter t using chain rule
+        let inv_dt = 1.0 / dt;
+        let inv_dt2 = inv_dt * inv_dt;
+
+        let a = p_hom.xyz();
+        let w = p_hom.w;
+
+        let da = dp_du.xyz() * inv_dt;
+        let dw = dp_du.w * inv_dt;
+
+        let d2a = d2p_du2.xyz() * inv_dt2;
+        let d2w = d2p_du2.w * inv_dt2;
+
+        // 5. Dehomogenization via the Rational Quotient Rule
+        let c_pos = a / w;
+        let c_vel = (da - dw * c_pos) / w;
+        let c_acc = (d2a - 2.0 * dw * c_vel - d2w * c_pos) / w;
+
+        (c_pos, c_vel, c_acc)
+    }
+
+    pub fn curvature(&self, t: f32) -> f32 {
+        let (_, tangent, second_deriv) = self.evaluate_derivatives(t);
+
+        let numerator = tangent.cross(second_deriv).length();
+        let denominator = tangent.length().powi(3);
+
+        if denominator.abs() < 1e-6 {
+            0.0 // Handles flat lines or linear cusps safely
+        } else {
+            numerator / denominator
+        }
+    }
 }
 
 fn symmetric_functions(a: f32, b: f32, c: f32) -> [f32; 4] {
@@ -170,6 +236,6 @@ pub fn compute_nurbs_coefficient_matrix(knots: &[f32], r: usize) -> Mat4 {
     // Da glam Spaltenvektoren nutzt und Matrixmultiplikationen von rechts nach links liest,
     // transformieren wir die Zeilen-/Spaltenlogik passend zur Paper-Gleichung (4).
     let coeff_mat = delta_inv.mul_mat4(&m_u);
-    println!("Coeff Mat: {coeff_mat}");
+    //println!("Coeff Mat: {coeff_mat}");
     coeff_mat
 }

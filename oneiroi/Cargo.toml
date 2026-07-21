@@ -17,7 +17,7 @@ publish = true
 dashmap = "7.0.0-rc2"
 
 #Math Library
-glam = { version = "0.33", features = ["serde"] }
+glam = { workspace = true, features = ["serde"] }
 
 itertools = "0.14"
 

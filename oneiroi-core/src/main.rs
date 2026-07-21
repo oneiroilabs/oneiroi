@@ -25,6 +25,7 @@ fn main() {
     for step in 0..=steps {
         let t = step as f32 / steps as f32;
         let pt = curve.evaluate(t);
-        println!("t = {:.2} -> Punkt: {:?}", t, pt);
+        let cv = curve.curvature(t);
+        println!("t = {:.2} -> Punkt: {:?}, Curvature: {cv}", t, pt);
     }
 }
