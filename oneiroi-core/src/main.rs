@@ -1,5 +1,5 @@
 use glam::Vec3;
-use oneiroi_core::CubicNurbs;
+use oneiroi_core::nurbs::CubicNurbs;
 
 fn main() {
     /* let control_points = vec![

@@ -1,4 +1,4 @@
-/* use bevy::{
+use bevy::{
     app::{App, Plugin, Update},
     ecs::{component::Component, query::With, resource::Resource, system::Query},
 };
@@ -22,4 +22,3 @@ struct OneiroiInstance {
     println!("jaa");
     for thing in query {}
 } */
- */
