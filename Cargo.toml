@@ -33,3 +33,4 @@ oneiroi-godot = { path = "./oneiroi-godot" }
 
 
 glam = { version = "=0.32.1" }
+bytemuck = { version = "1.25" }

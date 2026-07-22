@@ -4762,13 +4762,16 @@ dependencies = [
  "bevy",
  "oneiroi",
  "oneiroi-core",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
 name = "oneiroi-core"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "glam",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -6497,12 +6500,14 @@ dependencies = [
  "js-sys",
  "log",
  "naga 29.0.4",
+ "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
  "smallvec 1.15.2",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core 29.0.4",
  "wgpu-hal 29.0.4",
@@ -6557,6 +6562,7 @@ dependencies = [
  "smallvec 1.15.2",
  "thiserror 2.0.19",
  "wgpu-core-deps-apple",
+ "wgpu-core-deps-emscripten",
  "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android 29.0.4",
  "wgpu-hal 29.0.4",
@@ -6599,6 +6605,15 @@ name = "wgpu-core-deps-apple"
 version = "29.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5e39e26c4c0e07589e67d18546cf79ff45383659fc72fca4dd293358a0347f3"
+dependencies = [
+ "wgpu-hal 29.0.4",
+]
+
+[[package]]
+name = "wgpu-core-deps-emscripten"
+version = "29.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01e09be551dc939498bdd5f6b2c66e55ab275dad25825267a08605a80fc9f0af"
 dependencies = [
  "wgpu-hal 29.0.4",
 ]

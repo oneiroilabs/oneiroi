@@ -73,7 +73,7 @@ fn setup(
     ));
 
     // example instructions
-    commands.spawn((
+    /* commands.spawn((
         Text::new(
             "Press 'T' to toggle drawing gizmos on top of everything else in the scene\n\
             Press 'P' to toggle perspective for line gizmos\n\
@@ -91,7 +91,7 @@ fn setup(
             left: px(12),
             ..default()
         },
-    ));
+    )); */
 }
 
 fn draw_example_collection(
@@ -99,28 +99,48 @@ fn draw_example_collection(
     mut my_gizmos: Gizmos<MyRoundGizmos>,
     time: Res<Time>,
 ) {
-    let control_points = vec![
+    /* let control_points = vec![
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(1.0, 3.0, 0.0),
         Vec3::new(4.0, 3.0, 0.0),
         Vec3::new(5.0, 0.0, 0.0),
+    ]; */
+    let control_points = vec![
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 2.0, 0.0),
+        Vec3::new(2.0, -1.0, 0.0),
+        Vec3::new(3.0, 3.0, 0.0),
+        Vec3::new(4.0, 0.0, 0.0),
+        Vec3::new(5.0, 2.0, 0.0),
+        Vec3::new(6.0, 1.0, 0.0),
+        Vec3::new(7.0, 4.0, 0.0),
     ];
     let curve = oneiroi_core::nurbs::CubicNurbs::cubic_bezier(control_points);
 
     let mut points = vec![];
+    let mut tangents = vec![];
+    let mut curvature = vec![];
 
     // 2. Schnelle Auswertung zur Laufzeit
     let steps = 100;
-    for step in 0..=steps {
+    let uniform_samples = curve.sample_equidistant(steps);
+    for step in 0..steps {
         let t = step as f32 / steps as f32;
         let pt = curve.evaluate(t);
+        let (_, tangent, _) = curve.evaluate_derivatives(t);
         let cv = curve.curvature(t);
         //println!("t = {:.2} -> Punkt: {:?}, Curvature: {cv}", t, pt);
         points.push(pt);
+        tangents.push(tangent);
+        curvature.push(cv);
     }
 
     for points in points.windows(2) {
         gizmos.line(points[0], points[1], TEAL);
+    }
+
+    for (point, tangent, _) in uniform_samples.into_iter() {
+        gizmos.arrow(point, point.move_towards(tangent, 1.), Color::BLACK);
     }
 }
 

@@ -2,7 +2,7 @@ use glam::Vec3;
 use oneiroi_core::nurbs::CubicNurbs;
 
 fn main() {
-    /* let control_points = vec![
+    let control_points = vec![
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(1.0, 2.0, 0.0),
         Vec3::new(2.0, -1.0, 0.0),
@@ -11,7 +11,7 @@ fn main() {
         Vec3::new(5.0, 2.0, 0.0),
         Vec3::new(6.0, 1.0, 0.0),
         Vec3::new(7.0, 4.0, 0.0),
-    ]; */
+    ];
     let control_points = vec![
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(1.0, 3.0, 0.0),
@@ -22,10 +22,13 @@ fn main() {
 
     // 2. Schnelle Auswertung zur Laufzeit
     let steps = 10;
-    for step in 0..=steps {
+    let uniform_samples = curve.sample_equidistant(steps);
+    for step in 0..steps {
         let t = step as f32 / steps as f32;
         let pt = curve.evaluate(t);
         let cv = curve.curvature(t);
-        println!("t = {:.2} -> Punkt: {:?}, Curvature: {cv}", t, pt);
+        println!("t = {:.2} -> Point: {:?}, Curvature: {cv}", t, pt);
+        println!("Uniform Sample at point: {}", uniform_samples[step])
     }
+    println!("Curve Length is: {}", curve.length());
 }

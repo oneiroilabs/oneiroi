@@ -1,5 +1,7 @@
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 
+mod gpu_cached;
+
 pub struct CubicNurbs {
     /// The control points of the Curve
     points: Box<[Vec3]>,
@@ -17,12 +19,19 @@ impl CubicNurbs {
         let num_knots_and_weigths = points.len() * 2 + 4;
 
         let mut alloc = Box::new_uninit_slice(num_knots_and_weigths);
-        for val in &mut alloc[0..(points.len() + 4) / 2] {
-            val.write(0.);
-        }
 
-        for val in &mut alloc[(points.len() + 4) / 2..points.len() + 4] {
-            val.write(1.);
+        // A standard uniform knot vector requires 4 zeroes at the start and 4 ones at the end...
+        for i in 0..4 {
+            alloc[i].write(0.0);
+        }
+        for i in points.len()..points.len() + 4 {
+            alloc[i].write(1.0);
+        }
+        // The rest of the inbetween knot vector scalars are distributed equidistantly apart from each other.
+        let num_interior_segments = points.len() - 3;
+        for i in 4..points.len() {
+            let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+            alloc[i].write(interior_t);
         }
 
         for val in &mut alloc[points.len() + 4..num_knots_and_weigths] {
@@ -184,6 +193,174 @@ impl CubicNurbs {
         } else {
             numerator / denominator
         }
+    }
+
+    pub fn length(&self) -> f32 {
+        let knots = &self.knots_followed_by_weights;
+        let n = self.points.len();
+
+        // 5-point Gauss-Legendre constants (abscissae and weights on interval [-1, 1])
+        const GAUSS_X: [f32; 5] = [
+            -0.90617985,
+            -0.5384693,
+            0.0,
+            0.5384693,
+            0.090617985, // Corrected pair mirror sequence order below:
+        ];
+        // Exact 5-point weights and nodes matches:
+        let nodes: [f32; 5] = [
+            0.0,
+            -0.5384693101,
+            0.5384693101,
+            -0.9061798459,
+            0.9061798459,
+        ];
+        let weights: [f32; 5] = [
+            0.5688888889,
+            0.4786286705,
+            0.4786286705,
+            0.2369268851,
+            0.2369268851,
+        ];
+
+        let mut total_length = 0.0;
+
+        // Iterate through all possible valid knot spans [t_r, t_{r+1})
+        // For a cubic curve, valid evaluation spans are from index 3 up to n
+        for r in 3..n {
+            let t_r = knots[r];
+            let t_r1 = knots[r + 1];
+            let dt = t_r1 - t_r;
+
+            // Skip zero-length knot intervals safely
+            if dt.abs() < 1e-6 {
+                continue;
+            }
+
+            // Perform numerical integration across this specific knot span
+            let mut span_integral = 0.0;
+            for i in 0..5 {
+                // Map the standard Gauss node from [-1, 1] to our local span [t_r, t_{r+1}]
+                let t = 0.5 * ((t_r1 - t_r) * nodes[i] + (t_r1 + t_r));
+
+                // Get the velocity vector C'(t) at this point
+                let (_, tangent, _) = self.evaluate_derivatives(t);
+
+                // Add the speed (magnitude of velocity) scaled by the Gauss weight
+                span_integral += weights[i] * tangent.length();
+            }
+
+            // Scale by the half-width of the transformation interval (Jacobian determinant)
+            total_length += span_integral * 0.5 * dt;
+        }
+
+        total_length
+    }
+
+    pub fn time_at_distance(&self, target_s: f32, total_length: f32) -> f32 {
+        let knots = &self.knots_followed_by_weights;
+        let n = self.points.len();
+        let t_start = knots[3];
+        let t_end = knots[n];
+
+        // Clamp boundary conditions safely
+        if target_s <= 0.0 {
+            return t_start;
+        }
+        if target_s >= total_length {
+            return t_end;
+        }
+
+        // 1. Initial Guess via proportional interpolation
+        let mut t = t_start + (target_s / total_length) * (t_end - t_start);
+
+        // 2. Newton-Raphson Iteration loop
+        // f(t) = current_distance(t) - target_s = 0
+        // Update formula: t_next = t - f(t) / f'(t)
+        // Note that f'(t) is simply the magnitude of the velocity vector: ||C'(t)||
+        for _ in 0..8 {
+            let current_s = self.length_up_to(t);
+            let (_, tangent, _) = self.evaluate_derivatives(t);
+            let speed = tangent.length();
+
+            // Guard against division by zero if the curve stops or forms a cusp
+            if speed < 1e-5 {
+                break;
+            }
+
+            let delta_t = (current_s - target_s) / speed;
+            t -= delta_t;
+
+            // Enforce bounds constraints during optimization
+            t = t.clamp(t_start, t_end);
+
+            if delta_t.abs() < 1e-5 {
+                break; // Converged safely
+            }
+        }
+
+        t
+    }
+
+    /// Helper that calculates the cumulative arc length from t_start up to parameter `t_cutoff`.
+    fn length_up_to(&self, t_cutoff: f32) -> f32 {
+        let knots = &self.knots_followed_by_weights;
+        let n = self.points.len();
+
+        let nodes: [f32; 5] = [0.0, -0.5384693, 0.5384693, -0.90617985, 0.90617985];
+        let weights: [f32; 5] = [0.5688889, 0.47862867, 0.47862867, 0.23692689, 0.23692689];
+
+        let mut current_length = 0.0;
+
+        for r in 3..n {
+            let t_r = knots[r];
+            let t_r1 = knots[r + 1];
+
+            // If this segment is fully behind our cutoff, integrate the full span
+            // If we are inside the cut-off segment, trim the upper integration bound
+            let upper_bound = if t_cutoff < t_r1 { t_cutoff } else { t_r1 };
+
+            let dt = upper_bound - t_r;
+            if dt <= 1e-6 {
+                continue; // This or subsequent spans are out of scope
+            }
+
+            let mut span_integral = 0.0;
+            for i in 0..5 {
+                let t = 0.5 * (dt * nodes[i] + (upper_bound + t_r));
+                let (_, tangent, _) = self.evaluate_derivatives(t);
+                span_integral += weights[i] * tangent.length();
+            }
+            current_length += span_integral * 0.5 * dt;
+
+            if t_cutoff < t_r1 {
+                break; // Optimization: We passed our upper limit, stop scanning segments
+            }
+        }
+
+        current_length
+    }
+
+    /// Evaluates `count` points spaced perfectly equidistant along the curve.
+    pub fn sample_equidistant(&self, count: usize) -> Vec<(Vec3, Vec3, Vec3)> {
+        if count == 0 {
+            return Vec::new();
+        }
+        if count == 1 {
+            return vec![self.evaluate_derivatives(self.knots_followed_by_weights[3])];
+        }
+
+        let total_length = self.length();
+        let step = total_length / (count - 1) as f32;
+        let mut points = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let target_s = i as f32 * step;
+            let t = self.time_at_distance(target_s, total_length);
+            points.push(self.evaluate_derivatives(t));
+        }
+
+        points
     }
 }
 
