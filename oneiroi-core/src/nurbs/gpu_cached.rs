@@ -1,176 +1,104 @@
-/* use glam::Mat4;
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct NurbsGpuSegmentCache {
-    pub matrix: Mat4,
-    pub t_start: f32,
-    pub t_end: f32,
-    pub starting_point_idx: u32,
-    pub _pad0: u32,
-}
-
-pub fn create_nurbs_render_resources(
-    device: &wgpu::Device,
-) -> (wgpu::BindGroupLayout, wgpu::PipelineLayout) {
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("NURBS Dual-Array Bind Group Layout"),
-        entries: &[
-            // @binding(0): global_points array
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::MESH,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // @binding(1): segments metadata array
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::MESH,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("NURBS Pipeline Layout"),
-        bind_group_layouts: &[Some(&bind_group_layout)],
-        ..Default::default()
-    });
-
-    (bind_group_layout, pipeline_layout)
-}
-
-pub struct GpuNurbsCurve {
-    /// Holds the global pool of homogeneous control points (w*x, w*y, w*z, w)
-    pub points_buffer: wgpu::Buffer,
-    /// Holds the 48-byte minimal segment metadata blocks (matrix + t_bounds + index)
-    pub segments_buffer: wgpu::Buffer,
-    /// Pre-configured bind group mapping these buffers directly to the shader
-    pub bind_group: wgpu::BindGroup,
-    /// Total count of control points currently stored
-    pub point_count: usize,
-}
-
+use std::num::NonZeroU32;
 use wgpu::util::DeviceExt;
 
-impl GpuNurbsCurve {
-    pub fn init_from_cpu(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        nurbs: &super::CubicNurbs,
-    ) -> Self {
-        let n = nurbs.points.len();
-        let num_segments = n - 3;
-        let knots = &nurbs.knots_followed_by_weights;
-        let weights = &nurbs.knots_followed_by_weights[n + 4..];
+pub struct NurbsPipeline {
+    pub pipeline: wgpu::RenderPipeline,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+}
 
-        // 1. Package flat global homogeneous positions block
-        let mut global_points = vec![glam::Vec4::ZERO; n];
-        for i in 0..n {
-            let w = weights[i];
-            global_points[i] = glam::Vec4::new(
-                nurbs.points[i].x * w,
-                nurbs.points[i].y * w,
-                nurbs.points[i].z * w,
-                w,
-            );
-        }
-
-        // 2. Package flat minimal segment metadata blocks
-        let mut minimal_segments = Vec::with_capacity(num_segments);
-        for idx in 0..num_segments {
-            let r = idx + 3;
-            minimal_segments.push(NurbsGpuSegmentCache {
-                matrix: nurbs.mardsen_cache[idx],
-                t_start: knots[r],
-                t_end: knots[r + 1],
-                starting_point_idx: (r - 3) as u32,
-                _pad0: 0,
-            });
-        }
-
-        // 3. Allocate actual hardware GPU buffers with exact sizes
-        let points_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("NURBS Global Points Buffer"),
-            contents: bytemuck::cast_slice(&global_points),
-            // COPY_DST lets us write updates directly to individual indexes later
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+impl NurbsPipeline {
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        // 1. Shader Modul laden
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("NURBS Mesh Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("nurbs.wgsl").into()),
         });
 
-        let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("NURBS Compressed Segments Buffer"),
-            contents: bytemuck::cast_slice(&minimal_segments),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        // 4. Map buffers directly onto the BindGroup descriptors
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("NURBS Render Instance Bind Group"),
-            layout,
+        // 2. Bind Group Layout definieren (Spiegelt die @group(0) Bindings des Shaders)
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("NURBS Bind Group Layout"),
             entries: &[
-                wgpu::BindGroupEntry {
+                // Binding 0: RenderArgs Uniform Buffer
+                wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    resource: points_buffer.as_entire_binding(),
+                    visibility: wgpu::ShaderStages::MESH,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                wgpu::BindGroupEntry {
+                // Binding 1: Segments Cache Storage Buffer (Read-Only)
+                wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    resource: segments_buffer.as_entire_binding(),
+                    visibility: wgpu::ShaderStages::MESH,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 2: Control Points Storage Buffer (Read-Only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::MESH,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
             ],
         });
 
+        // 3. Pipeline Layout erstellen
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("NURBS Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            ..Default::default()
+        });
+
+        // 4. Mesh Pipeline konfigurieren (Nutzt create_mesh_pipeline statt create_render_pipeline)
+        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+            label: Some("NURBS Ribbon Mesh Pipeline"),
+            layout: Some(&pipeline_layout),
+            task: None, // Wir überspringen den Task-Shader (Objekt-Culling) und gehen direkt in den Mesh-Shader
+            mesh: wgpu::MeshState {
+                module: &shader,
+                entry_point: Some("main"), // Name des @mesh Shaders
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"), // Name des @fragment Shaders
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList, // Mesh Shader gibt Dreiecke aus
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Beide Seiten rendern (Bänder können sich drehen)
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None, // Bei Bedarf hier ein Standard-DepthStencilState einfügen
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Self {
-            points_buffer,
-            segments_buffer,
-            bind_group,
-            point_count: n,
+            pipeline,
+            bind_group_layout,
         }
     }
-
-    pub fn update_point_at_index(
-        &self,
-        queue: &wgpu::Queue,
-        index: usize,
-        new_pos: glam::Vec3,
-        weight: f32,
-    ) {
-        assert!(
-            index < self.point_count,
-            "Control point index out of bounds"
-        );
-        assert!(
-            weight > 0.0,
-            "NURBS weight parameters must be strictly positive"
-        );
-
-        // Convert the modified data to its homogeneous form [w*x, w*y, w*z, w]
-        let updated_homogeneous_pt = glam::Vec4::new(
-            new_pos.x * weight,
-            new_pos.y * weight,
-            new_pos.z * weight,
-            weight,
-        );
-
-        // Calculate the precise byte offset where this specific index sits in memory
-        // Each Vec4 takes up exactly 16 bytes
-        let byte_offset = (index * 16) as wgpu::BufferAddress;
-
-        // Stream the exact 16 bytes straight to the GPU
-        queue.write_buffer(
-            &self.points_buffer,
-            byte_offset,
-            bytemuck::bytes_of(&updated_homogeneous_pt),
-        );
-    }
 }
- */

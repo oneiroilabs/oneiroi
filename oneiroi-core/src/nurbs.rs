@@ -243,8 +243,6 @@ impl CubicNurbs {
             .map_or(0.0, |seg| seg.cumulative_length)
     }
 
-    /// Hochgradig optimierte Äquidistant-Samplung mittels "Incremental Advancing" und Caching.
-    /// Gibt ausschließlich (Position, Tangente) zurück, um unnötige Berechnungen der zweiten Ableitung zu vermeiden.
     pub fn sample_equidistant(&self, count: usize) -> Vec<(Vec3, Vec3)> {
         if count == 0 {
             return Vec::new();
@@ -253,19 +251,16 @@ impl CubicNurbs {
             return vec![self.evaluate_tanget(self.segments[0].t_start)];
         }
 
-        // Gesamtlänge direkt aus dem letzten Segment ablesen (Zero Cost!)
         let total_length = self.segments.last().unwrap().cumulative_length;
         let step = total_length / (count - 1) as f32;
         let mut points = Vec::with_capacity(count);
 
-        // Ersten Punkt direkt auswerten
         points.push(self.evaluate_tanget(self.segments[0].t_start));
         let mut current_seg_idx = 0;
 
         for i in 1..(count - 1) {
             let target_s = i as f32 * step;
 
-            // Inkrementeller Segmentwechsel über Cache-Werte
             while current_seg_idx < self.segments.len() - 1
                 && self.segments[current_seg_idx].cumulative_length < target_s
             {
@@ -283,7 +278,7 @@ impl CubicNurbs {
             let mut t =
                 segment.t_start + (s_local / segment.length) * (segment.t_end - segment.t_start);
 
-            // Because our start t should be extremely accurate 2 iterations should suffice.
+            // Because our start t should be extremely accurate we only do one loop for now.
             for _ in 0..2 {
                 let current_s_local = self.length_inside_segment(segment, t);
                 let (_, tangent) = self.evaluate_tanget(t);
@@ -298,7 +293,6 @@ impl CubicNurbs {
                 t = t.clamp(segment.t_start, segment.t_end);
 
                 if delta_t.abs() < 1e-5 {
-                    println!("accurate enuogh");
                     break;
                 }
             }

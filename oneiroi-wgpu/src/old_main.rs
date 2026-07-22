@@ -28,6 +28,9 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
+    // pipeline: Option<wgpu::RenderPipeline>,
+    state_object: ID3D12StateObject,
+    backing_mem: ID3D12Resource,
 }
 
 impl State {
@@ -83,40 +86,74 @@ impl State {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            task: Some(wgpu::TaskState {
-                module: &shader,
-                entry_point: Some("ts_main"),
-                compilation_options: Default::default(),
-            }),
-            mesh: wgpu::MeshState {
-                module: &shader,
-                entry_point: Some("ms_main"),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.view_formats[0].into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+        // Configure surface for the first time
+
+        /* let shader = state
+            .device
+            .create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let pipeline_layout =
+            state
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[],
+                    immediate_size: 0,
+                });
+        let pipeline = state
+            .device
+            .create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+                label: None,
+                layout: Some(&pipeline_layout),
+                task: Some(wgpu::TaskState {
+                    module: &shader,
+                    entry_point: Some("ts_main"),
+                    compilation_options: Default::default(),
+                }),
+                mesh: wgpu::MeshState {
+                    module: &shader,
+                    entry_point: Some("ms_main"),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(
+                        state.surface.get_configuration().unwrap().view_formats[0].into(),
+                    )],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            }); */
+
+        /* state.pipeline = Some(pipeline); */
+
+        let wg_shader = unsafe {
+            device.create_shader_module_passthrough(CreateShaderModuleDescriptorPassthrough {
+                label: Some("work-graph-shader"),
+                hlsl: Some(Cow::Borrowed("shader.hlsl")),
                 ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
+            })
+        };
+
+        let what = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() };
+
+        let temp_device = what
+            .unwrap()
+            .raw_device()
+            .cast::<Direct3D12::ID3D12Device14>()
+            .unwrap();
+
+        /* let what =
+        unsafe { device.CreateStateObject::<ID3D12StateObject>(&state_object) }.unwrap(); */
+
+        let (state_object, backing_mem) = unsafe { setup_work_graph(&temp_device) }.unwrap();
 
         let mut state = State {
             instance,
@@ -126,8 +163,8 @@ impl State {
             size,
             surface,
             surface_format,
-            //state_object,
-            //backing_mem,
+            state_object,
+            backing_mem,
             //pipeline: None,
         };
         state.configure_surface();
@@ -196,37 +233,48 @@ impl State {
             });
 
         // Renders a GREEN screen
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        // Create the renderpass which will clear the screen.
+        /*  let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &texture_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        rpass.push_debug_group("Prepare data for draw.");
+        rpass.set_pipeline(self.pipeline.as_ref().unwrap());
+        rpass.pop_debug_group();
+        rpass.insert_debug_marker("Draw!");
+        rpass.draw_mesh_tasks(1, 1, 1);
+
+        // If you wanted to call any drawing commands, they would go here.
+
+        // End the renderpass.
+        drop(rpass);
+
+        // Submit the command in the queue to execute
+        self.queue.submit([encoder.finish()]);
+        self.window.pre_present_notify();
+        self.queue.present(surface_texture); */
+
+        unsafe {
+            encoder.as_hal_mut::<Dx12, _, _>(|h| unsafe {
+                let cmd_list_10 = h.unwrap().raw_list();
+
+                dispatch_graph(cmd_list_10, &self.state_object, &self.backing_mem)
             });
-            rpass.push_debug_group("Prepare data for draw.");
-            rpass.set_pipeline(&self.pipeline);
-            rpass.pop_debug_group();
-            rpass.insert_debug_marker("Draw!");
-            rpass.draw_mesh_tasks(1, 1, 1);
         }
-        queue.submit(Some(encoder.finish()));
     }
 }
 

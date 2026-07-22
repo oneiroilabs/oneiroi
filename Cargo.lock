@@ -4797,6 +4797,7 @@ version = "0.0.0"
 dependencies = [
  "env_logger",
  "oneiroi",
+ "oneiroi-core",
  "pollster",
  "renderdoc",
  "wgpu 30.0.0",
