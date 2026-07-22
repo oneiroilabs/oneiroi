@@ -397,9 +397,11 @@ impl OneiroiInstance {
                         gd_path.set_owner(&scene_root);
                         godot_print!("{:?}", gd_path)
                     }
-                    _ => godot_error!(
-                        "This is theoretically unreachable but so far not everything is implemented so TODO"
-                    ),
+                    _ => {
+                        godot_error!(
+                            "This is theoretically unreachable but so far not everything is implemented so TODO"
+                        );
+                    }
                 }
             }
         }

@@ -1,16 +1,14 @@
-
-use glam::Mat4;
+/* use glam::Mat4;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NurbsGpuSegmentCache {
-    pub matrix: Mat4,          
-    pub t_start: f32, 
-    pub t_end: f32,   
+    pub matrix: Mat4,
+    pub t_start: f32,
+    pub t_end: f32,
     pub starting_point_idx: u32,
-    pub _pad0: u32
+    pub _pad0: u32,
 }
-
 
 pub fn create_nurbs_render_resources(
     device: &wgpu::Device,
@@ -51,7 +49,6 @@ pub fn create_nurbs_render_resources(
 
     (bind_group_layout, pipeline_layout)
 }
-
 
 pub struct GpuNurbsCurve {
     /// Holds the global pool of homogeneous control points (w*x, w*y, w*z, w)
@@ -98,7 +95,7 @@ impl GpuNurbsCurve {
                 t_start: knots[r],
                 t_end: knots[r + 1],
                 starting_point_idx: (r - 3) as u32,
-                _pad0: 0
+                _pad0: 0,
             });
         }
 
@@ -147,8 +144,14 @@ impl GpuNurbsCurve {
         new_pos: glam::Vec3,
         weight: f32,
     ) {
-        assert!(index < self.point_count, "Control point index out of bounds");
-        assert!(weight > 0.0, "NURBS weight parameters must be strictly positive");
+        assert!(
+            index < self.point_count,
+            "Control point index out of bounds"
+        );
+        assert!(
+            weight > 0.0,
+            "NURBS weight parameters must be strictly positive"
+        );
 
         // Convert the modified data to its homogeneous form [w*x, w*y, w*z, w]
         let updated_homogeneous_pt = glam::Vec4::new(
@@ -170,4 +173,4 @@ impl GpuNurbsCurve {
         );
     }
 }
-
+ */

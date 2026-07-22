@@ -267,7 +267,7 @@ impl OneiroiNodeEditor {
                 from_socket,
                 to_node,
                 to_socket
-            )
+            );
         }
     }
 

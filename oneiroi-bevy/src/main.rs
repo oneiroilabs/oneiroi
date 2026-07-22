@@ -3,7 +3,7 @@ use bevy::{
     color::palettes::css::*,
     prelude::*,
 };
-use std::f32::consts::PI;
+use std::{f32::consts::PI, time::Instant};
 
 fn main() {
     App::new()
@@ -123,7 +123,9 @@ fn draw_example_collection(
 
     // 2. Schnelle Auswertung zur Laufzeit
     let steps = 100;
+    let instant = Instant::now();
     let uniform_samples = curve.sample_equidistant(steps);
+    println!("Evaluation of {steps} steps took: {:?}", instant.elapsed());
     for step in 0..steps {
         let t = step as f32 / steps as f32;
         let pt = curve.evaluate(t);
@@ -139,7 +141,7 @@ fn draw_example_collection(
         gizmos.line(points[0], points[1], TEAL);
     }
 
-    for (point, tangent, _) in uniform_samples.into_iter() {
+    for (point, tangent) in uniform_samples.into_iter() {
         gizmos.arrow(point, point.move_towards(tangent, 1.), Color::BLACK);
     }
 }
