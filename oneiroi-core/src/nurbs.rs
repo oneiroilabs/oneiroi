@@ -1,7 +1,5 @@
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 
-mod gpu_cached;
-
 // 5-Point Gauss–Legendre Quadrature
 const GAUSS_NODES: [f32; 5] = [0.0, -0.538_469_3, 0.538_469_3, -0.906_179_85, 0.906_179_85];
 const GAUSS_WEIGHTS: [f32; 5] = [
@@ -127,10 +125,7 @@ impl CubicNurbs {
         }
 
         // Lineare Suche nach dem passenden Zeitfenster
-        self.segments
-            .iter()
-            .position(|seg| t >= seg.t_start && t < seg.t_end)
-            .unwrap_or(self.segments.len() - 1)
+        self.segments.partition_point(|seg| t >= seg.t_start) - 1
     }
 
     pub fn evaluate(&self, t: f32) -> Vec3 {

@@ -1,26 +1,31 @@
 use std::time::Instant;
 
-use glam::Vec3;
-use oneiroi_core::nurbs::CubicNurbs;
+use glam::Vec4;
 
 fn main() {
     let control_points = vec![
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 2.0, 0.0),
-        Vec3::new(2.0, -1.0, 0.0),
-        Vec3::new(3.0, 3.0, 0.0),
-        Vec3::new(4.0, 0.0, 0.0),
-        Vec3::new(5.0, 2.0, 0.0),
-        Vec3::new(6.0, 1.0, 0.0),
-        Vec3::new(7.0, 4.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, 1.),
+        Vec4::new(1.0, 2.0, 0.0, 1.),
+        Vec4::new(2.0, -1.0, 0.0, 1.),
+        Vec4::new(3.0, 3.0, 0.0, 1.),
+        Vec4::new(4.0, 0.0, 0.0, 1.),
+        Vec4::new(5.0, 2.0, 0.0, 1.),
+        Vec4::new(6.0, 1.0, 0.0, 1.),
+        Vec4::new(7.0, 4.0, 0.0, 1.),
     ];
-    /* let control_points = vec![
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 3.0, 0.0),
-        Vec3::new(4.0, 3.0, 0.0),
-        Vec3::new(5.0, 0.0, 0.0),
-    ]; */
-    let curve = CubicNurbs::cubic_bezier(control_points);
+    let num_points = control_points.len();
+    let num_knots = num_points + 4;
+
+    let mut knot_vec = vec![0.0; num_knots];
+    for i in num_points..num_knots {
+        knot_vec[i] = 1.0;
+    }
+    let num_interior_segments = num_points - 3;
+    for i in 4..num_points {
+        let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+        knot_vec[i] = interior_t;
+    }
+    let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
     // 2. Schnelle Auswertung zur Laufzeit
     let steps = 1000;
