@@ -17,7 +17,7 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct NurbsSegmentCache {
-    marsden_identity: Mat4,
+    coefficients: Mat4,
 
     // The Knot start and end value for the given segment to avoid knot vector upload.
     t_start: f32,
@@ -37,39 +37,46 @@ pub struct CubicNurbs {
 }
 
 impl CubicNurbs {
-    // TODO: This gets reallocated into a Vec<Vec4> because of the weights.
-    // Probably alter this constructor to make it more ergonomic maybe with impl IntoIterator or smth.
-    pub fn cubic_bezier(control_points: Vec<Vec3>) -> Self {
+    pub fn new(control_points: Vec<Vec4>, knots: Vec<f32>) -> Self {
         let num_points = control_points.len();
-        // degree (3) + num_ctrl_pts + 1
-        let num_knots = num_points + 4;
 
-        let mut knot_vec = vec![0.0; num_knots].into_boxed_slice();
-        for i in num_points..num_knots {
-            knot_vec[i] = 1.0;
-        }
+        assert_eq!(
+            knots.len(),
+            num_points + 4,
+            "Knots length must be equal to num_points + degree + 1"
+        );
+
+        let points = control_points.into_boxed_slice();
+        let knot_vec = knots.into_boxed_slice();
+
+        // 2. Generate segment caches using your exact Marsden method
         let num_interior_segments = num_points - 3;
-        for i in 4..num_points {
-            let interior_t = (i - 3) as f32 / num_interior_segments as f32;
-            knot_vec[i] = interior_t;
-        }
-
-        // TODO: This could be better with a better points input.
-        let mut points = Vec::with_capacity(num_points);
-        for pt in control_points {
-            points.push(Vec4::new(pt.x, pt.y, pt.z, 1.0));
-        }
-        let points = points.into_boxed_slice();
-
         let mut segments_cache = Vec::with_capacity(num_interior_segments);
+
         for idx in 0..num_interior_segments {
             let r = idx + 3;
             let t_start = knot_vec[r];
             let t_end = knot_vec[r + 1];
+
+            // Skip zero-length knot spans (used for sharp kinks/multiplicity in NURBS)
+            if (t_end - t_start).abs() < 1e-6 {
+                continue;
+            }
+
             let marsden_identity = compute_nurbs_coefficient_matrix(&knot_vec, r);
 
+            // Gather the 4 active homogenous control points for this specific span
+            let p0 = points[idx];
+            let p1 = points[idx + 1];
+            let p2 = points[idx + 2];
+            let p3 = points[idx + 3];
+            let p_mat = Mat4::from_cols(p0, p1, p2, p3);
+
+            // Compute the composite matrix transformation
+            let monom = p_mat.mul_mat4(&marsden_identity);
+
             segments_cache.push(NurbsSegmentCache {
-                marsden_identity,
+                coefficients: monom,
                 t_start,
                 t_end,
                 length: 0.,
@@ -132,13 +139,14 @@ impl CubicNurbs {
 
         let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
 
-        // The points are already homogenous. Convenience Accessor for segment.
-        let p = &self.points[segment_idx..segment_idx + 4];
+        let u_splat = Vec4::splat(u);
+        let mat = segment.coefficients;
 
-        let p_mat = Mat4::from_cols(p[0], p[1], p[2], p[3]);
-        let monom = p_mat.mul_mat4(&segment.marsden_identity);
-
-        let horner_eval = monom.col(0) + u * (monom.col(1) + u * (monom.col(2) + u * monom.col(3)));
+        let horner_eval = mat
+            .col(3)
+            .mul_add(u_splat, mat.col(2))
+            .mul_add(u_splat, mat.col(1))
+            .mul_add(u_splat, mat.col(0));
 
         Vec3::new(
             horner_eval.x / horner_eval.w,
@@ -153,19 +161,33 @@ impl CubicNurbs {
 
         let dt = segment.t_end - segment.t_start;
         let u = (t - segment.t_start) / dt;
+        let u_splat = Vec4::splat(u);
 
-        // The points are already homogenous. Convenience Accessor for segment.
-        let p = &self.points[segment_idx..segment_idx + 4];
-        let p_mat = Mat4::from_cols(p[0], p[1], p[2], p[3]);
-        let monom = p_mat.mul_mat4(&segment.marsden_identity);
-        let p_hom = monom.col(0) + u * (monom.col(1) + u * (monom.col(2) + u * monom.col(3)));
-        let dp_du = monom.col(1) + u * (2.0 * monom.col(2) + 3.0 * u * monom.col(3));
-        let d2p_du2 = 2.0 * monom.col(2) + 6.0 * u * monom.col(3);
+        // Columns are already fully baked [A, B, C, D]
+        let a = segment.coefficients.col(0);
+        let b = segment.coefficients.col(1);
+        let c = segment.coefficients.col(2);
+        let d = segment.coefficients.col(3);
+
+        // Position (4D): u * (u * (u * D + C) + B) + A
+        let p_hom = d
+            .mul_add(u_splat, c)
+            .mul_add(u_splat, b)
+            .mul_add(u_splat, a);
+
+        // First Derivative (4D) w.r.t u: u * (3*D * u + 2*C) + B
+        let d3 = d * 3.0;
+        let d2 = c * 2.0;
+        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
+
+        // Second Derivative (4D) w.r.t u: 6*D * u + 2*C
+        let d6 = d * 6.0;
+        let d2p_du2 = d6.mul_add(u_splat, d2);
 
         let inv_dt = 1.0 / dt;
         let inv_dt2 = inv_dt * inv_dt;
 
-        let a = p_hom.xyz();
+        let a_xyz = p_hom.xyz();
         let w = p_hom.w;
 
         let da = dp_du.xyz() * inv_dt;
@@ -174,7 +196,7 @@ impl CubicNurbs {
         let d2a = d2p_du2.xyz() * inv_dt2;
         let d2w = d2p_du2.w * inv_dt2;
 
-        let c_pos = a / w;
+        let c_pos = a_xyz / w;
         let c_vel = (da - dw * c_pos) / w;
         let c_acc = (d2a - 2.0 * dw * c_vel - d2w * c_pos) / w;
 
@@ -188,23 +210,31 @@ impl CubicNurbs {
         let dt = segment.t_end - segment.t_start;
         let u = (t - segment.t_start) / dt;
 
-        // The points are already homogenous. Convenience Accessor for segment.
-        let p = &self.points[segment_idx..segment_idx + 4];
+        let u_splat = Vec4::splat(u);
+        let a = segment.coefficients.col(0);
+        let b = segment.coefficients.col(1);
+        let c = segment.coefficients.col(2);
+        let d = segment.coefficients.col(3);
 
-        let p_mat = Mat4::from_cols(p[0], p[1], p[2], p[3]);
-        let monom = p_mat.mul_mat4(&segment.marsden_identity);
-        let p_hom = monom.col(0) + u * (monom.col(1) + u * (monom.col(2) + u * monom.col(3)));
-        let dp_du = monom.col(1) + u * (2.0 * monom.col(2) + 3.0 * u * monom.col(3));
+        // Position: u * (u * (u * D + C) + B) + A
+        let p_hom = d
+            .mul_add(u_splat, c)
+            .mul_add(u_splat, b)
+            .mul_add(u_splat, a);
+
+        // Derivative with respect to u: u * (3*D * u + 2*C) + B
+        let d3 = d * 3.0;
+        let d2 = c * 2.0;
+        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
 
         let inv_dt = 1.0 / dt;
-
-        let a = p_hom.xyz();
+        let a_xyz = p_hom.xyz();
         let w = p_hom.w;
 
         let da = dp_du.xyz() * inv_dt;
         let dw = dp_du.w * inv_dt;
 
-        let c_pos = a / w;
+        let c_pos = a_xyz / w;
         let c_vel = (da - dw * c_pos) / w;
 
         (c_pos, c_vel)

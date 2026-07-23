@@ -106,16 +106,48 @@ fn draw_example_collection(
         Vec3::new(5.0, 0.0, 0.0),
     ]; */
     let control_points = vec![
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 2.0, 0.0),
-        Vec3::new(2.0, -1.0, 0.0),
-        Vec3::new(3.0, 3.0, 0.0),
-        Vec3::new(4.0, 0.0, 0.0),
-        Vec3::new(5.0, 2.0, 0.0),
-        Vec3::new(6.0, 1.0, 0.0),
-        Vec3::new(7.0, 4.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, 1.),
+        Vec4::new(1.0, 2.0, 0.0, 1.),
+        Vec4::new(2.0, -1.0, 0.0, 1.),
+        Vec4::new(3.0, 3.0, 0.0, 1.),
+        Vec4::new(4.0, 0.0, 0.0, 1.),
+        Vec4::new(5.0, 2.0, 0.0, 1.),
+        Vec4::new(6.0, 1.0, 0.0, 1.),
+        Vec4::new(7.0, 4.0, 0.0, 1.),
     ];
-    let curve = oneiroi_core::nurbs::CubicNurbs::cubic_bezier(control_points);
+    let num_points = control_points.len();
+    let num_knots = num_points + 4;
+
+    let mut knot_vec = vec![0.0; num_knots];
+    for i in num_points..num_knots {
+        knot_vec[i] = 1.0;
+    }
+    let num_interior_segments = num_points - 3;
+    for i in 4..num_points {
+        let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+        knot_vec[i] = interior_t;
+    }
+
+    /* let control_points = vec![
+        Vec4::new(1.0, 0.0, 0.0, 1.),        // P0: Start East
+        Vec4::new(1.0, 2.0, 0.0, 1. / 3.),   // P1: North-East corner
+        Vec4::new(-1.0, 2.0, 0.0, 1. / 3.),  // P2: North-West corner
+        Vec4::new(-1.0, 0.0, 0.0, 1.),       // P3: West
+        Vec4::new(-1.0, -2.0, 0.0, 1. / 3.), // P4: South-West corner
+        Vec4::new(1.0, -2.0, 0.0, 1. / 3.),  // P5: South-East corner
+        Vec4::new(1.0, 0.0, 0.0, 1.),        // P6: East (Loop closure)
+        Vec4::new(1.0, 2.0, 0.0, 1. / 3.),   // P7: Wrap-around phantom point for cubic continuity
+        Vec4::new(-1.0, 2.0, 0.0, 1. / 3.),  // P8: Wrap-around phantom point for cubic continuity
+    ];
+
+    let knot_vec = vec![
+        0.0, 0.0, 0.0, 0.0, // Clamped start
+        1.0, 1.0, 1.0, // Quad 1 to Quad 2 boundary
+        2.0, 2.0, 2.0, // Quad 2 to Quad 3 boundary
+        3.0, 3.0, 3.0, // Clamped end matching parameter space bounds
+    ]; */
+
+    let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
     let mut points = vec![];
     let mut tangents = vec![];
