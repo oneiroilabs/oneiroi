@@ -1,9 +1,14 @@
 use bevy::{
+    asset::RenderAssetUsages,
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
     color::palettes::css::*,
     prelude::*,
 };
-use std::{f32::consts::PI, time::Instant};
+use oneiroi_core::nurbs::TransformAtT;
+use std::{
+    f32::consts::{PI, TAU},
+    time::Instant,
+};
 
 fn main() {
     App::new()
@@ -52,13 +57,105 @@ fn setup(
         Transform::from_xyz(0., 1.5, 6.).looking_at(Vec3::ZERO, Vec3::Y),
         FreeCamera::default(),
     ));
-    /*  // plane
+    // plane
+
+    let control_points = vec![
+        Vec4::new(0.0, 0.0, 0.0, 1.),
+        Vec4::new(1.0, 2.0, 0.0, 1.),
+        Vec4::new(2.0, -1.0, 0.0, 1.),
+        Vec4::new(3.0, 3.0, 0.0, 1.),
+        Vec4::new(4.0, 0.0, 0.0, 1.),
+        Vec4::new(5.0, 2.0, 0.0, 1.),
+        Vec4::new(6.0, 1.0, 0.0, 1.),
+        Vec4::new(7.0, 4.0, 0.0, 1.),
+    ];
+    let num_points = control_points.len();
+    let num_knots = num_points + 4;
+
+    let mut knot_vec = vec![0.0; num_knots];
+    for i in num_points..num_knots {
+        knot_vec[i] = 1.0;
+    }
+    let num_interior_segments = num_points - 3;
+    for i in 4..num_points {
+        let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+        knot_vec[i] = interior_t;
+    }
+
+    /* let control_points = vec![
+        Vec4::new(1.0, 0.0, 0.0, 1.),        // P0: Start East
+        Vec4::new(1.0, 2.0, 0.0, 1. / 3.),   // P1: North-East corner
+        Vec4::new(-1.0, 2.0, 0.0, 1. / 3.),  // P2: North-West corner
+        Vec4::new(-1.0, 0.0, 0.0, 1.),       // P3: West
+        Vec4::new(-1.0, -2.0, 0.0, 1. / 3.), // P4: South-West corner
+        Vec4::new(1.0, -2.0, 0.0, 1. / 3.),  // P5: South-East corner
+        Vec4::new(1.0, 0.0, 0.0, 1.),        // P6: East (Loop closure)
+        Vec4::new(1.0, 2.0, 0.0, 1. / 3.),   // P7: Wrap-around phantom point for cubic continuity
+        Vec4::new(-1.0, 2.0, 0.0, 1. / 3.),  // P8: Wrap-around phantom point for cubic continuity
+    ];
+
+    let knot_vec = vec![
+        0.0, 0.0, 0.0, 0.0, // Clamped start
+        1.0, 1.0, 1.0, // Quad 1 to Quad 2 boundary
+        2.0, 2.0, 2.0, // Quad 2 to Quad 3 boundary
+        3.0, 3.0, 3.0, // Clamped end matching parameter space bounds
+    ]; */
+
+    let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
+
+    let circle_profile: Vec<Vec2> = (0..16)
+        .map(|i| {
+            let angle = (i as f32 / 16.0) * std::f32::consts::TAU;
+            Vec2::new(angle.cos(), angle.sin())
+        })
+        .collect();
+
+    let half_w = 0.3 * 0.5;
+    let half_h = 0.3 * 0.5;
+
+    // Die Punkte werden im Uhrzeigersinn (oder Gegenuhrzeigersinn) definiert,
+    // um eine saubere, nicht-selbstüberkreuzende Geometrie zu gewährleisten.
+    let cubic_profile = vec![
+        Vec2::new(-half_w, -half_h), // Unten Links
+        Vec2::new(-half_w, half_h),  // Oben Links
+        Vec2::new(half_w, half_h),   // Oben Rechts
+        Vec2::new(half_w, -half_h),  // Unten Rechts
+    ];
+
+    let (vertices, indices) = curve.sweep_profile_transformed(
+        &circle_profile,
+        100,  // Smooth longitudinal subdivision count
+        true, // Closed circle cross section
+        |t| {
+            // Normalize time parameter to a 0.0 -> 1.0 range factor
+            let factor = t;
+
+            TransformAtT {
+                // Linearly taper from a scale factor of 2.0 down to a sharp 0.1 near the tip
+                scale: Vec2::splat(0.3 * (1.0 - factor) + 0.1),
+                // Rotate the profile a full revolution over the course of the spine path
+                rotation_radians: factor * TAU,
+            }
+        },
+    );
+
+    println!("Number Vertices: {}", vertices.len());
+
+    let mut mesh = Mesh::new(
+        wgpu::PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices));
+    mesh.duplicate_vertices();
+    let mesh = mesh.with_computed_flat_normals();
+
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(5.0, 5.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(Color::srgb(1.0, 1.0, 1.0))),
     ));
     // cube
-    commands.spawn((
+    /* commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
         MeshMaterial3d(materials.add(Color::srgb(0.8, 0.7, 0.6))),
         Transform::from_xyz(0.0, 0.5, 0.0),
@@ -157,7 +254,7 @@ fn draw_example_collection(
     let steps = 100;
     let instant = Instant::now();
     let uniform_samples = curve.sample_equidistant(steps);
-    println!("Evaluation of {steps} steps took: {:?}", instant.elapsed());
+    //println!("Evaluation of {steps} steps took: {:?}", instant.elapsed());
     for step in 0..steps {
         let t = step as f32 / steps as f32;
         let pt = curve.evaluate(t);
@@ -176,6 +273,30 @@ fn draw_example_collection(
     for (point, tangent) in uniform_samples.into_iter() {
         gizmos.arrow(point, point.move_towards(tangent, 1.), Color::BLACK);
     }
+
+    let circle_profile: Vec<Vec2> = (0..16)
+        .map(|i| {
+            let angle = (i as f32 / 16.0) * std::f32::consts::TAU;
+            Vec2::new(angle.cos(), angle.sin())
+        })
+        .collect();
+
+    let (vertices, indices) = curve.sweep_profile_transformed(
+        &circle_profile,
+        100,  // Smooth longitudinal subdivision count
+        true, // Closed circle cross section
+        |t| {
+            // Normalize time parameter to a 0.0 -> 1.0 range factor
+            let factor = t;
+
+            TransformAtT {
+                // Linearly taper from a scale factor of 2.0 down to a sharp 0.1 near the tip
+                scale: Vec2::splat(2.0 * (1.0 - factor) + 0.1),
+                // Rotate the profile a full revolution over the course of the spine path
+                rotation_radians: factor * std::f32::consts::TAU,
+            }
+        },
+    );
 }
 
 fn update_config(

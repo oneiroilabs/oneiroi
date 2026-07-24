@@ -65,9 +65,3 @@ harness = false
 [features]
 default = ["editor"]
 editor = []
-
-[profile.release]
-codegen-units = 1
-lto = "fat"
-panic = "abort"
-strip = "symbols"
