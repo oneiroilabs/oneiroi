@@ -1,3 +1,3 @@
-pub trait Curve {
+/* pub trait Curve {
     fn sample()
-}
+} */

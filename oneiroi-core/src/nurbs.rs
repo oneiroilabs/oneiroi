@@ -11,10 +11,10 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 ];
 
 /// GPU-Friendly structure accelerating the evaluation by:
-/// - Caching the Marsden Identity for the Segment
+/// - Caching the coefficient Matrix for the Segment.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct NurbsSegmentCache {
+pub struct CubicNurbsSegmentCache {
     coefficients: Mat4,
 
     // The Knot start and end value for the given segment to avoid knot vector upload.
@@ -31,7 +31,7 @@ pub struct CubicNurbs {
     /// Includes the weight of the point in the w coordinate.
     points: Box<[Vec4]>,
     knots: Box<[f32]>,
-    segments: Box<[NurbsSegmentCache]>,
+    segments: Box<[CubicNurbsSegmentCache]>,
 }
 
 impl CubicNurbs {
@@ -47,7 +47,6 @@ impl CubicNurbs {
         let points = control_points.into_boxed_slice();
         let knot_vec = knots.into_boxed_slice();
 
-        // 2. Generate segment caches using your exact Marsden method
         let num_interior_segments = num_points - 3;
         let mut segments_cache = Vec::with_capacity(num_interior_segments);
 
@@ -56,24 +55,21 @@ impl CubicNurbs {
             let t_start = knot_vec[r];
             let t_end = knot_vec[r + 1];
 
-            // Skip zero-length knot spans (used for sharp kinks/multiplicity in NURBS)
             if (t_end - t_start).abs() < 1e-6 {
                 continue;
             }
 
             let marsden_identity = compute_nurbs_coefficient_matrix(&knot_vec, r);
 
-            // Gather the 4 active homogenous control points for this specific span
             let p0 = points[idx];
             let p1 = points[idx + 1];
             let p2 = points[idx + 2];
             let p3 = points[idx + 3];
             let p_mat = Mat4::from_cols(p0, p1, p2, p3);
 
-            // Compute the composite matrix transformation
             let monom = p_mat.mul_mat4(&marsden_identity);
 
-            segments_cache.push(NurbsSegmentCache {
+            segments_cache.push(CubicNurbsSegmentCache {
                 coefficients: monom,
                 t_start,
                 t_end,
@@ -97,15 +93,12 @@ impl CubicNurbs {
         let mut total_length = 0.0;
 
         for idx in 0..num_segments {
-            // Wir holen uns eine unmutable Referenz für die Auswertung
             let segment = &self.segments[idx];
 
-            // Wenn t_cutoff == segment.t_end, berechnet die Funktion die volle Segmentlänge
             let seg_len = self.length_inside_segment(segment, segment.t_end);
 
             total_length += seg_len;
 
-            // Mutable Zuweisung erst ganz am Ende, um den Borrow-Checker zu bedienen
             let segment_mut = &mut self.segments[idx];
             segment_mut.length = seg_len;
             segment_mut.cumulative_length = total_length;
@@ -124,7 +117,6 @@ impl CubicNurbs {
             return self.segments.len() - 1;
         }
 
-        // Lineare Suche nach dem passenden Zeitfenster
         self.segments.partition_point(|seg| t >= seg.t_start) - 1
     }
 
@@ -158,24 +150,20 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
         let u_splat = Vec4::splat(u);
 
-        // Columns are already fully baked [A, B, C, D]
         let a = segment.coefficients.col(0);
         let b = segment.coefficients.col(1);
         let c = segment.coefficients.col(2);
         let d = segment.coefficients.col(3);
 
-        // Position (4D): u * (u * (u * D + C) + B) + A
         let p_hom = d
             .mul_add(u_splat, c)
             .mul_add(u_splat, b)
             .mul_add(u_splat, a);
 
-        // First Derivative (4D) w.r.t u: u * (3*D * u + 2*C) + B
         let d3 = d * 3.0;
         let d2 = c * 2.0;
         let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
 
-        // Second Derivative (4D) w.r.t u: 6*D * u + 2*C
         let d6 = d * 6.0;
         let d2p_du2 = d6.mul_add(u_splat, d2);
 
@@ -211,13 +199,11 @@ impl CubicNurbs {
         let c = segment.coefficients.col(2);
         let d = segment.coefficients.col(3);
 
-        // Position: u * (u * (u * D + C) + B) + A
         let p_hom = d
             .mul_add(u_splat, c)
             .mul_add(u_splat, b)
             .mul_add(u_splat, a);
 
-        // Derivative with respect to u: u * (3*D * u + 2*C) + B
         let d3 = d * 3.0;
         let d2 = c * 2.0;
         let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
@@ -247,7 +233,7 @@ impl CubicNurbs {
         }
     }
 
-    fn length_inside_segment(&self, segment: &NurbsSegmentCache, t_cutoff: f32) -> f32 {
+    fn length_inside_segment(&self, segment: &CubicNurbsSegmentCache, t_cutoff: f32) -> f32 {
         let dt = t_cutoff - segment.t_start;
         if dt <= 1e-6 {
             return 0.0;
