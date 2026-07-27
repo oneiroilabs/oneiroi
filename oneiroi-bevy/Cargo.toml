@@ -9,11 +9,11 @@ repository.workspace = true
 readme.workspace = true
 publish = true
 
-[profile.dev]
-opt-level = 1
+#[profile.dev]
+#opt-level = 1
 
-[profile.dev.package.bevy]
-opt-level = 3
+#[profile.dev.package.bevy]
+#opt-level = 3
 
 [dependencies]
 bevy = { version = "0.19", features = ["free_camera"] }

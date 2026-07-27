@@ -1,0 +1,15 @@
+[package]
+name = "oneiroi-editor"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", features = [
+    "wgpu",
+] }
+iced_nodegraph = { version = "0.4" }
