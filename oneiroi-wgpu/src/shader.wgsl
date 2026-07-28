@@ -11,16 +11,18 @@ struct CubicNurbsSegmentCache {
     cumulative_length: f32,
 }
 
-// Bindegruppe für die Kurvendaten (Read-Only)
-@group(0) @binding(0) var<storage, read> segments: array<CubicNurbsSegmentCache>;
-//@group(0) @binding(1) var<uniform> num_segments: u32;
+@group(0) 
+@binding(0)
+var<storage, read> segments: array<CubicNurbsSegmentCache>;
 
-// Bindegruppe für Ein- und Ausgabedaten der GPU-Abfrage
-@group(1) @binding(0) var<storage, read> input_t: array<f32>;
+@group(1)
+@binding(0)
+var<storage, read> input_t: array<f32>;
 
-@group(1) @binding(1) var<storage, read_write> output_points: array<vec3<f32>>;
+@group(1)
+@binding(1)
+var<storage, read_write> output_points: array<vec3<f32>>;
 
-// Hilfsfunktion zur Segment-Suche mittels Binärsuche (Äquivalent zu partition_point)
 fn find_segment_idx(t: f32) -> u32 {
     var num_segments = arrayLength(&segments);
     if (num_segments == 0u) { return 0u; }
@@ -41,7 +43,8 @@ fn find_segment_idx(t: f32) -> u32 {
     return low - 1u;
 }
 
-@compute @workgroup_size(64)
+@compute 
+@workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
     
@@ -53,7 +56,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
     
-    // Explicitly mirror the Horner scheme accumulation chain from Rust
     let p_hom = fma(
         fma(
             fma(segment.coeff_col3, vec4<f32>(u), segment.coeff_col2), 
@@ -64,6 +66,5 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         segment.coeff_col0
     );
 
-    // Dehomogenization
     output_points[idx] = p_hom.xyz / p_hom.w;
     }
