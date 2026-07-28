@@ -1,3 +1,4 @@
+use glam::Vec4;
 /// To serve as an introduction to the wgpu api, we will implement a simple
 /// compute shader which takes a list of numbers on the CPU and doubles them on the GPU.
 ///
@@ -15,7 +16,7 @@ use wgpu::util::DeviceExt;
 
 fn main() {
     // Parse all arguments as floats. We need to skip argument 0, which is the name of the program.
-    let arguments: Vec<f32> = std::env::args()
+    /* let arguments: Vec<f32> = std::env::args()
         .skip(1)
         .map(|s| {
             f32::from_str(&s).unwrap_or_else(|_| panic!("Cannot parse argument {s:?} as a float."))
@@ -27,7 +28,32 @@ fn main() {
         return;
     }
 
-    println!("Parsed {} arguments", arguments.len());
+    println!("Parsed {} arguments", arguments.len()); */
+
+    let control_points = vec![
+        Vec4::new(0.0, 0.0, 0.0, 1.),
+        Vec4::new(1.0, 2.0, 0.0, 1.),
+        Vec4::new(2.0, -1.0, 0.0, 1.),
+        Vec4::new(3.0, 3.0, 0.0, 1.),
+        Vec4::new(4.0, 0.0, 0.0, 1.),
+        Vec4::new(5.0, 2.0, 0.0, 1.),
+        Vec4::new(6.0, 1.0, 0.0, 1.),
+        Vec4::new(7.0, 4.0, 0.0, 1.),
+    ];
+    let num_points = control_points.len();
+    let num_knots = num_points + 4;
+
+    let mut knot_vec = vec![0.0; num_knots];
+    for i in num_points..num_knots {
+        knot_vec[i] = 1.0;
+    }
+    let num_interior_segments = num_points - 3;
+    for i in 4..num_points {
+        let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+        knot_vec[i] = interior_t;
+    }
+
+    let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
     // wgpu uses `log` for all of our logging, so we initialize a logger with the `env_logger` crate.
     //
@@ -88,16 +114,23 @@ fn main() {
     // a buffer with some initial data.
     //
     // We use the `bytemuck` crate to cast the slice of f32 to a &[u8] to be uploaded to the GPU.
-    let input_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    let segments = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
-        contents: bytemuck::cast_slice(&arguments),
+        contents: bytemuck::cast_slice(&curve.segments),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let samples = vec![0.0f32, 0.2, 0.4, 0.6, 0.8, 1.0];
+    let input_ts = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::cast_slice(&samples),
         usage: wgpu::BufferUsages::STORAGE,
     });
 
     // Now we create a buffer to store the output data.
     let output_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: input_data_buffer.size(),
+        size: (samples.len() * 4 * 3) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -107,7 +140,7 @@ fn main() {
     // and that usage can only be used with `COPY_DST`.
     let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: input_data_buffer.size(),
+        size: (samples.len() * 4 * 3) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -116,6 +149,36 @@ fn main() {
     // of this like a C-style header declaration, ensuring both the pipeline and bind group agree
     // on the types of resources.
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            // Input buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    // This is the size of a single element in the buffer.
+                    min_binding_size: Some(NonZeroU64::new(80).unwrap()),
+                    has_dynamic_offset: false,
+                },
+                count: None,
+            },
+            // Output buffer
+            /* wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform {},
+                    // This is the size of a single element in the buffer.
+                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                    has_dynamic_offset: false,
+                },
+                count: None,
+            }, */
+        ],
+    });
+
+    let bind_group_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[
             // Input buffer
@@ -137,7 +200,7 @@ fn main() {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                     // This is the size of a single element in the buffer.
-                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                    min_binding_size: Some(NonZeroU64::new(16).unwrap()),
                     has_dynamic_offset: false,
                 },
                 count: None,
@@ -155,7 +218,22 @@ fn main() {
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input_data_buffer.as_entire_binding(),
+                resource: segments.as_entire_binding(),
+            },
+            /* wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_data_buffer.as_entire_binding(),
+            }, */
+        ],
+    });
+
+    let bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bind_group_layout_1,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_ts.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -167,7 +245,7 @@ fn main() {
     // The pipeline layout describes the bind groups that a pipeline expects
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[Some(&bind_group_layout)],
+        bind_group_layouts: &[Some(&bind_group_layout), Some(&bind_group_layout_1)],
         immediate_size: 0,
     });
 
@@ -177,7 +255,7 @@ fn main() {
         label: None,
         layout: Some(&pipeline_layout),
         module: &module,
-        entry_point: Some("doubleMe"),
+        entry_point: Some("main"),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     });
@@ -197,13 +275,14 @@ fn main() {
     compute_pass.set_pipeline(&pipeline);
     // Set the bind group that we want to use
     compute_pass.set_bind_group(0, &bind_group, &[]);
+    compute_pass.set_bind_group(1, &bind_group_1, &[]);
 
     // Now we dispatch a series of workgroups. Each workgroup is a 3D grid of individual programs.
     //
     // We defined the workgroup size in the shader as 64x1x1. So in order to process all of our
     // inputs, we ceiling divide the number of inputs by 64. If the user passes 32 inputs, we will
     // dispatch 1 workgroups. If the user passes 65 inputs, we will dispatch 2 workgroups, etc.
-    let workgroup_count = arguments.len().div_ceil(64);
+    let workgroup_count = curve.segments.len().div_ceil(64);
     compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
 
     // Now we drop the compute pass, giving us access to the encoder again.

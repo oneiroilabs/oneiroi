@@ -31,7 +31,7 @@ pub struct CubicNurbs {
     /// Includes the weight of the point in the w coordinate.
     points: Box<[Vec4]>,
     knots: Box<[f32]>,
-    segments: Box<[CubicNurbsSegmentCache]>,
+    pub segments: Box<[CubicNurbsSegmentCache]>,
 }
 
 impl CubicNurbs {

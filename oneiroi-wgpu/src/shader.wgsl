@@ -1,27 +1,62 @@
-// Input to the shader. The length of the array is determined by what buffer is bound.
-//
-// Out of bounds accesses 
-@group(0) @binding(0)
-var<storage, read> input: array<f32>;
-// Output of the shader.  
-@group(0) @binding(1)
-var<storage, read_write> output: array<f32>;
+struct CubicNurbsSegmentCache {
+    coefficients: mat4x4<f32>,
+    t_start: f32,
+    t_end: f32,
+    length: f32,
+    cumulative_length: f32,
+}
 
-// Ideal workgroup size depends on the hardware, the workload, and other factors. However, it should
-// _generally_ be a multiple of 64. Common sizes are 64x1x1, 256x1x1; or 8x8x1, 16x16x1 for 2D workloads.
-@compute @workgroup_size(64)
-fn doubleMe(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // While compute invocations are 3d, we're only using one dimension.
-    let index = global_id.x;
+// Bindegruppe für die Kurvendaten (Read-Only)
+@group(0) @binding(0) var<storage, read> segments: array<CubicNurbsSegmentCache>;
+//@group(0) @binding(1) var<uniform> num_segments: u32;
 
-    // Because we're using a workgroup size of 64, if the input size isn't a multiple of 64,
-    // we will have some "extra" invocations. This is fine, but we should tell them to stop
-    // to avoid out-of-bounds accesses.
-    let array_length = arrayLength(&input);
-    if (global_id.x >= array_length) {
-        return;
+// Bindegruppe für Ein- und Ausgabedaten der GPU-Abfrage
+@group(1) @binding(0) var<storage, read> input_t: array<f32>;
+@group(1) @binding(1) var<storage, read_write> output_points: array<vec3<f32>>;
+
+// Hilfsfunktion zur Segment-Suche mittels Binärsuche (Äquivalent zu partition_point)
+fn find_segment_idx(t: f32) -> u32 {
+    var num_segments = arrayLength(&segments);
+    if (num_segments == 0u) { return 0u; }
+    if (t <= segments[0u].t_start) { return 0u; }
+    if (t >= segments[num_segments - 1u].t_end) { return num_segments - 1u; }
+
+    var low: u32 = 0u;
+    var high: u32 = num_segments;
+
+    while (low < high) {
+        let mid = low + (high - low) / 2u;
+        if (t >= segments[mid].t_start) {
+            low = mid + 1u;
+        } else {
+            high = mid;
+        }
     }
+    return low - 1u;
+}
 
-    // Do the multiply by two and write to the output.
-    output[global_id.x] = input[global_id.x] * 2.0;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    
+    // Array-Grenzen absichern gegen ungerade Workgroup-Größen
+    if (idx >= arrayLength(&input_t)) { return; }
+
+    let t = input_t[idx];
+    let seg_idx = find_segment_idx(t);
+    let segment = segments[seg_idx];
+
+    // Normalisierung des t-Parameters auf das lokale Segment [0.0, 1.0]
+    let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
+
+    let mat = segment.coefficients;
+    
+    // Horner-Schema Auswertung (Entspricht exakt der mul_add Kette im Rust Code)
+    // WGSL mat4x4 Spalten-Indizierung erfolgt über mat[col_idx]
+    let horner_eval = mat[3u] * u + mat[2u];
+    let horner_eval2 = horner_eval * u + mat[1u];
+    let p_hom = horner_eval2 * u + mat[0u];
+
+    // Dehomogenisierung (Perspektivische Division der W-Komponente)
+    output_points[idx] = vec3<f32>(p_hom.x / p_hom.w, p_hom.y / p_hom.w, p_hom.z / p_hom.w);
 }

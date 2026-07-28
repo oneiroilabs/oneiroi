@@ -31,3 +31,4 @@ renderdoc = "0.12"
 
 oneiroi-core.workspace = true
 bytemuck.workspace = true
+glam.workspace = true
