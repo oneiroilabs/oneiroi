@@ -1,78 +1,27 @@
-enable wgpu_mesh_shader;
+// Input to the shader. The length of the array is determined by what buffer is bound.
+//
+// Out of bounds accesses 
+@group(0) @binding(0)
+var<storage, read> input: array<f32>;
+// Output of the shader.  
+@group(0) @binding(1)
+var<storage, read_write> output: array<f32>;
 
-const positions = array(
-    vec4(0., 1., 0., 1.),
-    vec4(-1., -1., 0., 1.),
-    vec4(1., -1., 0., 1.)
-);
-const colors = array(
-    vec4(0., 1., 0., 1.),
-    vec4(0., 0., 1., 1.),
-    vec4(1., 0., 0., 1.)
-);
+// Ideal workgroup size depends on the hardware, the workload, and other factors. However, it should
+// _generally_ be a multiple of 64. Common sizes are 64x1x1, 256x1x1; or 8x8x1, 16x16x1 for 2D workloads.
+@compute @workgroup_size(64)
+fn doubleMe(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // While compute invocations are 3d, we're only using one dimension.
+    let index = global_id.x;
 
-struct TaskPayload {
-    colorMask: vec4<f32>,
-    visible: bool,
-}
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-}
-struct PrimitiveOutput {
-    @builtin(triangle_indices) indices: vec3<u32>,
-    @builtin(cull_primitive) cull: bool,
-    @per_primitive @location(1) colorMask: vec4<f32>,
-}
-struct PrimitiveInput {
-    @per_primitive @location(1) colorMask: vec4<f32>,
-}
-
-var<task_payload> taskPayload: TaskPayload;
-var<workgroup> workgroupData: f32;
-
-@task
-@payload(taskPayload)
-@workgroup_size(64)
-fn ts_main(@builtin(local_invocation_id) thread_id: vec3<u32>) -> @builtin(mesh_task_size) vec3<u32> {
-    if thread_id.x == 0 {
-        workgroupData = 1.0;
-        taskPayload.colorMask = vec4(1.0, 1.0, 0.0, 1.0);
-        taskPayload.visible = true;
-        return vec3(1, 1, 1);
+    // Because we're using a workgroup size of 64, if the input size isn't a multiple of 64,
+    // we will have some "extra" invocations. This is fine, but we should tell them to stop
+    // to avoid out-of-bounds accesses.
+    let array_length = arrayLength(&input);
+    if (global_id.x >= array_length) {
+        return;
     }
-    return vec3(0, 0, 0);
-}
 
-struct MeshOutput {
-    @builtin(vertices) vertices: array<VertexOutput, 3>,
-    @builtin(primitives) primitives: array<PrimitiveOutput, 1>,
-    @builtin(vertex_count) vertex_count: u32,
-    @builtin(primitive_count) primitive_count: u32,
-}
-
-var<workgroup> mesh_output: MeshOutput;
-
-@mesh(mesh_output)
-@payload(taskPayload)
-@workgroup_size(64)
-fn ms_main(@builtin(local_invocation_id) thread_id: vec3<u32>) {
-    if thread_id.x == 0 {
-        mesh_output.vertex_count = 3;
-        mesh_output.primitive_count = 1;
-        workgroupData = 2.0;
-
-        mesh_output.primitives[0].indices = vec3<u32>(0, 1, 2);
-        mesh_output.primitives[0].cull = !taskPayload.visible;
-        mesh_output.primitives[0].colorMask = vec4<f32>(1.0, 0.0, 1.0, 1.0);
-    }
-    if thread_id.x < 3 {
-        mesh_output.vertices[thread_id.x].position = positions[thread_id.x];
-        mesh_output.vertices[thread_id.x].color = colors[thread_id.x] * taskPayload.colorMask;
-    }
-}
-
-@fragment
-fn fs_main(vertex: VertexOutput, primitive: PrimitiveInput) -> @location(0) vec4<f32> {
-    return vertex.color * primitive.colorMask;
+    // Do the multiply by two and write to the output.
+    output[global_id.x] = input[global_id.x] * 2.0;
 }

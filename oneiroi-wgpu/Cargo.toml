@@ -30,3 +30,4 @@ pollster = "0.4"
 renderdoc = "0.12"
 
 oneiroi-core.workspace = true
+bytemuck.workspace = true

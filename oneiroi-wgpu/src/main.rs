@@ -1,304 +1,254 @@
-use std::{borrow::Cow, sync::Arc};
-
-use oneiroi_wgpu::{dispatch_graph, setup_work_graph};
-use renderdoc::{InputButton, RenderDoc, V110, V141};
-use wgpu::{
-    Backends, PassthroughShaderEntryPoint, SurfaceConfiguration, wgc::api::Dx12,
-    wgt::CreateShaderModuleDescriptorPassthrough,
-};
-use windows::{
-    Win32::Graphics::Direct3D12::{
-        self, ID3D12CommandList, ID3D12GraphicsCommandList10, ID3D12Resource, ID3D12StateObject,
-    },
-    core::Interface,
-};
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
-    keyboard::{KeyCode, NativeKeyCode, PhysicalKey},
-    window::{Window, WindowId},
-};
-
-struct State {
-    instance: wgpu::Instance,
-    window: Arc<Window>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    size: winit::dpi::PhysicalSize<u32>,
-    surface: wgpu::Surface<'static>,
-    surface_format: wgpu::TextureFormat,
-}
-
-impl State {
-    async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(display),
-        ));
-
-        let required_features = /* wgpu::Features::EXPERIMENTAL_MESH_SHADER
-            | */ wgpu::Features::EXPERIMENTAL_WORK_GRAPHS
-            | wgpu::Features::PASSTHROUGH_SHADERS;
-
-        let adapters = instance.enumerate_adapters(Backends::all()).await;
-
-        let mut chosen_adapter = None;
-        for adapter in adapters {
-            /* if let Some(surface) = surface {
-                if !adapter.is_surface_supported(surface) {
-                    continue;
-                }
-            } */
-            let adapter_features = adapter.features();
-            println!("{:?}", adapter.get_info());
-            println!("{adapter_features}");
-            if !adapter_features.contains(required_features) {
-                continue;
-            } else {
-                chosen_adapter = Some(adapter);
-                break;
-            }
-        }
-
-        let adapter = chosen_adapter.expect("No suitable GPU adapters found on the system!");
-        /* let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-        .unwrap(); */
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features,
-                required_limits: wgpu::Limits::defaults()
-                    .using_recommended_minimum_mesh_shader_values(),
-                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        let size = window.inner_size();
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-        let cap = surface.get_capabilities(&adapter);
-        let surface_format = cap.formats[0];
-
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
-            label: None,
-            layout: Some(&pipeline_layout),
-            task: Some(wgpu::TaskState {
-                module: &shader,
-                entry_point: Some("ts_main"),
-                compilation_options: Default::default(),
-            }),
-            mesh: wgpu::MeshState {
-                module: &shader,
-                entry_point: Some("ms_main"),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.view_formats[0].into())],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let mut state = State {
-            instance,
-            window,
-            device,
-            queue,
-            size,
-            surface,
-            surface_format,
-            //state_object,
-            //backing_mem,
-            //pipeline: None,
-        };
-        state.configure_surface();
-        state
-    }
-
-    fn get_window(&self) -> &Window {
-        &self.window
-    }
-
-    fn configure_surface(&self) {
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: self.surface_format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            // Request compatibility with the sRGB-format texture view we‘re going to create later.
-            view_formats: vec![self.surface_format.add_srgb_suffix()],
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            width: self.size.width,
-            height: self.size.height,
-            desired_maximum_frame_latency: 2,
-            present_mode: wgpu::PresentMode::AutoVsync,
-        };
-        self.surface.configure(&self.device, &surface_config);
-    }
-
-    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.size = new_size;
-
-        // reconfigure the surface
-        self.configure_surface();
-    }
-
-    fn render(&mut self) {
-        // Create texture view.
-        // NOTE: We must handle Timeout because the surface may be unavailable
-        // (e.g., when the window is occluded on macOS).
-        let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                drop(texture);
-                self.configure_surface();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.configure_surface();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                unreachable!("No error scope registered, so validation errors will panic")
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self.instance.create_surface(self.window.clone()).unwrap();
-                self.configure_surface();
-                return;
-            }
-        };
-        let texture_view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor {
-                // Without add_srgb_suffix() the image we will be working with
-                // might not be "gamma correct".
-                format: Some(self.surface_format.add_srgb_suffix()),
-                ..Default::default()
-            });
-
-        // Renders a GREEN screen
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rpass.push_debug_group("Prepare data for draw.");
-            rpass.set_pipeline(&self.pipeline);
-            rpass.pop_debug_group();
-            rpass.insert_debug_marker("Draw!");
-            rpass.draw_mesh_tasks(1, 1, 1);
-        }
-        queue.submit(Some(encoder.finish()));
-    }
-}
-
-#[derive(Default)]
-struct App {
-    state: Option<State>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Create window object
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes())
-                .unwrap(),
-        );
-
-        let state = pollster::block_on(State::new(
-            event_loop.owned_display_handle(),
-            window.clone(),
-        ));
-        self.state = Some(state);
-
-        window.request_redraw();
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let state = self.state.as_mut().unwrap();
-        match event {
-            WindowEvent::CloseRequested => {
-                println!("The close button was pressed; stopping");
-                event_loop.exit();
-            }
-            WindowEvent::RedrawRequested => {
-                state.render();
-                // Emits a new redraw requested event.
-                state.get_window().request_redraw();
-            }
-            WindowEvent::Resized(size) => {
-                // Reconfigures the size of the surface. We do not re-render
-                // here as this event is always followed up by redraw request.
-                state.resize(size);
-            }
-            _ => (),
-        }
-    }
-}
+/// To serve as an introduction to the wgpu api, we will implement a simple
+/// compute shader which takes a list of numbers on the CPU and doubles them on the GPU.
+///
+/// While this isn't a very practical example, you will see all the major components
+/// of using wgpu headlessly, including getting a device, running a shader, and transferring
+/// data between the CPU and GPU.
+///
+/// If you time the recording and execution of this example you will certainly see that
+/// running on the gpu is slower than doing the same calculation on the cpu. This is because
+/// floating point multiplication is a very simple operation so the transfer/submission overhead
+/// is quite a lot higher than the actual computation. This is normal and shows that the GPU
+/// needs a lot higher work/transfer ratio to come out ahead.
+use std::{num::NonZeroU64, str::FromStr};
+use wgpu::util::DeviceExt;
 
 fn main() {
+    // Parse all arguments as floats. We need to skip argument 0, which is the name of the program.
+    let arguments: Vec<f32> = std::env::args()
+        .skip(1)
+        .map(|s| {
+            f32::from_str(&s).unwrap_or_else(|_| panic!("Cannot parse argument {s:?} as a float."))
+        })
+        .collect();
+
+    if arguments.is_empty() {
+        println!("No arguments provided. Please provide a list of numbers to double.");
+        return;
+    }
+
+    println!("Parsed {} arguments", arguments.len());
+
     // wgpu uses `log` for all of our logging, so we initialize a logger with the `env_logger` crate.
     //
     // To change the log level, set the `RUST_LOG` environment variable. See the `env_logger`
     // documentation for more information.
     env_logger::init();
 
-    let event_loop = EventLoop::new().unwrap();
+    // We first initialize an wgpu `Instance`, which contains any "global" state wgpu needs.
+    //
+    // This is what loads the vulkan/dx12/metal/opengl libraries.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
-    // When the current loop iteration finishes, immediately begin a new
-    // iteration regardless of whether or not new events are available to
-    // process. Preferred for applications that want to render as fast as
-    // possible, like games.
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // We then create an `Adapter` which represents a physical gpu in the system. It allows
+    // us to query information about it and create a `Device` from it.
+    //
+    // This function is asynchronous in WebGPU, so request_adapter returns a future. On native/webgl
+    // the future resolves immediately, so we can block on it without harm.
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .expect("Failed to create adapter");
 
-    // When the current loop iteration finishes, suspend the thread until
-    // another event arrives. Helps keeping CPU utilization low if nothing
-    // is happening, which is preferred if the application might be idling in
-    // the background.
-    // event_loop.set_control_flow(ControlFlow::Wait);
+    // Print out some basic information about the adapter.
+    println!("Running on Adapter: {:#?}", adapter.get_info());
 
-    let mut app = App::default();
-    //let mut renderdoc: RenderDoc<V110> = RenderDoc::new().unwrap();
-    //renderdoc.start_frame_capture(std::ptr::null(), std::ptr::null());
-    event_loop.run_app(&mut app).unwrap();
-    //renderdoc.end_frame_capture(std::ptr::null(), std::ptr::null());
+    // Check to see if the adapter supports compute shaders. While WebGPU guarantees support for
+    // compute shaders, wgpu supports a wider range of devices through the use of "downlevel" devices.
+    let downlevel_capabilities = adapter.get_downlevel_capabilities();
+    if !downlevel_capabilities
+        .flags
+        .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+    {
+        panic!("Adapter does not support compute shaders");
+    }
+
+    // We then create a `Device` and a `Queue` from the `Adapter`.
+    //
+    // The `Device` is used to create and manage GPU resources.
+    // The `Queue` is a queue used to submit work for the GPU to process.
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: None,
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        trace: wgpu::Trace::Off,
+    }))
+    .expect("Failed to create device");
+
+    // Create a shader module from our shader code. This will parse and validate the shader.
+    //
+    // `include_wgsl` is a macro provided by wgpu like `include_str` which constructs a ShaderModuleDescriptor.
+    // If you want to load shaders differently, you can construct the ShaderModuleDescriptor manually.
+    let module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+
+    // Create a buffer with the data we want to process on the GPU.
+    //
+    // `create_buffer_init` is a utility provided by `wgpu::util::DeviceExt` which simplifies creating
+    // a buffer with some initial data.
+    //
+    // We use the `bytemuck` crate to cast the slice of f32 to a &[u8] to be uploaded to the GPU.
+    let input_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::cast_slice(&arguments),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    // Now we create a buffer to store the output data.
+    let output_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: input_data_buffer.size(),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    // Finally we create a buffer which can be read by the CPU. This buffer is how we will read
+    // the data. We need to use a separate buffer because we need to have a usage of `MAP_READ`,
+    // and that usage can only be used with `COPY_DST`.
+    let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: input_data_buffer.size(),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    // A bind group layout describes the types of resources that a bind group can contain. Think
+    // of this like a C-style header declaration, ensuring both the pipeline and bind group agree
+    // on the types of resources.
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            // Input buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    // This is the size of a single element in the buffer.
+                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                    has_dynamic_offset: false,
+                },
+                count: None,
+            },
+            // Output buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    // This is the size of a single element in the buffer.
+                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                    has_dynamic_offset: false,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    // The bind group contains the actual resources to bind to the pipeline.
+    //
+    // Even when the buffers are individually dropped, wgpu will keep the bind group and buffers
+    // alive until the bind group itself is dropped.
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_data_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_data_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    // The pipeline layout describes the bind groups that a pipeline expects
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+
+    // The pipeline is the ready-to-go program state for the GPU. It contains the shader modules,
+    // the interfaces (bind group layouts) and the shader entry point.
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some("doubleMe"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    // The command encoder allows us to record commands that we will later submit to the GPU.
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+    // A compute pass is a single series of compute operations. While we are recording a compute
+    // pass, we cannot record to the encoder.
+    let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: None,
+        timestamp_writes: None,
+    });
+
+    // Set the pipeline that we want to use
+    compute_pass.set_pipeline(&pipeline);
+    // Set the bind group that we want to use
+    compute_pass.set_bind_group(0, &bind_group, &[]);
+
+    // Now we dispatch a series of workgroups. Each workgroup is a 3D grid of individual programs.
+    //
+    // We defined the workgroup size in the shader as 64x1x1. So in order to process all of our
+    // inputs, we ceiling divide the number of inputs by 64. If the user passes 32 inputs, we will
+    // dispatch 1 workgroups. If the user passes 65 inputs, we will dispatch 2 workgroups, etc.
+    let workgroup_count = arguments.len().div_ceil(64);
+    compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
+
+    // Now we drop the compute pass, giving us access to the encoder again.
+    drop(compute_pass);
+
+    // We add a copy operation to the encoder. This will copy the data from the output buffer on the
+    // GPU to the download buffer on the CPU.
+    encoder.copy_buffer_to_buffer(
+        &output_data_buffer,
+        0,
+        &download_buffer,
+        0,
+        output_data_buffer.size(),
+    );
+
+    // We finish the encoder, giving us a fully recorded command buffer.
+    let command_buffer = encoder.finish();
+
+    // At this point nothing has actually been executed on the gpu. We have recorded a series of
+    // commands that we want to execute, but they haven't been sent to the gpu yet.
+    //
+    // Submitting to the queue sends the command buffer to the gpu. The gpu will then execute the
+    // commands in the command buffer in order.
+    queue.submit([command_buffer]);
+
+    // We now map the download buffer so we can read it. Mapping tells wgpu that we want to read/write
+    // to the buffer directly by the CPU and it should not permit any more GPU operations on the buffer.
+    //
+    // Mapping requires that the GPU be finished using the buffer before it resolves, so mapping has a callback
+    // to tell you when the mapping is complete.
+    let buffer_slice = download_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {
+        // In this case we know exactly when the mapping will be finished,
+        // so we don't need to do anything in the callback.
+    });
+
+    // Wait for the GPU to finish working on the submitted work. This doesn't work on WebGPU, so we would need
+    // to rely on the callback to know when the buffer is mapped.
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+
+    // We can now read the data from the buffer.
+    let data = buffer_slice.get_mapped_range().unwrap();
+    // Convert the data back to f32 via an aligned copy.
+    let result: Vec<f32> = bytemuck::allocation::pod_collect_to_vec(&data);
+
+    // Print out the result.
+    println!("Result: {result:?}");
 }

@@ -5902,6 +5902,7 @@ dependencies = [
 name = "oneiroi-wgpu"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "oneiroi",
  "oneiroi-core",

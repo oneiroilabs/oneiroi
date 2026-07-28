@@ -17,7 +17,7 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 pub struct CubicNurbsSegmentCache {
     coefficients: Mat4,
 
-    // The Knot start and end value for the given segment to avoid knot vector upload.
+    // The time start and end value for the given segment to avoid knot vector upload.
     t_start: f32,
     t_end: f32,
 
