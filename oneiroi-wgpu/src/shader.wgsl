@@ -4,7 +4,6 @@ struct CubicNurbsSegmentCache {
     coeff_col2: vec4<f32>,
     coeff_col3: vec4<f32>,
     
-
     t_start: f32,
     t_end: f32,
     length: f32,
@@ -67,4 +66,4 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     );
 
     output_points[idx] = p_hom.xyz / p_hom.w;
-    }
+}
