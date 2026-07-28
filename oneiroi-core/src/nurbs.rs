@@ -15,7 +15,11 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubicNurbsSegmentCache {
-    coefficients: Mat4,
+    /* coefficients: Mat4, */
+    coeff_col0: Vec4,
+    coeff_col1: Vec4,
+    coeff_col2: Vec4,
+    coeff_col3: Vec4,
 
     // The time start and end value for the given segment to avoid knot vector upload.
     t_start: f32,
@@ -70,11 +74,14 @@ impl CubicNurbs {
             let monom = p_mat.mul_mat4(&marsden_identity);
 
             segments_cache.push(CubicNurbsSegmentCache {
-                coefficients: monom,
                 t_start,
                 t_end,
                 length: 0.,
                 cumulative_length: 0.,
+                coeff_col0: monom.col(0),
+                coeff_col1: monom.col(1),
+                coeff_col2: monom.col(2),
+                coeff_col3: monom.col(3),
             });
         }
 
@@ -127,13 +134,15 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
 
         let u_splat = Vec4::splat(u);
-        let mat = segment.coefficients;
+        let c0 = segment.coeff_col0;
+        let c1 = segment.coeff_col1;
+        let c2 = segment.coeff_col2;
+        let c3 = segment.coeff_col3;
 
-        let horner_eval = mat
-            .col(3)
-            .mul_add(u_splat, mat.col(2))
-            .mul_add(u_splat, mat.col(1))
-            .mul_add(u_splat, mat.col(0));
+        let horner_eval = c3
+            .mul_add(u_splat, c2)
+            .mul_add(u_splat, c1)
+            .mul_add(u_splat, c0);
 
         Vec3::new(
             horner_eval.x / horner_eval.w,
@@ -150,10 +159,10 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
         let u_splat = Vec4::splat(u);
 
-        let a = segment.coefficients.col(0);
-        let b = segment.coefficients.col(1);
-        let c = segment.coefficients.col(2);
-        let d = segment.coefficients.col(3);
+        let a = segment.coeff_col0;
+        let b = segment.coeff_col1;
+        let c = segment.coeff_col2;
+        let d = segment.coeff_col3;
 
         let p_hom = d
             .mul_add(u_splat, c)
@@ -194,19 +203,19 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
 
         let u_splat = Vec4::splat(u);
-        let a = segment.coefficients.col(0);
-        let b = segment.coefficients.col(1);
-        let c = segment.coefficients.col(2);
-        let d = segment.coefficients.col(3);
+        let c0 = segment.coeff_col0;
+        let c1 = segment.coeff_col1;
+        let c2 = segment.coeff_col2;
+        let c3 = segment.coeff_col3;
 
-        let p_hom = d
-            .mul_add(u_splat, c)
-            .mul_add(u_splat, b)
-            .mul_add(u_splat, a);
+        let p_hom = c3
+            .mul_add(u_splat, c2)
+            .mul_add(u_splat, c1)
+            .mul_add(u_splat, c0);
 
-        let d3 = d * 3.0;
-        let d2 = c * 2.0;
-        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
+        let d3 = c3 * 3.0;
+        let d2 = c2 * 2.0;
+        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, c1);
 
         let inv_dt = 1.0 / dt;
         let a_xyz = p_hom.xyz();

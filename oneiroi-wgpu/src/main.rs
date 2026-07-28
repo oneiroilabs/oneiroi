@@ -1,4 +1,4 @@
-use glam::Vec4;
+use glam::{Vec3, Vec4};
 /// To serve as an introduction to the wgpu api, we will implement a simple
 /// compute shader which takes a list of numbers on the CPU and doubles them on the GPU.
 ///
@@ -130,7 +130,7 @@ fn main() {
     // Now we create a buffer to store the output data.
     let output_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: (samples.len() * 4 * 3) as u64,
+        size: (samples.len() * 4 * 4) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -140,7 +140,7 @@ fn main() {
     // and that usage can only be used with `COPY_DST`.
     let download_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: (samples.len() * 4 * 3) as u64,
+        size: (samples.len() * 4 * 4) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -326,8 +326,17 @@ fn main() {
     // We can now read the data from the buffer.
     let data = buffer_slice.get_mapped_range().unwrap();
     // Convert the data back to f32 via an aligned copy.
-    let result: Vec<f32> = bytemuck::allocation::pod_collect_to_vec(&data);
+    let result: Vec<Vec4> = bytemuck::allocation::pod_collect_to_vec(&data);
+
+    let num_samples = samples.len();
+    let mut cpu_eval = Vec::with_capacity(num_samples);
+    for t in samples.into_iter() {
+        let vec = curve.evaluate(t);
+        cpu_eval.push(Vec4::new(vec.x, vec.y, vec.z, 0.0));
+    }
 
     // Print out the result.
     println!("Result: {result:?}");
+
+    assert_eq!(cpu_eval, result);
 }
