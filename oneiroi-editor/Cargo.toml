@@ -13,3 +13,6 @@ iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", feature
     "wgpu",
 ] }
 iced_nodegraph = { version = "0.4" }
+
+oneiroi.workspace = true
+oneiroi-core.workspace = true

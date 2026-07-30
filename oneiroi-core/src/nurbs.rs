@@ -1,4 +1,8 @@
+use std::ops::Range;
+
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
+
+use crate::curve::Curve;
 
 // 5-Point Gauss–Legendre Quadrature
 const GAUSS_NODES: [f32; 5] = [0.0, -0.538_469_3, 0.538_469_3, -0.906_179_85, 0.906_179_85];
@@ -276,52 +280,57 @@ impl CubicNurbs {
         let mut points = Vec::with_capacity(count);
 
         points.push(self.evaluate_tanget(self.segments[0].t_start));
-        let mut current_seg_idx = 0;
 
         for i in 1..(count - 1) {
             let target_s = i as f32 * step;
 
-            while current_seg_idx < self.segments.len() - 1
-                && self.segments[current_seg_idx].cumulative_length < target_s
-            {
-                current_seg_idx += 1;
-            }
-
-            let segment = &self.segments[current_seg_idx];
-            let seg_start_len = if current_seg_idx == 0 {
-                0.0
-            } else {
-                self.segments[current_seg_idx - 1].cumulative_length
-            };
-            let s_local = target_s - seg_start_len;
-
-            let mut t =
-                segment.t_start + (s_local / segment.length) * (segment.t_end - segment.t_start);
-
-            // Because our start t should be extremely accurate we only do one loop for now.
-            for _ in 0..2 {
-                let current_s_local = self.length_inside_segment(segment, t);
-                let (_, tangent) = self.evaluate_tanget(t);
-                let speed = tangent.length();
-
-                if speed < 1e-5 {
-                    break;
-                }
-
-                let delta_t = (current_s_local - s_local) / speed;
-                t -= delta_t;
-                t = t.clamp(segment.t_start, segment.t_end);
-
-                if delta_t.abs() < 1e-5 {
-                    break;
-                }
-            }
+            let t = self.t_at_distance(target_s).unwrap();
 
             points.push(self.evaluate_tanget(t));
         }
 
         points.push(self.evaluate_tanget(self.segments.last().unwrap().t_end));
         points
+    }
+
+    fn t_at_distance(&self, distance: f32) -> Option<f32> {
+        if self.segments.is_empty() {
+            return None;
+        }
+
+        let current_seg_idx = self
+            .segments
+            .partition_point(|seg| distance >= seg.cumulative_length);
+        let segment = &self.segments[current_seg_idx];
+        let seg_start_len = if current_seg_idx == 0 {
+            0.0
+        } else {
+            self.segments[current_seg_idx - 1].cumulative_length
+        };
+        let local_distance = distance - seg_start_len;
+
+        let mut t =
+            segment.t_start + (local_distance / segment.length) * (segment.t_end - segment.t_start);
+
+        // Because our start t should be extremely accurate we only do one loop for now.
+        for _ in 0..2 {
+            let current_local_distance = self.length_inside_segment(segment, t);
+            let (_, tangent) = self.evaluate_tanget(t);
+            let speed = tangent.length();
+
+            if speed < 1e-5 {
+                break;
+            }
+
+            let delta_t = (current_local_distance - local_distance) / speed;
+            t -= delta_t;
+            t = t.clamp(segment.t_start, segment.t_end);
+
+            if delta_t.abs() < 1e-5 {
+                break;
+            }
+        }
+        Some(t)
     }
 
     pub fn compute_rmf_frames(
@@ -656,4 +665,26 @@ pub struct TransformAtT {
     pub scale: Vec2,
     /// Twist angle rotation (in radians) around the curve's local tangent vector.
     pub rotation_radians: f32,
+}
+
+impl Curve<Vec3> for CubicNurbs {
+    fn domain(&self) -> std::ops::Range<f32> {
+        0.0..1.
+    }
+
+    fn sample_unchecked(&self, t: f32) -> Vec3 {
+        todo!()
+    }
+
+    fn sample(&self, t: f32) -> Vec3 {
+        self.evaluate(t)
+    }
+
+    fn length(&self) -> f32 {
+        self.length()
+    }
+
+    fn t_at_distance(&self, distance: f32) -> f32 {
+        self.t_at_distance(distance).unwrap()
+    }
 }

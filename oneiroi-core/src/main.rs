@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use glam::{Vec2, Vec4};
-use oneiroi_core::nurbs::TransformAtT;
+use oneiroi_core::{curve::ResampleIter, nurbs::TransformAtT};
 
 fn main() {
     let control_points = vec![
@@ -27,6 +27,8 @@ fn main() {
         knot_vec[i] = interior_t;
     }
     let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
+    let iter = ResampleIter::new(&curve, 2.);
+    // iter.map()
 
     let circle_profile: Vec<Vec2> = (0..16)
         .map(|i| {

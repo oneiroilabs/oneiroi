@@ -5888,6 +5888,8 @@ version = "0.0.0"
 dependencies = [
  "iced 0.15.0-dev",
  "iced_nodegraph",
+ "oneiroi",
+ "oneiroi-core",
 ]
 
 [[package]]
