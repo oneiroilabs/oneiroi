@@ -4,3 +4,5 @@ pub mod nurbs;
 mod graph;
 pub mod hetero_arena;
 mod primitive;
+
+pub mod exec;
