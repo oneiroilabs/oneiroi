@@ -11,11 +11,11 @@ publish = true
 
 [dependencies]
 oneiroi.workspace = true
-wgpu = { version = "30.0.0", default-features = false, features = [
-    "dx12",
-    "wgsl",
-    #"renderdoc",
-], path = "../../wgpu/wgpu" }
+#wgpu = { version = "30.0.0", default-features = false, features = [
+#    "dx12",
+#    "wgsl",
+#"renderdoc",
+#], path = "../../wgpu/wgpu" }
 
 windows = { version = "0", features = [
     "Win32_Graphics_Direct3D12",
@@ -32,3 +32,4 @@ renderdoc = "0.12"
 oneiroi-core.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
+wgpu.workspace = true

@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use encase::ShaderType;
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::curve::Curve;
@@ -31,6 +32,10 @@ pub struct CubicNurbsSegmentCache {
 
     length: f32,
     cumulative_length: f32,
+
+    rmf_start_normal: Vec3,
+
+    _pad0: u32,
 }
 
 /// A Cubic Nurbs curve that can be evaluated extremly efficiently on the CPU and GPU.
@@ -86,6 +91,8 @@ impl CubicNurbs {
                 coeff_col1: monom.col(1),
                 coeff_col2: monom.col(2),
                 coeff_col3: monom.col(3),
+                rmf_start_normal: Vec3::ZERO,
+                _pad0: 0,
             });
         }
 
@@ -96,7 +103,78 @@ impl CubicNurbs {
         };
 
         curve.recompute_lengths();
+        curve.precompute_segment_rmf_starts();
+
         curve
+    }
+
+    fn precompute_segment_rmf_starts(&mut self) {
+        let num_segments = self.segments.len();
+        if num_segments == 0 {
+            return;
+        }
+
+        // 1. Initialisiere die historische Basis am Kurvenanfang (t_start von Segment 0)
+        let first_t_start = self.segments[0].t_start;
+        let mut current_pos = self.evaluate(first_t_start);
+        let (_, t_start_raw) = self.evaluate_tanget(first_t_start);
+        let mut current_tangent = t_start_raw.normalize();
+
+        // Bestimme die erste stabile Normale (Gram-Schmidt oder stabiler Fallback)
+
+        let abs_t = current_tangent.abs();
+        let ref_v = if abs_t.x < abs_t.y && abs_t.x < abs_t.z {
+            Vec3::X
+        } else if abs_t.y < abs_t.z {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
+        let mut current_normal = ref_v.cross(current_tangent).normalize();
+
+        // Erste Startnormale dem ersten Segment zuweisen
+        self.segments[0].rmf_start_normal = current_normal;
+
+        // 2. Grobschritt-Propagation (O(N)) über die Segmentgrenzen hinweg
+        for idx in 0..num_segments {
+            let t_end = self.segments[idx].t_end;
+
+            let next_pos = self.evaluate(t_end);
+            let (_, t_next_raw) = self.evaluate_tanget(t_end);
+            let next_tangent = t_next_raw.normalize();
+
+            let v1 = next_pos - current_pos;
+            let c1 = v1.length_squared();
+
+            if c1 > 1e-8 {
+                // Erster Reflektionsschritt über das Segment-Intervall
+                let n_curr_reflected = current_normal - (2.0 / c1) * v1.dot(current_normal) * v1;
+                let t_curr_reflected = current_tangent - (2.0 / c1) * v1.dot(current_tangent) * v1;
+
+                // Zweiter Reflektionsschritt zur exakten Tangentenausrichtung
+                let v2 = next_tangent - t_curr_reflected;
+                let c2 = v2.length_squared();
+
+                if c2 > 1e-8 {
+                    current_normal = n_curr_reflected - (2.0 / c2) * v2.dot(n_curr_reflected) * v2;
+                } else {
+                    current_normal = n_curr_reflected;
+                };
+
+                // Bereinigung numerischer Drift über temporäre Binormale
+                let binormal_temp = next_tangent.cross(current_normal).normalize();
+                current_normal = binormal_temp.cross(next_tangent).normalize();
+            }
+
+            // Zustand für den nächsten Segmentübergang aktualisieren
+            current_pos = next_pos;
+            current_tangent = next_tangent;
+
+            // Zuweisung der akkumulierten Normale an das darauffolgende Segment
+            if idx + 1 < num_segments {
+                self.segments[idx + 1].rmf_start_normal = current_normal;
+            }
+        }
     }
 
     fn recompute_lengths(&mut self) {

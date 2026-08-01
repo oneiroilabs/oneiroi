@@ -6,7 +6,8 @@ members = [
     "oneiroi-cpp",
     "oneiroi-bevy",
     "oneiroi-wgpu",
-    "oneiroi-core", "oneiroi-editor",
+    "oneiroi-core",
+    "oneiroi-editor",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
@@ -32,6 +33,7 @@ oneiroi-core = { path = "./oneiroi-core" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 
-
+wgpu = { version = "30" }
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
+encase = { version = "0.12" }

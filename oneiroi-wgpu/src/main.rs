@@ -19,6 +19,8 @@ use wgpu::util::DeviceExt;
 struct GpuSample {
     position: Vec4,
     tangent: Vec4,
+    normal: Vec4,
+    binormal: Vec4,
 }
 
 fn main() {
@@ -101,7 +103,7 @@ fn main() {
     // The `Queue` is a queue used to submit work for the GPU to process.
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
-        required_features: wgpu::Features::empty(),
+        required_features: wgpu::Features::SUBGROUP,
         required_limits: wgpu::Limits::downlevel_defaults(),
         experimental_features: wgpu::ExperimentalFeatures::disabled(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -113,7 +115,7 @@ fn main() {
     //
     // `include_wgsl` is a macro provided by wgpu like `include_str` which constructs a ShaderModuleDescriptor.
     // If you want to load shaders differently, you can construct the ShaderModuleDescriptor manually.
-    let module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+    //let module = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
     // Create a buffer with the data we want to process on the GPU.
     //
@@ -121,7 +123,9 @@ fn main() {
     // a buffer with some initial data.
     //
     // We use the `bytemuck` crate to cast the slice of f32 to a &[u8] to be uploaded to the GPU.
-    let sample_count = 10000u32; // Number of equidistant points requested
+    let sample_count = curve.segments.len() as u32; // Number of equidistant points requested
+
+    println!("{sample_count}");
 
     // Buffer 1: Input Curve Segments
     let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -133,7 +137,7 @@ fn main() {
     // Buffer 2: Dedicated GPU Output storage
     let output_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Output Samples Storage Buffer"),
-        size: (sample_count as usize * std::mem::size_of::<GpuSample>()) as u64,
+        size: (sample_count as usize * std::mem::size_of::<GpuSample>() * 32) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -220,7 +224,8 @@ fn main() {
         compute_pass.set_bind_group(0, &bind_group_0, &[]);
         compute_pass.set_bind_group(1, &bind_group_1, &[]);
 
-        let workgroup_count = sample_count.div_ceil(64);
+        let workgroup_count = 5; //sample_count.div_ceil(64);
+        println!("{workgroup_count}");
         compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
 
