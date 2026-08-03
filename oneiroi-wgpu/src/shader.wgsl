@@ -1,8 +1,5 @@
 struct CubicNurbsSegmentCache {
-    coeff_col0: vec4<f32>,
-    coeff_col1: vec4<f32>,
-    coeff_col2: vec4<f32>,
-    coeff_col3: vec4<f32>,
+    coeffs: mat4x4<f32>,
     
     t_start: f32,
     t_end: f32,
@@ -15,12 +12,6 @@ struct CubicNurbsSegmentCache {
 
 @group(0) @binding(0)
 var<storage, read> segments: array<CubicNurbsSegmentCache>;
-
-// Output: Array of positions and tangents bundled as vec4s
-struct OutputSample {
-    position: vec4<f32>,
-    tangent: vec4<f32>,
-}     
 
 struct EvaluatedFrame {
     position: vec3<f32>,
@@ -50,72 +41,28 @@ fn get_double_reflection_matrix(pos_a: vec3<f32>, pos_b: vec3<f32>, tang_a: vec3
         return mat3x3<f32>(vec3<f32>(1.0,0.0,0.0), vec3<f32>(0.0,1.0,0.0), vec3<f32>(0.0,0.0,1.0)); 
     }
 
-    let r1 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v1_len_sq) * v1.x * v1;
-    let r2 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v1_len_sq) * v1.y * v1;
-    let r3 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v1_len_sq) * v1.z * v1;
+    let r1 = vec3<f32>(1.0, 0.0, 0.0) - (2.0 / v1_len_sq) * v1.x * v1;
+    let r2 = vec3<f32>(0.0, 1.0, 0.0) - (2.0 / v1_len_sq) * v1.y * v1;
+    let r3 = vec3<f32>(0.0, 0.0, 1.0) - (2.0 / v1_len_sq) * v1.z * v1;
     let M1 = mat3x3<f32>(r1, r2, r3);
 
-    let u1 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v2_len_sq) * v2.x * v2;
-    let u2 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v2_len_sq) * v2.y * v2;
-    let u3 = vec3<f32>(1.0, 1.0, 1.0) - (2.0 / v2_len_sq) * v2.z * v2;
+    let u1 = vec3<f32>(1.0, 0.0, 0.0) - (2.0 / v2_len_sq) * v2.x * v2;
+    let u2 = vec3<f32>(0.0, 1.0, 0.0) - (2.0 / v2_len_sq) * v2.y * v2;
+    let u3 = vec3<f32>(0.0, 0.0, 1.0) - (2.0 / v2_len_sq) * v2.z * v2;
     let M2 = mat3x3<f32>(u1, u2, u3);
 
     return M2 * M1;
 }
 
-fn evaluate_tangent(seg_idx: u32, t: f32) -> OutputSample {
-    let segment = segments[seg_idx];
-    let dt = segment.t_end - segment.t_start;
-    let u = (t - segment.t_start) / dt;
-    
 
-
-    let p_hom = fma(
-        fma(fma(segment.coeff_col3, vec4<f32>(u), segment.coeff_col2), vec4<f32>(u), segment.coeff_col1),
-        vec4<f32>(u),
-        segment.coeff_col0
-    );
-
-    let dp_du = fma(
-        fma(segment.coeff_col3 * 3.0, vec4<f32>(u), segment.coeff_col2 * 2.0),
-        vec4<f32>(u),
-        segment.coeff_col1
-    );
-
-    let inv_dt = 1.0 / dt;
-    let a_xyz = p_hom.xyz;
-    let w = p_hom.w;
-    let da = dp_du.xyz * inv_dt;
-    let dw = dp_du.w * inv_dt;
-
-    let c_pos = a_xyz / w;
-    let c_vel = (da - dw * c_pos) / w;
-
-    var out: OutputSample;
-    out.position = vec4<f32>(c_pos, 1.0);
-    out.tangent = vec4<f32>(c_vel, 0.0);
-    return out;
-}
-
-fn length_inside_segment(seg_idx: u32, t_cutoff: f32) -> f32 {
-    let segment = segments[seg_idx];
-    let dt = t_cutoff - segment.t_start;
-    if (dt <= 1e-6) { return 0.0; }
-
-    var span_integral = 0.0;
-    for (var i = 0u; i < 5u; i++) {
-        let t = 0.5 * (dt * GAUSS_NODES[i] + (t_cutoff + segment.t_start));
-        let sample_eval = evaluate_tangent(seg_idx, t);
-        span_integral += GAUSS_WEIGHTS[i] * length(sample_eval.tangent.xyz);
-    }
-    return span_integral * 0.5 * dt;
-}
 
 @compute @workgroup_size(32,1,1)
-fn main(@builtin(local_invocation_id) local_id: vec3<u32>,
-    @builtin(workgroup_id) wg_id: vec3<u32>) {
-    let segment_idx = wg_id.x; // Jede Workgroup (Warp) übernimmt genau EIN komplettes Kurvensegment
-    let lane_id = local_id.x;   // Thread-Index innerhalb des Warps (0 bis 31)
+fn main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) wg_id: vec3<u32>
+    ) {
+    let segment_idx = wg_id.x;
+    let lane_id = local_id.x;
     
     let segment = segments[segment_idx];
     let dt = segment.t_end - segment.t_start;
@@ -125,17 +72,17 @@ fn main(@builtin(local_invocation_id) local_id: vec3<u32>,
     let u_splat = vec4<f32>(u);
     
     // Analytische Positionsauswertung im Monom-Raum (O(3) Horner)
-    let p_hom = fma(segment.coeff_col3, u_splat, segment.coeff_col2);
-    let p_hom2 = fma(p_hom, u_splat, segment.coeff_col1);
-    let position_hom = fma(p_hom2, u_splat, segment.coeff_col0);
+    let p_hom = fma(segment.coeffs[3], u_splat, segment.coeffs[2]);
+    let p_hom2 = fma(p_hom, u_splat, segment.coeffs[1]);
+    let position_hom = fma(p_hom2, u_splat, segment.coeffs[0]);
     let w = position_hom.w;
     let position = position_hom.xyz / w;
     
     // Analytische Ableitungs- und Tangentenauswertung
-    let d3 = segment.coeff_col3 * 3.0;
-    let d2 = segment.coeff_col2 * 2.0;
+    let d3 = segment.coeffs[3] * 3.0;
+    let d2 = segment.coeffs[2] * 2.0;
     let dp_du = fma(d3, u_splat, d2);
-    let derivative_hom = fma(dp_du, u_splat, segment.coeff_col1);
+    let derivative_hom = fma(dp_du, u_splat, segment.coeffs[1]);
     
     let da = derivative_hom.xyz / dt;
     let dw = derivative_hom.w / dt;
@@ -155,7 +102,7 @@ fn main(@builtin(local_invocation_id) local_id: vec3<u32>,
     // 3. Bleeding-Edge Parallel Prefix Scan via Warp-Shuffles
     // Akkumuliert alle lokalen Segment-Transformationen in log2(32) = 5 Taktzyklen rein in Registern!
     var cumulative_R = local_R;
-        for (var offset = 1u; offset < 32u; offset *= 2u) {
+    for (var offset = 1u; offset < 32u; offset *= 2u) {
         // Wir extrahieren die 3 Spaltenvektoren der Matrix einzeln
         let col0 = cumulative_R[0];
         let col1 = cumulative_R[1];
@@ -171,7 +118,7 @@ fn main(@builtin(local_invocation_id) local_id: vec3<u32>,
             let spawned_R = mat3x3<f32>(spawned_col0, spawned_col1, spawned_col2);
             
             // Matrix-Multiplikation durchführen
-            cumulative_R = cumulative_R * spawned_R; 
+            cumulative_R = spawned_R * cumulative_R; 
         }
     }
 

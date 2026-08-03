@@ -1,6 +1,3 @@
-use std::ops::Range;
-
-use encase::ShaderType;
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::curve::Curve;
@@ -20,11 +17,7 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubicNurbsSegmentCache {
-    /* coefficients: Mat4, */
-    coeff_col0: Vec4,
-    coeff_col1: Vec4,
-    coeff_col2: Vec4,
-    coeff_col3: Vec4,
+    coefficients: Mat4,
 
     // The time start and end value for the given segment to avoid knot vector upload.
     t_start: f32,
@@ -87,10 +80,7 @@ impl CubicNurbs {
                 t_end,
                 length: 0.,
                 cumulative_length: 0.,
-                coeff_col0: monom.col(0),
-                coeff_col1: monom.col(1),
-                coeff_col2: monom.col(2),
-                coeff_col3: monom.col(3),
+                coefficients: monom,
                 rmf_start_normal: Vec3::ZERO,
                 _pad0: 0,
             });
@@ -216,10 +206,10 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
 
         let u_splat = Vec4::splat(u);
-        let c0 = segment.coeff_col0;
-        let c1 = segment.coeff_col1;
-        let c2 = segment.coeff_col2;
-        let c3 = segment.coeff_col3;
+        let c0 = segment.coefficients.col(0);
+        let c1 = segment.coefficients.col(1);
+        let c2 = segment.coefficients.col(2);
+        let c3 = segment.coefficients.col(3);
 
         let horner_eval = c3
             .mul_add(u_splat, c2)
@@ -241,28 +231,28 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
         let u_splat = Vec4::splat(u);
 
-        let a = segment.coeff_col0;
-        let b = segment.coeff_col1;
-        let c = segment.coeff_col2;
-        let d = segment.coeff_col3;
+        let c0 = segment.coefficients.col(0);
+        let c1 = segment.coefficients.col(1);
+        let c2 = segment.coefficients.col(2);
+        let c3 = segment.coefficients.col(3);
 
-        let p_hom = d
-            .mul_add(u_splat, c)
-            .mul_add(u_splat, b)
-            .mul_add(u_splat, a);
+        let horner_eval = c3
+            .mul_add(u_splat, c2)
+            .mul_add(u_splat, c1)
+            .mul_add(u_splat, c0);
 
-        let d3 = d * 3.0;
-        let d2 = c * 2.0;
-        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, b);
+        let d3 = c3 * 3.0;
+        let d2 = c2 * 2.0;
+        let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, c1);
 
-        let d6 = d * 6.0;
+        let d6 = c3 * 6.0;
         let d2p_du2 = d6.mul_add(u_splat, d2);
 
         let inv_dt = 1.0 / dt;
         let inv_dt2 = inv_dt * inv_dt;
 
-        let a_xyz = p_hom.xyz();
-        let w = p_hom.w;
+        let a_xyz = horner_eval.xyz();
+        let w = horner_eval.w;
 
         let da = dp_du.xyz() * inv_dt;
         let dw = dp_du.w * inv_dt;
@@ -285,12 +275,12 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
 
         let u_splat = Vec4::splat(u);
-        let c0 = segment.coeff_col0;
-        let c1 = segment.coeff_col1;
-        let c2 = segment.coeff_col2;
-        let c3 = segment.coeff_col3;
+        let c0 = segment.coefficients.col(0);
+        let c1 = segment.coefficients.col(1);
+        let c2 = segment.coefficients.col(2);
+        let c3 = segment.coefficients.col(3);
 
-        let p_hom = c3
+        let horner_eval = c3
             .mul_add(u_splat, c2)
             .mul_add(u_splat, c1)
             .mul_add(u_splat, c0);
@@ -300,8 +290,8 @@ impl CubicNurbs {
         let dp_du = d3.mul_add(u_splat, d2).mul_add(u_splat, c1);
 
         let inv_dt = 1.0 / dt;
-        let a_xyz = p_hom.xyz();
-        let w = p_hom.w;
+        let a_xyz = horner_eval.xyz();
+        let w = horner_eval.w;
 
         let da = dp_du.xyz() * inv_dt;
         let dw = dp_du.w * inv_dt;
@@ -714,6 +704,7 @@ pub fn compute_nurbs_coefficient_matrix(knots: &[f32], r: usize) -> Mat4 {
         Vec4::new(0.0, 0.0, dt.powi(2), 3.0 * t_r * dt.powi(2)),
         Vec4::new(0.0, 0.0, 0.0, dt.powi(3)),
     );
+
     delta_inv.mul_mat4(&m_u)
 }
 
