@@ -62,7 +62,7 @@ fn vs_main(
     out.clip_position = config.view_projection * vec4<f32>(world_position, 1.0);
     out.normal = normalize(local_normal);
     out.uv = vec2<f32>(f32(local_vertex_id) / f32(total_subdivisions), f32(target_frame_idx) * 0.1);
-    out.segment_id = inst_idx / 31u;
+    out.segment_id = inst_idx / 32u;
 
     return out;
 }

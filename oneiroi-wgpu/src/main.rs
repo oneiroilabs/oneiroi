@@ -10,15 +10,15 @@ use winit::{
     window::{Window, WindowId},
 };
 
-#[repr(C)]
+/* #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuSample {
-    position: Vec3,
-    tangent: Vec3,
-    normal: Vec3,
-    binormal: Vec3,
+    position: Vec4,
+    tangent: Vec4,
+    normal: Vec4,
+    binormal: Vec4,
 }
-
+ */
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct TubeUniforms {
@@ -128,7 +128,7 @@ impl State {
         let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
         let num_segments = curve.segments.len() as u32;
-        let total_evaluated_points = num_segments * 32 - 1;
+        let total_evaluated_points = num_segments * 32;
 
         let radial_segments = 16u32;
 
@@ -140,7 +140,7 @@ impl State {
 
         let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Evaluated Frames Storage Buffer"),
-            size: (total_evaluated_points as usize * std::mem::size_of::<GpuSample>()) as u64,
+            size: (total_evaluated_points as u64 * 64), //std::mem::size_of::<GpuSample>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -174,7 +174,7 @@ impl State {
 
         let indirect_args = DrawIndirectArgs {
             vertex_count: radial_segments * 6,
-            instance_count: total_evaluated_points,
+            instance_count: total_evaluated_points - 1,
             first_vertex: 0,
             first_instance: 0,
         };
