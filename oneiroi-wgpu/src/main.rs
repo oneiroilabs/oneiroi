@@ -10,6 +10,10 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::orbit::OrbitCamera;
+
+mod orbit;
+
 /* #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuSample {
@@ -71,8 +75,10 @@ struct State {
     uniforms: wgpu::Buffer,
 
     debug_vis: RenderPipeline,
-
     debug_bind_group_0: BindGroup,
+    visualizer_uniform_buffer: wgpu::Buffer,
+
+    camera: OrbitCamera,
 }
 
 impl State {
@@ -148,13 +154,12 @@ impl State {
         let tube_radius = 0.5f32;
         let aspect_ratio = size.width as f32 / size.height as f32;
 
-        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let camera = OrbitCamera::new(glam::Vec3::new(3.5, 1.5, 0.0), 10.0);
 
-        let view = glam::Mat4::look_at_lh(
-            glam::Vec3::new(3.5, 1.0, -8.0),
-            glam::Vec3::new(3.5, 1.0, 0.0),
-            glam::Vec3::Y,
-        );
+        // Beim Erstellen der Matrizen nutzen wir nun die Kamera:
+        let view = camera.build_view_matrix();
+        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let view_projection_matrix = projection * view;
 
         let view_projection_matrix = projection * view;
 
@@ -444,11 +449,45 @@ impl State {
             uniforms: uniform_buffer,
             debug_vis: visualizer_pipeline,
             debug_bind_group_0: visualizer_bind_group,
+            visualizer_uniform_buffer,
+            camera,
         };
 
         state.configure_surface();
 
         state
+    }
+
+    fn update_camera_buffers(&self) {
+        let aspect_ratio = self.size.width as f32 / self.size.height as f32;
+        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let view = self.camera.build_view_matrix();
+        let view_projection = projection * view;
+
+        // 1. Tube Uniforms aktualisieren
+        let tube_uniforms = TubeUniforms {
+            view_projection,
+            tube_radius: 0.2f32,
+            radial_segments: 16,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.queue
+            .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[tube_uniforms]));
+
+        // 2. RMF Visualizer Uniforms aktualisieren
+        let vis_uniforms = RmfVisualizerUniforms {
+            view_projection,
+            vector_scale: 0.25,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        self.queue.write_buffer(
+            &self.visualizer_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&vis_uniforms),
+        );
     }
 
     fn get_window(&self) -> &Window {
@@ -476,25 +515,7 @@ impl State {
         }
         self.size = new_size;
         self.configure_surface();
-
-        let aspect_ratio = new_size.width as f32 / new_size.height as f32;
-        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
-        let view = glam::Mat4::look_at_lh(
-            glam::Vec3::new(3.5, 1.0, -8.0),
-            glam::Vec3::new(3.5, 1.0, 0.0),
-            glam::Vec3::Y,
-        );
-
-        let updated_uniforms = TubeUniforms {
-            view_projection: projection * view,
-            tube_radius: 0.2f32,
-            radial_segments: 16,
-            _pad0: 0,
-            _pad1: 0,
-        };
-
-        self.queue
-            .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[updated_uniforms]));
+        self.update_camera_buffers();
     }
 
     fn render(&mut self) {
@@ -622,7 +643,53 @@ impl ApplicationHandler for App {
                 // here as this event is always followed up by redraw request.
                 state.resize(size);
             }
+            WindowEvent::MouseInput {
+                state: button_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                state.camera.is_dragging = button_state == winit::event::ElementState::Pressed;
+            }
+
+            // Mausrad / Touchpad Scrollen (Zoom)
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll_amount = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.05,
+                };
+
+                let zoom_sensitivity = 0.5f32;
+                state.camera.radius -= scroll_amount * zoom_sensitivity;
+                state.camera.radius = state.camera.radius.clamp(2.0, 50.0); // Verhindert invertierten oder unendlichen Zoom
+
+                state.update_camera_buffers();
+            }
+
             _ => (),
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        let state = self.state.as_mut().unwrap();
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event
+            && state.camera.is_dragging
+        {
+            let sensitivity = 0.005f32;
+            state.camera.yaw += delta.0 as f32 * sensitivity;
+            state.camera.pitch -= delta.1 as f32 * sensitivity;
+
+            // Pitch begrenzen, damit die Kamera nicht über den Nord-/Südpol flippt
+            state.camera.pitch = state
+                .camera
+                .pitch
+                .clamp(-89.0f32.to_radians(), 89.0f32.to_radians());
+
+            state.update_camera_buffers();
         }
     }
 }
