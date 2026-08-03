@@ -111,10 +111,8 @@ fn main(
     let final_col0 = subgroupShuffleUp(local_R[0], 1u);
     let final_col1 = subgroupShuffleUp(local_R[1], 1u);
     let final_col2 = subgroupShuffleUp(local_R[2], 1u);
-    if (lane_id > 0u) {
-        let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
-        normal = normalize(final_chain_matrix * segment.rmf_start_normal);
-    }
+    let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
+    normal=select(normal,normalize(final_chain_matrix * segment.rmf_start_normal),lane_id > 0u);    
 
     let binormal = normalize(cross(tangent, normal));
     let final_normal = cross(binormal, tangent);
