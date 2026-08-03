@@ -85,10 +85,9 @@ fn main(
 
     //Grab neighbouring position
     var local_R = mat3x3<f32>(vec3<f32>(1.0,0.0,0.0), vec3<f32>(0.0,1.0,0.0), vec3<f32>(0.0,0.0,1.0));
+    let next_pos = subgroupShuffleDown(position, 1u);
+    let next_tangent = subgroupShuffleDown(tangent, 1u);
     if (lane_id < 31u) {
-        let next_pos = subgroupShuffleDown(position, 1u);
-        let next_tangent = subgroupShuffleDown(tangent, 1u);
-    
         local_R = get_double_reflection_matrix(position, next_pos, tangent, next_tangent);
     }
 
@@ -99,19 +98,21 @@ fn main(
         let spawned_col1 = subgroupShuffleUp(local_R[1], offset);
         let spawned_col2 = subgroupShuffleUp(local_R[2], offset);
 
+        let spawned_R = mat3x3<f32>(spawned_col0, spawned_col1, spawned_col2);
+        let multiplied_R= spawned_R * local_R;
+
         if (lane_id >= offset) {
-            let spawned_R = mat3x3<f32>(spawned_col0, spawned_col1, spawned_col2);
-            local_R = spawned_R * local_R; 
+            local_R =  multiplied_R;
         }
     }
 
     var normal = segment.rmf_start_normal;
+    // WGSL does not allow mat3x3 subgroup ops so we sadly need to split.
+    let final_col0 = subgroupShuffleUp(local_R[0], 1u);
+    let final_col1 = subgroupShuffleUp(local_R[1], 1u);
+    let final_col2 = subgroupShuffleUp(local_R[2], 1u);
     if (lane_id > 0u) {
-        let final_col0 = subgroupShuffleUp(local_R[0], 1u);
-        let final_col1 = subgroupShuffleUp(local_R[1], 1u);
-        let final_col2 = subgroupShuffleUp(local_R[2], 1u);
         let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
-        
         normal = normalize(final_chain_matrix * segment.rmf_start_normal);
     }
 

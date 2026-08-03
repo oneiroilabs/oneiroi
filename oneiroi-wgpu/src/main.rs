@@ -19,6 +19,35 @@ struct GpuSample {
     binormal: Vec3,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TubeUniforms {
+    view_projection: glam::Mat4,
+    tube_radius: f32,
+    radial_segments: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawIndirectArgs {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RmfVisualizerUniforms {
+    view_projection: glam::Mat4,
+    vector_scale: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 struct State {
     instance: wgpu::Instance,
     window: Arc<Window>,
@@ -74,7 +103,7 @@ impl State {
         let surface_format = cap.formats[0];
 
         let control_points = vec![
-            Vec4::new(0.0, 0.0, 0.0, 1.),
+            Vec4::new(0.0, 4.0, 0.0, 1.),
             Vec4::new(1.0, 2.0, 0.0, 1.),
             Vec4::new(2.0, -1.0, 0.0, 1.),
             Vec4::new(3.0, 3.0, 0.0, 1.),
@@ -99,52 +128,35 @@ impl State {
         let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
         let num_segments = curve.segments.len() as u32;
-        let total_evaluated_points = num_segments * 32; // 32 Lanes pro Segment
+        let total_evaluated_points = num_segments * 32;
 
-        // Konfiguration der Röhren-Ecken
         let radial_segments = 16u32;
 
-        // Buffer 1: Eingabe-Kurvensegmente (Für Compute Shader)
         let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Curve Segments Buffer"),
             contents: bytemuck::cast_slice(&curve.segments),
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        // Buffer 2: Dedizierter GPU-Ausgabe- & Render-Zwischenspeicher (Passend zu `EvaluatedFrame`)
-        // Wichtig: STORAGE zum Schreiben im Compute Pass, VERTEX (bzw. STORAGE-Read) für den Vertex Pass
         let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Evaluated Frames Storage Buffer"),
-            size: (total_evaluated_points as usize * std::mem::size_of::<GpuSample>()) as u64, // GpuSample matcht das Layout von EvaluatedFrame
+            size: (total_evaluated_points as usize * std::mem::size_of::<GpuSample>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
-        // Buffer 3: Uniform-Buffer für Render-Konfiguration (Matrix, Radius, Ecken)
         let tube_radius = 0.5f32;
         let aspect_ratio = size.width as f32 / size.height as f32;
 
-        // Projektionsmatrix: 45 Grad Sichtfeld, Z-Near: 0.1, Z-Far: 100.0
         let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
 
-        // Viewmatrix: Kamera bei (3.5, 1.0, -8.0) platziert, blickt auf das Zentrum der Kurve (3.5, 1.0, 0.0)
         let view = glam::Mat4::look_at_lh(
-            glam::Vec3::new(3.5, 1.0, -8.0), // Kameraposition
-            glam::Vec3::new(3.5, 1.0, 0.0),  // Fokuspunkt (Mitte deiner Kurve)
-            glam::Vec3::Y,                   // Up-Vektor
+            glam::Vec3::new(3.5, 1.0, -8.0),
+            glam::Vec3::new(3.5, 1.0, 0.0),
+            glam::Vec3::Y,
         );
 
         let view_projection_matrix = projection * view;
-
-        #[repr(C)]
-        #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-        struct TubeUniforms {
-            view_projection: glam::Mat4,
-            tube_radius: f32,
-            radial_segments: u32,
-            _pad0: u32,
-            _pad1: u32,
-        }
 
         let uniform_data = TubeUniforms {
             view_projection: view_projection_matrix,
@@ -160,20 +172,9 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // Buffer 4: Draw Indirect Argumenten-Buffer
-        // Berechnet die exakte Anzahl an Vertices und Instanzen für die Röhren-Quads
-        #[repr(C)]
-        #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-        struct DrawIndirectArgs {
-            vertex_count: u32,
-            instance_count: u32,
-            first_vertex: u32,
-            first_instance: u32,
-        }
-
-        let total_instances = total_evaluated_points - 1; // Röhren-Zwischenstücke
+        let total_instances = total_evaluated_points - 1;
         let indirect_args = DrawIndirectArgs {
-            vertex_count: radial_segments * 6, // 6 Vertices bilden ein Quad pro Tortenstück
+            vertex_count: radial_segments * 6,
             instance_count: total_instances,
             first_vertex: 0,
             first_instance: 0,
@@ -185,7 +186,6 @@ impl State {
             usage: wgpu::BufferUsages::INDIRECT,
         });
 
-        // --- BIND GROUPS FÜR COMPUTE PIPELINE ---
         let compute_bind_group_layout_0 =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Compute Input Layout"),
@@ -247,18 +247,16 @@ impl State {
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("NURBS Compute Pipeline"),
             layout: Some(&compute_pipeline_layout),
-            module: &device.create_shader_module(wgpu::include_wgsl!("shader.wgsl")), // Dein Compute Shader File
+            module: &device.create_shader_module(wgpu::include_wgsl!("shader.wgsl")),
             entry_point: Some("main"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
 
-        // --- BIND GROUPS FÜR RENDER PIPELINE ---
         let render_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Tube Render Layout"),
                 entries: &[
-                    // Binding 0: Frames als Read-Only Storage Buffer im Vertex Shader
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -269,7 +267,6 @@ impl State {
                         },
                         count: None,
                     },
-                    // Binding 1: Uniform Config
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -309,9 +306,9 @@ impl State {
             label: Some("3D Tube Render Pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &device.create_shader_module(wgpu::include_wgsl!("tube.wgsl")), // Dein Vertex Shader File
+                module: &device.create_shader_module(wgpu::include_wgsl!("tube.wgsl")),
                 entry_point: Some("vs_main"),
-                buffers: &[], // Leer! Vertex-Fetching geschieht über vertex_index
+                buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -325,31 +322,21 @@ impl State {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // Dreiecke für Röhren-Geometrie
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back), // Backface Culling aktivieren
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None, // Bei Bedarf Depth-Buffer aktivieren
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             cache: None,
             multiview_mask: None,
         });
 
-        #[repr(C)]
-        #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-        pub struct RmfVisualizerUniforms {
-            pub view_projection: glam::Mat4,
-            pub vector_scale: f32, // Controls length of red/green/blue vector lines (e.g., 0.2)
-            pub _pad0: u32,        // 16-byte alignment padding
-            pub _pad1: u32,
-            pub _pad2: u32,
-        }
-
         let visualizer_uniform_data = RmfVisualizerUniforms {
             view_projection: view_projection_matrix,
-            vector_scale: 0.25, // Adjust this value to scale lines up/down
+            vector_scale: 0.25,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -366,7 +353,6 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("RMF Visualizer Bind Group Layout"),
                 entries: &[
-                    // Binding 0: Uniforms
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -377,7 +363,6 @@ impl State {
                         },
                         count: None,
                     },
-                    // Binding 1: Existing Storage Buffer (Read-only)
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -419,11 +404,11 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &device.create_shader_module(wgpu::include_wgsl!("rmf_vis.wgsl")),
                 entry_point: Some("vs_main"),
-                buffers: &[], // No vertex buffers! Everything is driven by indices
+                buffers: &[],
                 compilation_options: Default::default(),
             },
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList, // Critical for wireframe vectors
+                topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
             fragment: Some(wgpu::FragmentState {
@@ -462,7 +447,6 @@ impl State {
             debug_bind_group_0: visualizer_bind_group,
         };
 
-        // Configure surface for the first time
         state.configure_surface();
 
         state
@@ -477,7 +461,6 @@ impl State {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: self.surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
-            // Request compatibility with the sRGB-format texture view we‘re going to create later.
             view_formats: vec![self.surface_format.add_srgb_suffix()],
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             width: self.size.width,
@@ -495,7 +478,6 @@ impl State {
         self.size = new_size;
         self.configure_surface();
 
-        // Kamera-Matrix mit neuem Seitenverhältnis neu berechnen
         let aspect_ratio = new_size.width as f32 / new_size.height as f32;
         let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
         let view = glam::Mat4::look_at_lh(
@@ -503,17 +485,6 @@ impl State {
             glam::Vec3::new(3.5, 1.0, 0.0),
             glam::Vec3::Y,
         );
-
-        // Entspricht der Struktur deines Uniform-Blocks
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-        struct TubeUniforms {
-            view_projection: glam::Mat4,
-            tube_radius: f32,
-            radial_segments: u32,
-            _pad0: u32,
-            _pad1: u32,
-        }
 
         let updated_uniforms = TubeUniforms {
             view_projection: projection * view,
@@ -523,15 +494,11 @@ impl State {
             _pad1: 0,
         };
 
-        // Neue Daten direkt an die GPU senden
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[updated_uniforms]));
     }
 
     fn render(&mut self) {
-        // Create texture view.
-        // NOTE: We must handle Timeout because the surface may be unavailable
-        // (e.g., when the window is occluded on macOS).
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
@@ -556,15 +523,12 @@ impl State {
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
-                // Without add_srgb_suffix() the image we will be working with
-                // might not be "gamma correct".
                 format: Some(self.surface_format.add_srgb_suffix()),
                 ..Default::default()
             });
 
-        // Renders a GREEN screen
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        // Create the renderpass which will clear the screen.
+
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NURBS Compute Pass"),
@@ -574,11 +538,10 @@ impl State {
             compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
             compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
 
-            // Genau so viele Gruppen abschicken, wie Segmente vorhanden sind
             compute_pass.dispatch_workgroups(self.curve.segments.len() as u32, 1, 1);
-        } // Compute-Pass endet hier. WGPU setzt automatisch eine Speicher-Barriere!
+        }
 
-        let debug = true;
+        let debug = false;
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -609,12 +572,11 @@ impl State {
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             } else {
                 render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]); // Der Indirect Call zeichnet die Röhre vollautomatisch anhand der GPU-Daten
+                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             }
         }
 
-        // Submit the command in the queue to execute
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(surface_texture);
