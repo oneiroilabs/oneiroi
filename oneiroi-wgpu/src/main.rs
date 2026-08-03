@@ -40,6 +40,10 @@ struct State {
     curve: CubicNurbs,
 
     uniforms: wgpu::Buffer,
+
+    debug_vis: RenderPipeline,
+
+    debug_bind_group_0: BindGroup,
 }
 
 impl State {
@@ -55,7 +59,7 @@ impl State {
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::SUBGROUP,
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
@@ -333,6 +337,111 @@ impl State {
             multiview_mask: None,
         });
 
+        #[repr(C)]
+        #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+        pub struct RmfVisualizerUniforms {
+            pub view_projection: glam::Mat4,
+            pub vector_scale: f32, // Controls length of red/green/blue vector lines (e.g., 0.2)
+            pub _pad0: u32,        // 16-byte alignment padding
+            pub _pad1: u32,
+            pub _pad2: u32,
+        }
+
+        let visualizer_uniform_data = RmfVisualizerUniforms {
+            view_projection: view_projection_matrix,
+            vector_scale: 0.25, // Adjust this value to scale lines up/down
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+
+        let visualizer_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("RMF Visualizer Uniform Buffer"),
+                contents: bytemuck::bytes_of(&visualizer_uniform_data),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let visualizer_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("RMF Visualizer Bind Group Layout"),
+                entries: &[
+                    // Binding 0: Uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // Binding 1: Existing Storage Buffer (Read-only)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let visualizer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RMF Visualizer Bind Group"),
+            layout: &visualizer_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: visualizer_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: evaluated_frames_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let visualizer_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("RMF Visualizer Pipeline Layout"),
+                bind_group_layouts: &[Some(&visualizer_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let visualizer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("RMF Visualizer Pipeline"),
+            layout: Some(&visualizer_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("rmf_vis.wgsl")),
+                entry_point: Some("vs_main"),
+                buffers: &[], // No vertex buffers! Everything is driven by indices
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList, // Critical for wireframe vectors
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("rmf_vis.wgsl")),
+                entry_point: Some("fr_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let state = State {
             instance,
             window,
@@ -349,6 +458,8 @@ impl State {
             indirect_buffer,
             curve,
             uniforms: uniform_buffer,
+            debug_vis: visualizer_pipeline,
+            debug_bind_group_0: visualizer_bind_group,
         };
 
         // Configure surface for the first time
@@ -467,9 +578,9 @@ impl State {
             compute_pass.dispatch_workgroups(self.curve.segments.len() as u32, 1, 1);
         } // Compute-Pass endet hier. WGPU setzt automatisch eine Speicher-Barriere!
 
-        // SCHRITT 2: Render Pass ausführen (In ein echtes Framebuffer-Ziel zeichnen)
+        let debug = true;
+
         {
-            // 'view' ist die aktuelle TextureView deines Window-Surface-Outputs
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tube Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -491,9 +602,16 @@ impl State {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.render_bind_group_0, &[]); // Der Indirect Call zeichnet die Röhre vollautomatisch anhand der GPU-Daten
-            render_pass.draw_indirect(&self.indirect_buffer, 0);
+
+            if debug {
+                render_pass.set_pipeline(&self.debug_vis);
+                render_pass.set_bind_group(0, &self.debug_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]); // Der Indirect Call zeichnet die Röhre vollautomatisch anhand der GPU-Daten
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            }
         }
 
         // Submit the command in the queue to execute
