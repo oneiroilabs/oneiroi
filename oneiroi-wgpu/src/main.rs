@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use glam::{Vec3, Vec4};
 use oneiroi_core::nurbs::CubicNurbs;
-use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt, wgc::resource::Buffer};
+use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
