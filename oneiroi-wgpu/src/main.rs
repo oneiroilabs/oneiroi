@@ -128,7 +128,7 @@ impl State {
         let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
         let num_segments = curve.segments.len() as u32;
-        let total_evaluated_points = num_segments * 32;
+        let total_evaluated_points = num_segments * 32 - 1;
 
         let radial_segments = 16u32;
 
@@ -172,10 +172,9 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let total_instances = total_evaluated_points - 1;
         let indirect_args = DrawIndirectArgs {
             vertex_count: radial_segments * 6,
-            instance_count: total_instances,
+            instance_count: total_evaluated_points,
             first_vertex: 0,
             first_instance: 0,
         };

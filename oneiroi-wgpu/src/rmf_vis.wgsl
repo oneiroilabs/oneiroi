@@ -6,9 +6,9 @@ struct Uniforms {
 
 struct EvaluatedFrame {
     position: vec3<f32>,
+    tangent: vec3<f32>,
     normal: vec3<f32>,
     binormal: vec3<f32>,
-    tangent: vec3<f32>,
 }
 @group(0) @binding(1) var<storage, read> evaluated_frames: array<EvaluatedFrame>;
 
