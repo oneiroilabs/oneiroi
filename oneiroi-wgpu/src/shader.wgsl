@@ -102,10 +102,13 @@ fn main(
         let spawned_col1 = subgroupShuffleUp(local_R[1], offset);
         let spawned_col2 = subgroupShuffleUp(local_R[2], offset);
 
-        let cond= (lane_id >= offset);
-        local_R[0]=select(local_R[0], local_R[0] * spawned_col0, cond);
-        local_R[1]=select(local_R[1], local_R[1] * spawned_col1, cond);
-        local_R[2]=select(local_R[2], local_R[2] * spawned_col2, cond);
+        let spawned_R = mat3x3<f32>(spawned_col0, spawned_col1, spawned_col2);
+
+        let accumulated_R = spawned_R * local_R;
+
+        if (lane_id >= offset) {
+            local_R = accumulated_R;
+        }
     }
 
     // WGSL does not allow mat3x3 subgroup ops so we sadly need to split.

@@ -108,7 +108,7 @@ impl State {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
-        let control_points = vec![
+        /* let control_points = vec![
             Vec4::new(0.0, 4.0, 0.0, 1.),
             Vec4::new(1.0, 2.0, 0.0, 1.),
             Vec4::new(2.0, -1.0, 0.0, 1.),
@@ -117,8 +117,28 @@ impl State {
             Vec4::new(5.0, 2.0, 0.0, 1.),
             Vec4::new(6.0, 1.0, 0.0, 1.),
             Vec4::new(7.0, 4.0, 0.0, 1.),
-        ];
-        let num_points = control_points.len();
+        ]; */
+
+        let num_points = 10000;
+        let mut control_points = Vec::with_capacity(num_points);
+
+        let expansion_rate = 0.15;
+
+        let rotation_density = 0.2;
+
+        for i in 0..num_points {
+            let step = i as f64;
+
+            let theta = step * rotation_density;
+
+            let radius = expansion_rate * theta;
+
+            let x = radius * theta.cos();
+            let y = radius * theta.sin();
+
+            control_points.push(Vec4::new(x as f32, y as f32, 0.0, 1.0));
+        }
+
         let num_knots = num_points + 4;
 
         let mut knot_vec = vec![0.0; num_knots];
