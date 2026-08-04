@@ -14,6 +14,8 @@ use crate::orbit::OrbitCamera;
 
 mod orbit;
 
+const DEBUG: bool = false;
+
 /* #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuSample {
@@ -122,14 +124,21 @@ impl State {
         let num_points = 10000;
         let mut control_points = Vec::with_capacity(num_points);
 
-        let expansion_rate = 0.15;
+        let step_distance = 0.25;
 
-        let rotation_density = 0.2;
+        // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
+        let expansion_rate = 0.15;
 
         for i in 0..num_points {
             let step = i as f64;
 
-            let theta = step * rotation_density;
+            let target_arc_length = step * step_distance;
+
+            let theta = if target_arc_length > 0.0 {
+                (2.0 * target_arc_length / expansion_rate).sqrt()
+            } else {
+                0.0
+            };
 
             let radius = expansion_rate * theta;
 
@@ -174,13 +183,11 @@ impl State {
         let tube_radius = 0.5f32;
         let aspect_ratio = size.width as f32 / size.height as f32;
 
-        let camera = OrbitCamera::new(glam::Vec3::new(3.5, 1.5, 0.0), 10.0);
+        let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
 
         // Beim Erstellen der Matrizen nutzen wir nun die Kamera:
         let view = camera.build_view_matrix();
         let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
-        let view_projection_matrix = projection * view;
-
         let view_projection_matrix = projection * view;
 
         let uniform_data = TubeUniforms {
@@ -198,7 +205,7 @@ impl State {
         });
 
         let indirect_args = DrawIndirectArgs {
-            vertex_count: radial_segments * 6,
+            vertex_count: if DEBUG { 6 } else { radial_segments * 6 },
             instance_count: total_evaluated_points - 1,
             first_vertex: 0,
             first_instance: 0,
@@ -581,8 +588,6 @@ impl State {
             compute_pass.dispatch_workgroups(self.curve.segments.len() as u32, 1, 1);
         }
 
-        let debug = false;
-
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tube Render Pass"),
@@ -606,7 +611,7 @@ impl State {
                 multiview_mask: None,
             });
 
-            if debug {
+            if DEBUG {
                 render_pass.set_pipeline(&self.debug_vis);
                 render_pass.set_bind_group(0, &self.debug_bind_group_0, &[]);
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
