@@ -27,28 +27,39 @@ fn get_double_reflection_matrix(pos_a: vec3<f32>, pos_b: vec3<f32>, tang_a: vec3
     let v1 = pos_b - pos_a;
     let v1_len_sq = dot(v1, v1);
     if (v1_len_sq < 1e-6) { 
-        return mat3x3<f32>(vec3<f32>(1.0,0.0,0.0), vec3<f32>(0.0,1.0,0.0), vec3<f32>(0.0,0.0,1.0)); 
+        return mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0)); 
     }
     
-    let t_l = tang_a - (2.0 / v1_len_sq) * dot(v1, tang_a) * v1;
+    // Compute the intermediate tangent t_l using the first reflection vector v1
+    let c1 = 2.0 / v1_len_sq;
+    let t_l = tang_a - (c1 * dot(v1, tang_a)) * v1;
+    
     let v2 = tang_b - t_l;
     let v2_len_sq = dot(v2, v2);
     if (v2_len_sq < 1e-6) { 
-        return mat3x3<f32>(vec3<f32>(1.0,0.0,0.0), vec3<f32>(0.0,1.0,0.0), vec3<f32>(0.0,0.0,1.0)); 
+        // If second reflection is degenerate, only apply the first reflection matrix
+        let r1 = vec3<f32>(1.0, 0.0, 0.0) - (c1 * v1.x) * v1;
+        let r2 = vec3<f32>(0.0, 1.0, 0.0) - (c1 * v1.y) * v1;
+        let r3 = vec3<f32>(0.0, 0.0, 1.0) - (c1 * v1.z) * v1;
+        return mat3x3<f32>(r1, r2, r3); 
     }
 
-    let r1 = vec3<f32>(1.0, 0.0, 0.0) - (2.0 / v1_len_sq) * v1.x * v1;
-    let r2 = vec3<f32>(0.0, 1.0, 0.0) - (2.0 / v1_len_sq) * v1.y * v1;
-    let r3 = vec3<f32>(0.0, 0.0, 1.0) - (2.0 / v1_len_sq) * v1.z * v1;
-    let M1 = mat3x3<f32>(r1, r2, r3);
+    let c2 = 2.0 / v2_len_sq;
 
-    let u1 = vec3<f32>(1.0, 0.0, 0.0) - (2.0 / v2_len_sq) * v2.x * v2;
-    let u2 = vec3<f32>(0.0, 1.0, 0.0) - (2.0 / v2_len_sq) * v2.y * v2;
-    let u3 = vec3<f32>(0.0, 0.0, 1.0) - (2.0 / v2_len_sq) * v2.z * v2;
-    let M2 = mat3x3<f32>(u1, u2, u3);
+    // Apply double reflection directly to standard basis vectors: e_x, e_y, e_z
+    // Reflection 1: identity basis components transformed by v1
+    let r1 = vec3<f32>(1.0, 0.0, 0.0) - (c1 * v1.x) * v1;
+    let r2 = vec3<f32>(0.0, 1.0, 0.0) - (c1 * v1.y) * v1;
+    let r3 = vec3<f32>(0.0, 0.0, 1.0) - (c1 * v1.z) * v1;
 
-    return M2 * M1;
+    // Reflection 2: Transform the already reflected basis vectors by v2
+    let col0 = r1 - (c2 * dot(v2, r1)) * v2;
+    let col1 = r2 - (c2 * dot(v2, r2)) * v2;
+    let col2 = r3 - (c2 * dot(v2, r3)) * v2;
+
+    return mat3x3<f32>(col0, col1, col2);
 }
+
 
 
 
