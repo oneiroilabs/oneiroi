@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use glam::{Vec3, Vec4};
 use oneiroi_core::nurbs::CubicNurbs;
-use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
+use wgpu::{
+    BindGroup, ComputePipeline, MeshState, PrimitiveState, RenderPipeline, TaskState,
+    util::DeviceExt,
+};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -81,6 +84,9 @@ struct State {
     visualizer_uniform_buffer: wgpu::Buffer,
 
     camera: OrbitCamera,
+
+    mesh_pipeline: RenderPipeline,
+    mesh_bind_group_0: BindGroup,
 }
 
 impl State {
@@ -95,9 +101,11 @@ impl State {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                required_features: wgpu::Features::SUBGROUP,
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                required_features: wgpu::Features::SUBGROUP
+                    | wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                required_limits: wgpu::Limits::default()
+                    .using_recommended_minimum_mesh_shader_values(),
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
             })
@@ -458,6 +466,95 @@ impl State {
             cache: None,
         });
 
+        let mesh_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Tube Pure Mesh Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let mesh_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Mesh Render Bind Group"),
+            layout: &mesh_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: segments_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mesh_shader_module =
+            device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
+
+        let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Mesh Render Layout"),
+            bind_group_layouts: &[Some(&mesh_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+            label: Some("Mesh Shading Tube Pipeline"),
+            layout: Some(&mesh_pipeline_layout),
+            task: Some(TaskState {
+                module: &mesh_shader_module,
+                entry_point: Some("ts_main"),
+                compilation_options: Default::default(),
+            }),
+            mesh: MeshState {
+                module: &mesh_shader_module,
+                entry_point: Some("ms_main"),
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                conservative: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &mesh_shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            cache: None,
+            multiview: None,
+        });
+
         let state = State {
             instance,
             window,
@@ -478,6 +575,8 @@ impl State {
             debug_bind_group_0: visualizer_bind_group,
             visualizer_uniform_buffer,
             camera,
+            mesh_pipeline,
+            mesh_bind_group_0,
         };
 
         state.configure_surface();
@@ -620,6 +719,10 @@ impl State {
                 render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             }
+
+            render_pass.set_pipeline(&self.mesh_pipeline);
+            render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
+            render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
         }
 
         self.queue.submit([encoder.finish()]);
