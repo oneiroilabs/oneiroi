@@ -30,14 +30,12 @@ fn get_double_reflection_matrix(pos_a: vec3<f32>, pos_b: vec3<f32>, tang_a: vec3
         return mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0)); 
     }
     
-    // Compute the intermediate tangent t_l using the first reflection vector v1
     let c1 = 2.0 / v1_len_sq;
     let t_l = tang_a - (c1 * dot(v1, tang_a)) * v1;
     
     let v2 = tang_b - t_l;
     let v2_len_sq = dot(v2, v2);
     if (v2_len_sq < 1e-6) { 
-        // If second reflection is degenerate, only apply the first reflection matrix
         let r1 = vec3<f32>(1.0, 0.0, 0.0) - (c1 * v1.x) * v1;
         let r2 = vec3<f32>(0.0, 1.0, 0.0) - (c1 * v1.y) * v1;
         let r3 = vec3<f32>(0.0, 0.0, 1.0) - (c1 * v1.z) * v1;
@@ -46,13 +44,10 @@ fn get_double_reflection_matrix(pos_a: vec3<f32>, pos_b: vec3<f32>, tang_a: vec3
 
     let c2 = 2.0 / v2_len_sq;
 
-    // Apply double reflection directly to standard basis vectors: e_x, e_y, e_z
-    // Reflection 1: identity basis components transformed by v1
     let r1 = vec3<f32>(1.0, 0.0, 0.0) - (c1 * v1.x) * v1;
     let r2 = vec3<f32>(0.0, 1.0, 0.0) - (c1 * v1.y) * v1;
     let r3 = vec3<f32>(0.0, 0.0, 1.0) - (c1 * v1.z) * v1;
 
-    // Reflection 2: Transform the already reflected basis vectors by v2
     let col0 = r1 - (c2 * dot(v2, r1)) * v2;
     let col1 = r2 - (c2 * dot(v2, r2)) * v2;
     let col2 = r3 - (c2 * dot(v2, r3)) * v2;
@@ -89,9 +84,7 @@ fn main(
     let dp_du = fma(d3, u_splat, d2);
     let derivative_hom = fma(dp_du, u_splat, segment.coeffs[1]);
     
-    let da = derivative_hom.xyz / dt;
-    let dw = derivative_hom.w / dt;
-    let velocity = (da - dw * position) / w;
+    let velocity = (derivative_hom.xyz - derivative_hom.w * position) / w;
     let tangent = normalize(velocity);
 
     //Grab neighbouring position
@@ -109,21 +102,18 @@ fn main(
         let spawned_col1 = subgroupShuffleUp(local_R[1], offset);
         let spawned_col2 = subgroupShuffleUp(local_R[2], offset);
 
-        let spawned_R = mat3x3<f32>(spawned_col0, spawned_col1, spawned_col2);
-        let multiplied_R= spawned_R * local_R;
-
-        if (lane_id >= offset) {
-            local_R =  multiplied_R;
-        }
+        let cond= (lane_id >= offset);
+        local_R[0]=select(local_R[0], local_R[0] * spawned_col0, cond);
+        local_R[1]=select(local_R[1], local_R[1] * spawned_col1, cond);
+        local_R[2]=select(local_R[2], local_R[2] * spawned_col2, cond);
     }
 
-    var normal = segment.rmf_start_normal;
     // WGSL does not allow mat3x3 subgroup ops so we sadly need to split.
     let final_col0 = subgroupShuffleUp(local_R[0], 1u);
     let final_col1 = subgroupShuffleUp(local_R[1], 1u);
     let final_col2 = subgroupShuffleUp(local_R[2], 1u);
     let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
-    normal=select(normal,normalize(final_chain_matrix * segment.rmf_start_normal),lane_id > 0u);    
+    let normal=select(segment.rmf_start_normal,normalize(final_chain_matrix * segment.rmf_start_normal),lane_id > 0u);    
 
     let binormal = normalize(cross(tangent, normal));
     let final_normal = cross(binormal, tangent);
