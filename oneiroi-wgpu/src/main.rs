@@ -121,7 +121,7 @@ impl State {
             Vec4::new(7.0, 4.0, 0.0, 1.),
         ]; */
 
-        let num_points = 10000;
+        let num_points = 25;
         let mut control_points = Vec::with_capacity(num_points);
 
         let step_distance = 0.25;
@@ -676,7 +676,6 @@ impl ApplicationHandler for App {
                 state.camera.is_dragging = button_state == winit::event::ElementState::Pressed;
             }
 
-            // Mausrad / Touchpad Scrollen (Zoom)
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll_amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
@@ -685,7 +684,7 @@ impl ApplicationHandler for App {
 
                 let zoom_sensitivity = 0.5f32;
                 state.camera.radius -= scroll_amount * zoom_sensitivity;
-                state.camera.radius = state.camera.radius.clamp(2.0, 50.0); // Verhindert invertierten oder unendlichen Zoom
+                state.camera.radius = state.camera.radius.clamp(2.0, 100.0);
 
                 state.update_camera_buffers();
             }
@@ -708,7 +707,6 @@ impl ApplicationHandler for App {
             state.camera.yaw += delta.0 as f32 * sensitivity;
             state.camera.pitch -= delta.1 as f32 * sensitivity;
 
-            // Pitch begrenzen, damit die Kamera nicht über den Nord-/Südpol flippt
             state.camera.pitch = state
                 .camera
                 .pitch
