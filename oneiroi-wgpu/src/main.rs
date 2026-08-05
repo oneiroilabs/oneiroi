@@ -84,6 +84,7 @@ struct State {
     visualizer_uniform_buffer: wgpu::Buffer,
 
     camera: OrbitCamera,
+    depth_texture_view: wgpu::TextureView,
     //mesh_pipeline: RenderPipeline,
     //mesh_bind_group_0: BindGroup,
 }
@@ -195,8 +196,26 @@ impl State {
 
         // Beim Erstellen der Matrizen nutzen wir nun die Kamera:
         let view = camera.build_view_matrix();
-        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
         let view_projection_matrix = projection * view;
+
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let uniform_data = TubeUniforms {
             view_projection: view_projection_matrix,
@@ -367,7 +386,13 @@ impl State {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             cache: None,
             multiview_mask: None,
@@ -460,7 +485,13 @@ impl State {
                 })],
                 compilation_options: Default::default(),
             }),
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -573,6 +604,7 @@ impl State {
             debug_bind_group_0: visualizer_bind_group,
             visualizer_uniform_buffer,
             camera,
+            depth_texture_view,
             // mesh_pipeline,
             //mesh_bind_group_0,
         };
@@ -591,7 +623,8 @@ impl State {
 
     fn update_camera_buffers(&self) {
         let aspect_ratio = self.size.width as f32 / self.size.height as f32;
-        let projection = glam::Mat4::perspective_lh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
         let view = self.camera.build_view_matrix();
         let view_projection = projection * view;
 
@@ -646,6 +679,23 @@ impl State {
         }
         self.size = new_size;
         self.configure_surface();
+        let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: new_size.width,
+                height: new_size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        self.depth_texture_view =
+            depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.update_camera_buffers();
     }
 
@@ -709,7 +759,14 @@ impl State {
                     },
                     depth_slice: None,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
