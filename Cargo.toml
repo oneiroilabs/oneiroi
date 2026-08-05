@@ -33,7 +33,7 @@ oneiroi-core = { path = "./oneiroi-core" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 
-wgpu = { version = "30" }
+wgpu = { version = "30", features = ["trace"] }
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
 encase = { version = "0.12" }

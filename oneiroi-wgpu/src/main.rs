@@ -84,9 +84,8 @@ struct State {
     visualizer_uniform_buffer: wgpu::Buffer,
 
     camera: OrbitCamera,
-
-    mesh_pipeline: RenderPipeline,
-    mesh_bind_group_0: BindGroup,
+    //mesh_pipeline: RenderPipeline,
+    //mesh_bind_group_0: BindGroup,
 }
 
 impl State {
@@ -103,11 +102,12 @@ impl State {
                 label: None,
                 required_features: wgpu::Features::SUBGROUP
                     | wgpu::Features::EXPERIMENTAL_MESH_SHADER,
-                required_limits: wgpu::Limits::default()
-                    .using_recommended_minimum_mesh_shader_values(),
+                required_limits: adapter.limits(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
+                trace: wgpu::Trace::Directory(std::path::PathBuf::from(
+                    std::env!("CARGO_MANIFEST_DIR").to_string() + "/trace",
+                )),
             })
             .await
             .unwrap();
@@ -466,7 +466,9 @@ impl State {
             cache: None,
         });
 
-        let mesh_bind_group_layout =
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        /* let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Tube Pure Mesh Layout"),
                 entries: &[
@@ -531,13 +533,9 @@ impl State {
                 compilation_options: Default::default(),
             },
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                conservative: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
+                ..Default::default()
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
@@ -553,7 +551,7 @@ impl State {
             }),
             cache: None,
             multiview: None,
-        });
+        }); */
 
         let state = State {
             instance,
@@ -575,11 +573,18 @@ impl State {
             debug_bind_group_0: visualizer_bind_group,
             visualizer_uniform_buffer,
             camera,
-            mesh_pipeline,
-            mesh_bind_group_0,
+            // mesh_pipeline,
+            //mesh_bind_group_0,
         };
 
         state.configure_surface();
+
+        if let Some(error) = pollster::block_on(error_scope.pop()) {
+            eprintln!(
+                "Detected pipeline error that might cause Device Loss: {:?}",
+                error
+            );
+        }
 
         state
     }
@@ -633,6 +638,7 @@ impl State {
             present_mode: wgpu::PresentMode::AutoVsync,
         };
         self.surface.configure(&self.device, &surface_config);
+        println!("{:?}", self.device);
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -645,6 +651,7 @@ impl State {
     }
 
     fn render(&mut self) {
+        println!("{:?}", self.surface);
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
@@ -666,6 +673,7 @@ impl State {
                 return;
             }
         };
+        println!("HUH");
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
@@ -720,9 +728,9 @@ impl State {
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             }
 
-            render_pass.set_pipeline(&self.mesh_pipeline);
-            render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
-            render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
+            // render_pass.set_pipeline(&self.mesh_pipeline);
+            // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
+            // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
         }
 
         self.queue.submit([encoder.finish()]);
