@@ -638,7 +638,6 @@ impl State {
             present_mode: wgpu::PresentMode::AutoVsync,
         };
         self.surface.configure(&self.device, &surface_config);
-        println!("{:?}", self.device);
     }
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -651,7 +650,6 @@ impl State {
     }
 
     fn render(&mut self) {
-        println!("{:?}", self.surface);
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
@@ -673,7 +671,6 @@ impl State {
                 return;
             }
         };
-        println!("HUH");
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
