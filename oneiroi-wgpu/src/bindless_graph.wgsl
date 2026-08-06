@@ -25,5 +25,5 @@ struct GraphUniforms {
 // == ACTUAL SHADER
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    
+    nurbs_segment[global_buffers[graph_id][argument_id]]
 }

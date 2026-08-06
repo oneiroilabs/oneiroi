@@ -49,6 +49,15 @@ fn vs_main(
         if (is_tip == 1u) { world_pos += frame.binormal * config.vector_scale; }
     }
 
+    if (inst_idx%32 == 0 || inst_idx%32 == 31) {
+    }else {
+
+        world_pos= vec3<f32>(-1000.0,-1000.0,-1000.0);
+    }
+    if (inst_idx%32 == 31) {
+        line_color=vec4<f32>(1.0,1.0,1.0,0.0);
+    }
+
     out.clip_position = config.view_proj * vec4<f32>(world_pos, 1.0);
     out.color = line_color;
     return out;

@@ -17,7 +17,7 @@ use crate::orbit::OrbitCamera;
 
 mod orbit;
 
-const DEBUG: bool = false;
+const DEBUG: bool = true;
 
 /* #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -130,7 +130,7 @@ impl State {
             Vec4::new(7.0, 4.0, 0.0, 1.),
         ]; */
 
-        let num_points = 25;
+        let num_points = 500;
         let mut control_points = Vec::with_capacity(num_points);
 
         let step_distance = 0.25;
@@ -138,7 +138,7 @@ impl State {
         // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
         let expansion_rate = 0.15;
 
-        for i in 0..num_points {
+        /* for i in 0..num_points {
             let step = i as f64;
 
             let target_arc_length = step * step_distance;
@@ -155,6 +155,10 @@ impl State {
             let y = radius * theta.sin();
 
             control_points.push(Vec4::new(x as f32, y as f32, 0.0, 1.0));
+        } */
+
+        for i in 0..num_points {
+            control_points.push(Vec4::new((i as i32 - 100) as f32, 0.0, 0.0, 1.0));
         }
 
         let num_knots = num_points + 4;
