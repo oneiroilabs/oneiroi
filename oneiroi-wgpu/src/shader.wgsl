@@ -112,15 +112,15 @@ fn main(
     let final_col2 = subgroupShuffleUp(local_R[2], 1u);
     let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
 
-    let tangent_start = normalize(C.xyz); // Bei u=0.0 ist die Ableitung exakt Vektor C
+    let tangent_start = normalize(C.xyz);
 
-let abs_t = abs(tangent_start);
-var ref_v = vec3<f32>(0.0, 0.0, 1.0);
-if (abs_t.x < abs_t.y && abs_t.x < abs_t.z) {
-    ref_v = vec3<f32>(1.0, 0.0, 0.0);
-} else if (abs_t.y < abs_t.z) {
-    ref_v = vec3<f32>(0.0, 1.0, 0.0);
-}
+    let abs_t = abs(tangent_start);
+    var ref_v = vec3<f32>(0.0, 0.0, 1.0);
+    if (abs_t.x < abs_t.y && abs_t.x < abs_t.z) {
+        ref_v = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (abs_t.y < abs_t.z) {
+        ref_v = vec3<f32>(0.0, 1.0, 0.0);
+    }
 
     let n_ref = normalize(cross(ref_v, tangent_start));
     // We already know its normalized so no need to.
