@@ -13,7 +13,9 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 ];
 
 /// GPU-Friendly structure accelerating the evaluation by:
-/// - Caching the coefficient Matrix for the Segment.
+/// - Caching the monomial basis via Bezier Extraction.
+/// - Caching the start normal in two dimensional space.
+/// - Caching the length of the preceeding and currect segment.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubicNurbsSegmentCache {
@@ -26,12 +28,11 @@ pub struct CubicNurbsSegmentCache {
 }
 
 /// A Cubic Nurbs curve that can be evaluated extremly efficiently on the CPU and GPU.
-/// To achieve this it uses the Marsden Identity.
 pub struct CubicNurbs {
     /// Includes the weight of the point in the w coordinate.
     points: Vec<Vec4>,
     knots: Vec<f32>,
-    pub segments: Box<[CubicNurbsSegmentCache]>,
+    segments: Vec<CubicNurbsSegmentCache>,
 }
 
 impl CubicNurbs {
@@ -47,7 +48,7 @@ impl CubicNurbs {
         let mut curve = Self {
             points,
             knots,
-            segments: Box::new([]), //segments_cache.into_boxed_slice(),
+            segments: Vec::new(),
         };
 
         curve.segments = curve.to_gpu_matrices();
@@ -60,8 +61,12 @@ impl CubicNurbs {
         curve
     }
 
-    pub fn to_gpu_matrices(&self) -> Box<[CubicNurbsSegmentCache]> {
-        let p = 3; // Cubic degree
+    pub fn segments(&self) -> &[CubicNurbsSegmentCache] {
+        &self.segments
+    }
+
+    fn to_gpu_matrices(&self) -> Vec<CubicNurbsSegmentCache> {
+        let p = 3;
         let mut w_knots = self.knots.clone();
         let mut w_points = self.points.clone();
 
@@ -132,7 +137,7 @@ impl CubicNurbs {
             });
         }
 
-        gpu_matrices.into_boxed_slice()
+        gpu_matrices
     }
 
     fn precompute_segment_rmf_starts(&mut self) {

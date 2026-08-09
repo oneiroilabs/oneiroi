@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use glam::{Vec3, Vec4};
+use glam::Vec4;
 use oneiroi_core::nurbs::CubicNurbs;
-use wgpu::{
-    BindGroup, ComputePipeline, MeshState, PrimitiveState, RenderPipeline, TaskState,
-    util::DeviceExt,
-};
+use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -166,14 +163,14 @@ impl State {
 
         let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
 
-        let num_segments = curve.segments.len() as u32;
+        let num_segments = curve.segments().len() as u32;
         let total_evaluated_points = num_segments * 32;
 
         let radial_segments = 16u32;
 
         let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Curve Segments Buffer"),
-            contents: bytemuck::cast_slice(&curve.segments),
+            contents: bytemuck::cast_slice(curve.segments()),
             usage: wgpu::BufferUsages::STORAGE,
         });
 
@@ -189,7 +186,6 @@ impl State {
 
         let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
 
-        // Beim Erstellen der Matrizen nutzen wir nun die Kamera:
         let view = camera.build_view_matrix();
         let projection =
             glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
@@ -734,7 +730,7 @@ impl State {
             compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
             compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
 
-            compute_pass.dispatch_workgroups(self.curve.segments.len() as u32, 1, 1);
+            compute_pass.dispatch_workgroups(self.curve.segments().len() as u32, 1, 1);
         }
 
         {
