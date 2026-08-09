@@ -17,7 +17,7 @@ use crate::orbit::OrbitCamera;
 
 mod orbit;
 
-const DEBUG: bool = true;
+const DEBUG: bool = false;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -121,7 +121,7 @@ impl State {
             Vec4::new(7.0, 4.0, 0.0, 1.),
         ]; */
 
-        let num_points = 10;
+        let num_points = 10000;
         let mut control_points = Vec::with_capacity(num_points);
 
         let step_distance = 0.25;

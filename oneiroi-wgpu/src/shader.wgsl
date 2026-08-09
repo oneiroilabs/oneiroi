@@ -73,18 +73,17 @@ fn main(
     let u = f32(lane_id) / 31.0;
     let u_splat = vec4<f32>(u);
     
-    let p_hom = fma(segment.coeffs[3], u_splat, segment.coeffs[2]);
-    let p_hom2 = fma(p_hom, u_splat, segment.coeffs[1]);
-    let position_hom = fma(p_hom2, u_splat, segment.coeffs[0]);
-    let w = position_hom.w;
-    let position = position_hom.xyz / w;
+    let A = segment.coeffs[0];
+    let B = segment.coeffs[1];
+    let C = segment.coeffs[2];
+    let D = segment.coeffs[3];
+
+    let position_hom = fma(fma(fma(A, u_splat, B), u_splat, C), u_splat, D);
+    let position = position_hom.xyz / position_hom.w;
     
-    let d3 = segment.coeffs[3] * 3.0;
-    let d2 = segment.coeffs[2] * 2.0;
-    let dp_du = fma(d3, u_splat, d2);
-    let derivative_hom = fma(dp_du, u_splat, segment.coeffs[1]);
-    
-    let velocity = (derivative_hom.xyz - derivative_hom.w * position) / w;
+    let dp_du = fma(fma(A * 3.0, u_splat, B * 2.0), u_splat, C);
+
+    let velocity = (dp_du.xyz - dp_du.w * position) / position_hom.w;
     let tangent = normalize(velocity);
 
     //Grab neighbouring position

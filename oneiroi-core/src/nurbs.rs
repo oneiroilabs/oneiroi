@@ -17,7 +17,7 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubicNurbsSegmentCache {
-    coefficients: Mat4,
+    monomial_basis: Mat4,
 
     // The time start and end value for the given segment to avoid knot vector upload.
     t_start: f32,
@@ -35,14 +35,14 @@ pub struct CubicNurbsSegmentCache {
 /// To achieve this it uses the Marsden Identity.
 pub struct CubicNurbs {
     /// Includes the weight of the point in the w coordinate.
-    points: Box<[Vec4]>,
-    knots: Box<[f32]>,
+    points: Vec<Vec4>,
+    knots: Vec<f32>,
     pub segments: Box<[CubicNurbsSegmentCache]>,
 }
 
 impl CubicNurbs {
-    pub fn new(control_points: Vec<Vec4>, knots: Vec<f32>) -> Self {
-        let num_points = control_points.len();
+    pub fn new(points: Vec<Vec4>, knots: Vec<f32>) -> Self {
+        let num_points = points.len();
 
         assert_eq!(
             knots.len(),
@@ -50,52 +50,13 @@ impl CubicNurbs {
             "Knots length must be equal to num_points + degree + 1"
         );
 
-        let points = control_points.into_boxed_slice();
-        let knot_vec = knots.into_boxed_slice();
-
-        let num_interior_segments = num_points - 3;
-        let mut segments_cache = Vec::with_capacity(num_interior_segments);
-
-        let bezier_to_monomial = Mat4::from_cols(
-            // Monomial Constant
-            Vec4::new(1.0, 0.0, 0.0, 0.0),
-            // Linear Factor
-            Vec4::new(-3.0, 3.0, 0.0, 0.0),
-            // Quadratic Factor
-            Vec4::new(3.0, -6.0, 3.0, 0.0),
-            // Cubic Factor
-            Vec4::new(-1.0, 3.0, -3.0, 1.0),
-        );
-
-        for idx in 0..num_interior_segments {
-            let r = idx + 3;
-            let t_start = knot_vec[r];
-            let t_end = knot_vec[r + 1];
-
-            if (t_end - t_start).abs() < 1e-6 {
-                continue;
-            }
-
-            let b_mat = extract_bezier_segment_4d(&knot_vec, &points[idx..idx + 4], r);
-
-            let monom = b_mat.mul_mat4(&bezier_to_monomial);
-
-            segments_cache.push(CubicNurbsSegmentCache {
-                t_start,
-                t_end,
-                length: 0.,
-                cumulative_length: 0.,
-                coefficients: monom,
-                rmf_start_normal: Vec3::ZERO,
-                _pad0: 0,
-            });
-        }
-
         let mut curve = Self {
             points,
-            knots: knot_vec,
-            segments: segments_cache.into_boxed_slice(),
+            knots,
+            segments: Box::new([]), //segments_cache.into_boxed_slice(),
         };
+
+        curve.segments = curve.to_gpu_matrices();
 
         curve.recompute_lengths();
         curve.precompute_segment_rmf_starts();
@@ -105,18 +66,109 @@ impl CubicNurbs {
         curve
     }
 
+    pub fn to_gpu_matrices(&self) -> Box<[CubicNurbsSegmentCache]> {
+        let p = 3; // Cubic degree
+        let mut w_knots = self.knots.clone();
+        let mut w_points = self.points.clone();
+
+        // 1. Standard Boehm's Knot Insertion to isolate Bezier control points
+        let mut i = w_knots.len() - p - 2;
+        while i > p {
+            let knot_val = w_knots[i];
+            let mut count = 0;
+            while w_knots[i - count] == knot_val {
+                count += 1;
+            }
+            let start_idx = i - count + 1;
+            let num_insertions = p - count;
+
+            for _ in 0..num_insertions {
+                let k = start_idx;
+                w_knots.insert(k, knot_val);
+
+                let mut new_points = Vec::with_capacity(w_points.len() + 1);
+                new_points.extend_from_slice(&w_points[..k - p]);
+
+                for j in (k - p)..k {
+                    let alpha = (knot_val - w_knots[j]) / (w_knots[j + p + 1] - w_knots[j]);
+                    let new_pt = w_points[j - 1].lerp(w_points[j], alpha);
+                    new_points.push(new_pt);
+                }
+
+                new_points.extend_from_slice(&w_points[k - 1..]);
+                w_points = new_points;
+            }
+            i -= count;
+        }
+
+        // Constant Cubic Bezier Basis Matrix (Transposed for glam column-major order alignment)
+        // Row 0 coefficient for t^3, Row 1 for t^2, Row 2 for t, Row 3 for 1
+        let bezier_basis = Mat4::from_cols(
+            Vec4::new(-1.0, 3.0, -3.0, 1.0), // Coeffs for P0
+            Vec4::new(3.0, -6.0, 3.0, 0.0),  // Coeffs for P1
+            Vec4::new(-3.0, 3.0, 0.0, 0.0),  // Coeffs for P2
+            Vec4::new(1.0, 0.0, 0.0, 0.0),   // Coeffs for P3
+        );
+
+        let mut gpu_matrices = Vec::new();
+        let num_segments = (w_points.len() - 1) / p;
+
+        // 2. Combine Basis Matrix with Control Points into a single Coefficient Matrix
+        for s in 0..num_segments {
+            let offset = s * p;
+
+            // Build a geometry matrix where columns are the 4 control points
+            let p_matrix = Mat4::from_cols(
+                w_points[offset],
+                w_points[offset + 1],
+                w_points[offset + 2],
+                w_points[offset + 3],
+            );
+
+            // Multiply geometry by the basis.
+            // In glam, p_matrix * bezier_basis creates a coefficient matrix where:
+            // Column 0 = A, Column 1 = B, Column 2 = C, Column 3 = D
+            // for the equation: P(t) = A*t^3 + B*t^2 + C*t + D
+            let coeff_matrix = p_matrix * bezier_basis;
+            gpu_matrices.push(CubicNurbsSegmentCache {
+                t_start: 0.,
+                t_end: 0.,
+                length: 0.,
+                cumulative_length: 0.,
+                monomial_basis: coeff_matrix,
+                rmf_start_normal: Vec3::ZERO,
+                _pad0: 0,
+            });
+        }
+
+        gpu_matrices.into_boxed_slice()
+    }
+
     fn precompute_segment_rmf_starts(&mut self) {
         let num_segments = self.segments.len();
         if num_segments == 0 {
             return;
         }
 
-        // 1. Initialisiere die historische Basis am Kurvenanfang (t_start von Segment 0)
-        let first_t_start = self.segments[0].t_start;
-        let (mut current_pos, t_start_raw) = self.evaluate_tanget(first_t_start);
-        let mut current_tangent = t_start_raw.normalize();
+        let segment_0 = &self.segments[0];
 
-        // Bestimme die erste stabile Normale (Gram-Schmidt oder stabiler Fallback)
+        let pos_0_hom = segment_0.monomial_basis.col(3);
+        let mut current_pos = pos_0_hom.xyz() / pos_0_hom.w;
+
+        let dp_du_0 = segment_0.monomial_basis.col(2);
+
+        let current_velocity = (dp_du_0.xyz() - dp_du_0.w * current_pos) / pos_0_hom.w;
+
+        let mut current_tangent = current_velocity.try_normalize().unwrap_or_else(|| {
+            let u_eps = 0.001;
+            let u_splat = Vec4::splat(u_eps);
+            let c0 = segment_0.monomial_basis.col(0); // A
+            let c1 = segment_0.monomial_basis.col(1); // B
+            let c2 = segment_0.monomial_basis.col(2); // C
+
+            let dp_du_eps = c0.mul_add(u_splat * 3.0, c1 * 2.0).mul_add(u_splat, c2);
+            dp_du_eps.xyz().normalize()
+        });
 
         let abs_t = current_tangent.abs();
         let ref_v = if abs_t.x < abs_t.y && abs_t.x < abs_t.z {
@@ -127,27 +179,30 @@ impl CubicNurbs {
             Vec3::Z
         };
         let mut current_normal = ref_v.cross(current_tangent).normalize();
-
-        // Erste Startnormale dem ersten Segment zuweisen
         self.segments[0].rmf_start_normal = current_normal;
 
-        // 2. Grobschritt-Propagation (O(N)) über die Segmentgrenzen hinweg
         for idx in 0..num_segments {
-            let t_end = self.segments[idx].t_end;
+            let seg = &self.segments[idx];
 
-            let next_pos = self.evaluate(t_end);
-            let (_, t_next_raw) = self.evaluate_tanget(t_end);
-            let next_tangent = t_next_raw.normalize();
+            let pos_1_hom = seg.monomial_basis.col(0)
+                + seg.monomial_basis.col(1)
+                + seg.monomial_basis.col(2)
+                + seg.monomial_basis.col(3);
+            let next_pos = pos_1_hom.xyz() / pos_1_hom.w;
+
+            let dp_du_1 = seg.monomial_basis.col(0) * 3.0
+                + seg.monomial_basis.col(1) * 2.0
+                + seg.monomial_basis.col(2);
+            let next_velocity = (dp_du_1.xyz() - dp_du_1.w * next_pos) / pos_1_hom.w;
+            let next_tangent = next_velocity.normalize();
 
             let v1 = next_pos - current_pos;
             let c1 = v1.length_squared();
 
             if c1 > 1e-8 {
-                // Erster Reflektionsschritt über das Segment-Intervall
                 let n_curr_reflected = current_normal - (2.0 / c1) * v1.dot(current_normal) * v1;
                 let t_curr_reflected = current_tangent - (2.0 / c1) * v1.dot(current_tangent) * v1;
 
-                // Zweiter Reflektionsschritt zur exakten Tangentenausrichtung
                 let v2 = next_tangent - t_curr_reflected;
                 let c2 = v2.length_squared();
 
@@ -155,18 +210,17 @@ impl CubicNurbs {
                     current_normal = n_curr_reflected - (2.0 / c2) * v2.dot(n_curr_reflected) * v2;
                 } else {
                     current_normal = n_curr_reflected;
-                };
-
-                // Bereinigung numerischer Drift über temporäre Binormale
-                let binormal_temp = next_tangent.cross(current_normal).normalize();
-                current_normal = binormal_temp.cross(next_tangent).normalize();
+                }
+                current_normal = next_tangent
+                    .cross(current_normal)
+                    .normalize()
+                    .cross(next_tangent)
+                    .normalize();
             }
 
-            // Zustand für den nächsten Segmentübergang aktualisieren
             current_pos = next_pos;
             current_tangent = next_tangent;
 
-            // Zuweisung der akkumulierten Normale an das darauffolgende Segment
             if idx + 1 < num_segments {
                 self.segments[idx + 1].rmf_start_normal = current_normal;
             }
@@ -212,10 +266,10 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / (segment.t_end - segment.t_start);
 
         let u_splat = Vec4::splat(u);
-        let c0 = segment.coefficients.col(0);
-        let c1 = segment.coefficients.col(1);
-        let c2 = segment.coefficients.col(2);
-        let c3 = segment.coefficients.col(3);
+        let c0 = segment.monomial_basis.col(0);
+        let c1 = segment.monomial_basis.col(1);
+        let c2 = segment.monomial_basis.col(2);
+        let c3 = segment.monomial_basis.col(3);
 
         let horner_eval = c3
             .mul_add(u_splat, c2)
@@ -237,10 +291,10 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
         let u_splat = Vec4::splat(u);
 
-        let c0 = segment.coefficients.col(0);
-        let c1 = segment.coefficients.col(1);
-        let c2 = segment.coefficients.col(2);
-        let c3 = segment.coefficients.col(3);
+        let c0 = segment.monomial_basis.col(0);
+        let c1 = segment.monomial_basis.col(1);
+        let c2 = segment.monomial_basis.col(2);
+        let c3 = segment.monomial_basis.col(3);
 
         let horner_eval = c3
             .mul_add(u_splat, c2)
@@ -281,10 +335,10 @@ impl CubicNurbs {
         let u = (t - segment.t_start) / dt;
 
         let u_splat = Vec4::splat(u);
-        let c0 = segment.coefficients.col(0);
-        let c1 = segment.coefficients.col(1);
-        let c2 = segment.coefficients.col(2);
-        let c3 = segment.coefficients.col(3);
+        let c0 = segment.monomial_basis.col(0);
+        let c1 = segment.monomial_basis.col(1);
+        let c2 = segment.monomial_basis.col(2);
+        let c3 = segment.monomial_basis.col(3);
 
         let horner_eval = c3
             .mul_add(u_splat, c2)
@@ -734,260 +788,3 @@ impl Curve<Vec3> for CubicNurbs {
         self.t_at_distance(distance).unwrap()
     }
 }
-
-/* fn extract_bezier_segment_4d(knots: &[f32], points: &[Vec4], r: usize) -> Mat4 {
-    let t_left = knots[r];
-    let t_right = knots[r + 1];
-
-    let p0 = points[0];
-    let p1 = points[1];
-    let p2 = points[2];
-    let p3 = points[3];
-
-    // --- Schritt 1: Linke Intervallgrenze fixieren (t_left einfügen) ---
-    let a1 = (t_left - knots[r - 2]) / (knots[r + 1] - knots[r - 2]);
-    let a2 = (t_left - knots[r - 1]) / (knots[r + 2] - knots[r - 1]);
-    let a3 = 0.0; // Da (t_left - knots[r]) / (knots[r+3] - knots[r]) immer 0 ist
-
-    let p1_1 = Vec4::lerp(p0, p1, a1);
-    let p2_1 = Vec4::lerp(p1, p2, a2);
-    let p3_1 = Vec4::lerp(p2, p3, a3);
-
-    let a4 = (t_left - knots[r - 1]) / (knots[r + 1] - knots[r - 1]);
-    let a5 = 0.0; // Da (t_left - knots[r]) / (knots[r+2] - knots[r]) immer 0 ist
-
-    let p2_2 = Vec4::lerp(p1_1, p2_1, a4);
-    let p3_2 = Vec4::lerp(p2_1, p3_1, a5);
-
-    // --- Schritt 2: Rechte Intervallgrenze fixieren (t_right einfügen) ---
-    let b1 = (t_right - knots[r - 1]) / (knots[r + 2] - knots[r - 1]);
-    let b2 = (t_right - knots[r]) / (knots[r + 1] - knots[r]);
-
-    let q1 = Vec4::lerp(p1_1, p2_1, b1);
-    let q2 = Vec4::lerp(p2_2, p3_2, b2);
-
-    // Rückgabe der 4 exakten rationalen Bézier-Kontrollpunkte [Q0, Q1, Q2, Q3] für das Segment
-    Mat4::from_cols(p2_2, q1, q2, p3_2)
-} */
-
-/* fn extract_bezier_segment_4d(knots: &[f32], points: &[Vec4], r: usize) -> Mat4 {
-    let t_l = knots[r]; // Left knot boundary
-    let t_r = knots[r + 1]; // Right knot boundary
-
-    let p0 = points[0];
-    let p1 = points[1];
-    let p2 = points[2];
-    let p3 = points[3];
-
-    // --- Level 1 Alphalphas ---
-    let alpha_1_1 = if knots[r + 1] > knots[r - 2] {
-        (t_l - knots[r - 2]) / (knots[r + 1] - knots[r - 2])
-    } else {
-        0.0
-    };
-    let alpha_2_1 = if knots[r + 2] > knots[r - 1] {
-        (t_l - knots[r - 1]) / (knots[r + 2] - knots[r - 1])
-    } else {
-        0.0
-    };
-    let alpha_3_1 = if knots[r + 3] > knots[r] {
-        (t_l - knots[r]) / (knots[r + 3] - knots[r])
-    } else {
-        0.0
-    };
-
-    let p1_1 = Vec4::lerp(p0, p1, alpha_1_1);
-    let p2_1 = Vec4::lerp(p1, p2, alpha_2_1);
-    let p3_1 = Vec4::lerp(p2, p3, alpha_3_1);
-
-    // --- Level 2 Alphalphas ---
-    let alpha_1_2 = if knots[r + 1] > knots[r - 1] {
-        (t_l - knots[r - 1]) / (knots[r + 1] - knots[r - 1])
-    } else {
-        0.0
-    };
-    let alpha_2_2 = if knots[r + 2] > knots[r] {
-        (t_l - knots[r]) / (knots[r + 2] - knots[r])
-    } else {
-        0.0
-    };
-
-    let p1_2 = Vec4::lerp(p1_1, p2_1, alpha_1_2);
-    let p2_2 = Vec4::lerp(p2_1, p3_1, alpha_2_2);
-
-    // --- Level 3 Alphalphas ---
-    let alpha_1_3 = if knots[r + 1] > knots[r] {
-        (t_l - knots[r]) / (knots[r + 1] - knots[r])
-    } else {
-        0.0
-    };
-    let p1_3 = Vec4::lerp(p1_2, p2_2, alpha_1_3);
-
-    // Now insert the right boundary (t_r) relative to the generated state
-    let beta_1_1 = if knots[r + 1] > knots[r - 1] {
-        (knots[r + 1] - t_r) / (knots[r + 1] - knots[r - 1])
-    } else {
-        0.0
-    };
-    let beta_2_1 = if knots[r + 2] > knots[r] {
-        (knots[r + 2] - t_r) / (knots[r + 2] - knots[r])
-    } else {
-        0.0
-    };
-
-    let q1_1 = Vec4::lerp(p2_1, p1_1, beta_1_1);
-    let q2_1 = Vec4::lerp(p3_1, p2_1, beta_2_1);
-
-    let beta_1_2 = if knots[r + 1] > knots[r] {
-        (knots[r + 1] - t_r) / (knots[r + 1] - knots[r])
-    } else {
-        0.0
-    };
-    let q1_2 = Vec4::lerp(p2_2, p1_2, beta_1_2);
-
-    // The resulting 4 column vectors are the true, mathematically exact
-    // rational Bézier/Bernstein Control Points for this isolated segment.
-    Mat4::from_cols(p1_3, q1_2, q1_1, p3)
-} */
-
-fn extract_bezier_segment_4d(knots: &[f32], points: &[Vec4], r: usize) -> Mat4 {
-    let t_l = knots[r];
-    let t_r = knots[r + 1];
-
-    let p0 = points[0];
-    let p1 = points[1];
-    let p2 = points[2];
-    let p3 = points[3];
-
-    // Compute standard denominators safely to avoid division by zero on clamped knots
-    let d1 = if knots[r + 1] > knots[r - 2] {
-        1.0 / (knots[r + 1] - knots[r - 2])
-    } else {
-        0.0
-    };
-    let d2 = if knots[r + 2] > knots[r - 1] {
-        1.0 / (knots[r + 2] - knots[r - 1])
-    } else {
-        0.0
-    };
-    let d3 = if knots[r + 3] > knots[r] {
-        1.0 / (knots[r + 3] - knots[r])
-    } else {
-        0.0
-    };
-    let d4 = if knots[r + 1] > knots[r - 1] {
-        1.0 / (knots[r + 1] - knots[r - 1])
-    } else {
-        0.0
-    };
-    let d5 = if knots[r + 2] > knots[r] {
-        1.0 / (knots[r + 2] - knots[r])
-    } else {
-        0.0
-    };
-
-    // Compute alpha blending factors directly from the knot vector state
-    let a1 = (t_l - knots[r - 2]) * d1;
-    let a2 = (t_l - knots[r - 1]) * d2;
-    let a3 = (t_l - knots[r]) * d3;
-
-    let b1 = (knots[r + 1] - t_r) * d4; // Note: evaluating right boundary insertions
-    let b2 = (knots[r + 2] - t_r) * d5;
-
-    let g1 = (t_l - knots[r - 1]) * d4;
-    let g2 = (t_l - knots[r]) * d5;
-
-    // --- Mathematically Exact Bézier Extraction Operator Matrix ---
-    // Each row maps how much of [p0, p1, p2, p3] contributes to each [Q0, Q1, Q2, Q3]
-    let q0 =
-        p0 * ((1.0 - a1) * (1.0 - g1)) + p1 * (a1 * (1.0 - g1) + (1.0 - a2) * g1) + p2 * (a2 * g1);
-
-    let q1 = p1 * (1.0 - a2) + p2 * a2;
-
-    let q2 =
-        p1 * ((1.0 - a2) * b1) + p2 * (a2 * b1 + (1.0 - a3) * (1.0 - b1)) + p3 * (a3 * (1.0 - b1));
-
-    let q3 = p1 * ((1.0 - a2) * b1 * b2)
-        + p2 * (a2 * b1 * b2 + (1.0 - a3) * (1.0 - b1) * b2 + (1.0 - g2) * (1.0 - b2))
-        + p3 * (a3 * (1.0 - b1) * b2 + g2 * (1.0 - b2));
-
-    // Construct column-major matrix matching glam expectations
-    Mat4::from_cols(q0, q1, q2, q3)
-}
-
-/* fn extract_bezier_segment_4d(knots: &[f32], points: &[Vec4], r: usize) -> Mat4 {
-    let t_l = knots[r];
-    let t_r = knots[r + 1];
-
-    let p0 = points[0];
-    let p1 = points[1];
-    let p2 = points[2];
-    let p3 = points[3];
-
-    // Precompute safe differences to handle non-uniform or clamped knots
-    let d_r_minus_2 = knots[r + 1] - knots[r - 2];
-    let d_r_minus_1 = knots[r + 1] - knots[r - 1];
-    let d_r = knots[r + 1] - knots[r];
-
-    let d_l_plus_1 = knots[r + 2] - knots[r - 1];
-    let d_l_plus_2 = knots[r + 2] - knots[r];
-    let d_l_plus_3 = knots[r + 3] - knots[r];
-
-    // Left blending factors (how much we step into the span from the left)
-    let alpha_0 = if d_r_minus_2 > 1e-6 {
-        (t_l - knots[r - 2]) / d_r_minus_2
-    } else {
-        0.0
-    };
-    let alpha_1 = if d_r_minus_1 > 1e-6 {
-        (t_l - knots[r - 1]) / d_r_minus_1
-    } else {
-        0.0
-    };
-    let alpha_2 = if d_r > 1e-6 {
-        (t_l - knots[r]) / d_r
-    } else {
-        0.0
-    };
-
-    // Right blending factors (how far we are from the right boundary)
-    let beta_1 = if d_l_plus_1 > 1e-6 {
-        (knots[r + 2] - t_r) / d_l_plus_1
-    } else {
-        0.0
-    };
-    let beta_2 = if d_l_plus_2 > 1e-6 {
-        (knots[r + 2] - t_r) / d_l_plus_2
-    } else {
-        0.0
-    };
-    let beta_3 = if d_l_plus_3 > 1e-6 {
-        (knots[r + 3] - t_r) / d_l_plus_3
-    } else {
-        0.0
-    };
-
-    // --- Exact Boehm Knots Insertion Operator ---
-    // Q0: Continuous start anchor point
-    let q0 = p0 * ((1.0 - alpha_0) * (1.0 - alpha_1))
-        + p1 * (alpha_0 * (1.0 - alpha_1) + (1.0 - alpha_2) * alpha_1)
-        + p2 * (alpha_2 * alpha_1);
-
-    // Q1: Left internal derivative control handle
-    let q1 = p0 * ((1.0 - alpha_0) * beta_1)
-        + p1 * (alpha_0 * beta_1 + (1.0 - alpha_2) * (1.0 - beta_1))
-        + p2 * (alpha_2 * (1.0 - beta_1));
-
-    // Q2: Right internal derivative control handle
-    let q2 = p1 * (beta_2 * beta_1)
-        + p2 * ((1.0 - beta_3) * beta_1 + alpha_2 * (1.0 - beta_1))
-        + p3 * (beta_3 * (1.0 - beta_1));
-
-    // Q3: Continuous end anchor point (Maps identically to Q0 of the next segment)
-    let q3 = p1 * (beta_2 * beta_3)
-        + p2 * ((1.0 - beta_2) * beta_3 + (1.0 - alpha_2) * (1.0 - beta_3))
-        + p3 * (alpha_2 * (1.0 - beta_3));
-
-    // Construct column-major matrix matching glam expectations
-    Mat4::from_cols(q0, q1, q2, q3)
-} */
