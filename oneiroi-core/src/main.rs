@@ -37,7 +37,7 @@ fn main() {
         })
         .collect();
 
-    let (vertices, indices) = curve.sweep_profile_transformed(
+    /* let (vertices, indices) = curve.sweep_profile_transformed(
         &circle_profile,
         100,  // Smooth longitudinal subdivision count
         true, // Closed circle cross section
@@ -74,5 +74,5 @@ fn main() {
         //println!("t = {:.2} -> Point: {:?}, Curvature: {cv}", t, pt);
         //println!("Uniform Sample at point: {:?}", uniform_samples[step])
     } */
-    println!("Curve Length is: {}", curve.length());
+    println!("Curve Length is: {}", curve.length()); */
 }

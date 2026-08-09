@@ -1,13 +1,10 @@
 struct CubicNurbsSegmentCache {
     coeffs: mat4x4<f32>,
     
-    t_start: f32,
-    t_end: f32,
     length: f32,
     cumulative_length: f32,
 
-    rmf_start_normal: vec3<f32>,
-    _pad0: u32,
+    rmf_start_normal: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -67,8 +64,7 @@ fn main(
     let lane_id = local_id.x;
     
     let segment = segments[segment_idx];
-    let dt = segment.t_end - segment.t_start;
-    
+
     // The Lanes Are going from 0.0 to 1.0
     let u = f32(lane_id) / 31.0;
     let u_splat = vec4<f32>(u);
@@ -115,7 +111,24 @@ fn main(
     let final_col1 = subgroupShuffleUp(local_R[1], 1u);
     let final_col2 = subgroupShuffleUp(local_R[2], 1u);
     let final_chain_matrix = mat3x3<f32>(final_col0, final_col1, final_col2);
-    let normal=select(segment.rmf_start_normal,normalize(final_chain_matrix * segment.rmf_start_normal),lane_id > 0u);    
+
+    let tangent_start = normalize(C.xyz); // Bei u=0.0 ist die Ableitung exakt Vektor C
+
+let abs_t = abs(tangent_start);
+var ref_v = vec3<f32>(0.0, 0.0, 1.0);
+if (abs_t.x < abs_t.y && abs_t.x < abs_t.z) {
+    ref_v = vec3<f32>(1.0, 0.0, 0.0);
+} else if (abs_t.y < abs_t.z) {
+    ref_v = vec3<f32>(0.0, 1.0, 0.0);
+}
+
+    let n_ref = normalize(cross(ref_v, tangent_start));
+    // We already know its normalized so no need to.
+    let b_ref = cross(tangent_start, n_ref); 
+
+    let rmf_start_normal = fma(n_ref, vec3<f32>(segment.rmf_start_normal.x), b_ref * segment.rmf_start_normal.y);
+
+    let normal=select(rmf_start_normal,normalize(final_chain_matrix * rmf_start_normal),lane_id > 0u);    
 
     let binormal = normalize(cross(tangent, normal));
     let final_normal = cross(binormal, tangent);

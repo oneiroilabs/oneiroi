@@ -19,16 +19,10 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 pub struct CubicNurbsSegmentCache {
     monomial_basis: Mat4,
 
-    // The time start and end value for the given segment to avoid knot vector upload.
-    t_start: f32,
-    t_end: f32,
-
     length: f32,
     cumulative_length: f32,
 
-    rmf_start_normal: Vec3,
-
-    _pad0: u32,
+    rmf_start_normal: Vec2,
 }
 
 /// A Cubic Nurbs curve that can be evaluated extremly efficiently on the CPU and GPU.
@@ -58,7 +52,7 @@ impl CubicNurbs {
 
         curve.segments = curve.to_gpu_matrices();
 
-        curve.recompute_lengths();
+        //curve.recompute_lengths();
         curve.precompute_segment_rmf_starts();
 
         println!("{:#?}", curve.segments);
@@ -131,13 +125,10 @@ impl CubicNurbs {
             // for the equation: P(t) = A*t^3 + B*t^2 + C*t + D
             let coeff_matrix = p_matrix * bezier_basis;
             gpu_matrices.push(CubicNurbsSegmentCache {
-                t_start: 0.,
-                t_end: 0.,
                 length: 0.,
                 cumulative_length: 0.,
                 monomial_basis: coeff_matrix,
-                rmf_start_normal: Vec3::ZERO,
-                _pad0: 0,
+                rmf_start_normal: Vec2::ZERO,
             });
         }
 
@@ -150,16 +141,20 @@ impl CubicNurbs {
             return;
         }
 
+        // --- 1. INITIALISIERUNG AM ABSOLUTEN ANFANG (Segment 0, u = 0.0) ---
         let segment_0 = &self.segments[0];
 
+        // Bei u = 0.0 entspricht die Position direkt dem konstanten Vektor D (Spalte 3)
         let pos_0_hom = segment_0.monomial_basis.col(3);
         let mut current_pos = pos_0_hom.xyz() / pos_0_hom.w;
 
+        // Bei u = 0.0 entspricht die Ableitung dP/du exakt dem Vektor C (Spalte 2)
         let dp_du_0 = segment_0.monomial_basis.col(2);
-
         let current_velocity = (dp_du_0.xyz() - dp_du_0.w * current_pos) / pos_0_hom.w;
 
+        // Bestimme die Tangente (mit Fallback für geklemmte Ränder)
         let mut current_tangent = current_velocity.try_normalize().unwrap_or_else(|| {
+            // Fallback: Ein winziges Stück (u = 0.001) ins Segment hineingehen
             let u_eps = 0.001;
             let u_splat = Vec4::splat(u_eps);
             let c0 = segment_0.monomial_basis.col(0); // A
@@ -170,6 +165,7 @@ impl CubicNurbs {
             dp_du_eps.xyz().normalize()
         });
 
+        // Generiere die allererste stabile 3D-Startnormale (Gram-Schmidt)
         let abs_t = current_tangent.abs();
         let ref_v = if abs_t.x < abs_t.y && abs_t.x < abs_t.z {
             Vec3::X
@@ -179,23 +175,37 @@ impl CubicNurbs {
             Vec3::Z
         };
         let mut current_normal = ref_v.cross(current_tangent).normalize();
-        self.segments[0].rmf_start_normal = current_normal;
 
+        // Jedes Segment braucht ein eigenes Referenzsystem für die Kompression.
+        // Für Segment 0 ist die Start-Tangente exakt 'current_tangent'.
+        let n_ref_0 = ref_v.cross(current_tangent).normalize();
+        let b_ref_0 = current_tangent.cross(n_ref_0).normalize();
+
+        // Da 'current_normal' hier identisch mit 'n_ref_0' generiert wurde,
+        // ist die Projektion mathematisch exakt Vec2(1.0, 0.0)
+        self.segments[0].rmf_start_normal =
+            Vec2::new(current_normal.dot(n_ref_0), current_normal.dot(b_ref_0));
+
+        // --- 2. PROPAGATION-LOOP (u = 1.0) ÜBER ALLE INTERVALLE ---
         for idx in 0..num_segments {
             let seg = &self.segments[idx];
 
+            // Evaluiere das Ende des aktuellen Segments (u = 1.0)
+            // Position = A + B + C + D
             let pos_1_hom = seg.monomial_basis.col(0)
                 + seg.monomial_basis.col(1)
                 + seg.monomial_basis.col(2)
                 + seg.monomial_basis.col(3);
             let next_pos = pos_1_hom.xyz() / pos_1_hom.w;
 
+            // Ableitung am Ende (u = 1.0) -> dP/du = 3A + 2B + C
             let dp_du_1 = seg.monomial_basis.col(0) * 3.0
                 + seg.monomial_basis.col(1) * 2.0
                 + seg.monomial_basis.col(2);
             let next_velocity = (dp_du_1.xyz() - dp_du_1.w * next_pos) / pos_1_hom.w;
             let next_tangent = next_velocity.normalize();
 
+            // Wang's Doppel-Reflexion (Double Reflection Method)
             let v1 = next_pos - current_pos;
             let c1 = v1.length_squared();
 
@@ -211,6 +221,8 @@ impl CubicNurbs {
                 } else {
                     current_normal = n_curr_reflected;
                 }
+
+                // Drift bereinigen
                 current_normal = next_tangent
                     .cross(current_normal)
                     .normalize()
@@ -218,16 +230,40 @@ impl CubicNurbs {
                     .normalize();
             }
 
+            // Werte für den nächsten Schritt sichern
             current_pos = next_pos;
             current_tangent = next_tangent;
 
+            // --- 3. KOMPRESSION FÜR DAS NÄCHSTE SEGMENT ---
             if idx + 1 < num_segments {
-                self.segments[idx + 1].rmf_start_normal = current_normal;
+                let next_seg = &mut self.segments[idx + 1];
+
+                // Die Start-Tangente des NÄCHSTEN Segments ist exakt 'current_tangent' (da C-Spalte bei u=0.0)
+                let tangent_next_start = current_tangent;
+
+                // Generiere das deterministische 2D-Referenzsystem für das nächste Segment
+                let abs_t_next = tangent_next_start.abs();
+                let ref_v_next = if abs_t_next.x < abs_t_next.y && abs_t_next.x < abs_t_next.z {
+                    Vec3::X
+                } else if abs_t_next.y < abs_t_next.z {
+                    Vec3::Y
+                } else {
+                    Vec3::Z
+                };
+
+                let n_ref_next = ref_v_next.cross(tangent_next_start).normalize();
+                let b_ref_next = tangent_next_start.cross(n_ref_next).normalize();
+
+                // Projiziere die fortgepflanzte 3D-Normale in die lokale 2D-Ebene des neuen Segments
+                next_seg.rmf_start_normal = Vec2::new(
+                    current_normal.dot(n_ref_next),
+                    current_normal.dot(b_ref_next),
+                );
             }
         }
     }
 
-    fn recompute_lengths(&mut self) {
+    /* fn recompute_lengths(&mut self) {
         let num_segments = self.segments.len();
         let mut total_length = 0.0;
 
@@ -459,9 +495,9 @@ impl CubicNurbs {
             }
         }
         Some(t)
-    }
+    } */
 
-    pub fn compute_rmf_frames(
+    /* pub fn compute_rmf_frames(
         &self,
         count: usize,
         initial_normal: Option<Vec3>,
@@ -552,11 +588,9 @@ impl CubicNurbs {
         }
 
         frames
-    }
+    } */
 
-    /// Sweeps a 2D profile down the length of the NURBS spline curve.
-    /// Returns an aligned vertex buffer and a triangle-strip index buffer for rendering.
-    pub fn sweep_profile(
+    /* pub fn sweep_profile(
         &self,
         profile_vertices: &[Vec2], // Defined local X, Y (Z assumed 0)
         subdivisions: usize,
@@ -736,7 +770,7 @@ impl CubicNurbs {
         }
 
         (out_vertices, out_indices)
-    }
+    } */
 }
 
 /// A stable coordinate frame tracking a point along the NURBS spline.
@@ -777,7 +811,8 @@ impl Curve<Vec3> for CubicNurbs {
     }
 
     fn sample(&self, t: f32) -> Vec3 {
-        self.evaluate(t)
+        //self.evaluate(t)
+        panic!()
     }
 
     fn length(&self) -> f32 {
@@ -785,6 +820,7 @@ impl Curve<Vec3> for CubicNurbs {
     }
 
     fn t_at_distance(&self, distance: f32) -> f32 {
-        self.t_at_distance(distance).unwrap()
+        //self.t_at_distance(distance).unwrap()
+        panic!()
     }
 }
