@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::curve::Curve;
@@ -37,6 +39,8 @@ pub struct CubicNurbs {
 
 impl CubicNurbs {
     pub fn new(points: Vec<Vec4>, knots: Vec<f32>) -> Self {
+        let instant = Instant::now();
+
         let num_points = points.len();
 
         assert_eq!(
@@ -52,11 +56,9 @@ impl CubicNurbs {
         };
 
         curve.segments = curve.to_gpu_matrices();
-
-        //curve.recompute_lengths();
         curve.precompute_segment_rmf_starts();
 
-        println!("{:#?}", curve.segments);
+        println!("{:#?}", instant.elapsed());
 
         curve
     }
@@ -65,12 +67,51 @@ impl CubicNurbs {
         &self.segments
     }
 
+    fn evaluate_monomial(&self, seg_idx: usize, u: f32) -> (Vec3, Vec3, Vec3) {
+        let m = &self.segments[seg_idx].monomial_basis;
+        let a = m.col(0); // t^3
+        let b = m.col(1); // t^2
+        let c = m.col(2); // t
+        let d = m.col(3); // 1
+
+        let pos_hom = a
+            .mul_add(Vec4::splat(u), b)
+            .mul_add(Vec4::splat(u), c)
+            .mul_add(Vec4::splat(u), d);
+        let pos = pos_hom.xyz() / pos_hom.w;
+
+        let dp_du_hom = a
+            .mul_add(Vec4::splat(u * 3.0), b * 2.0)
+            .mul_add(Vec4::splat(u), c);
+        let velocity = (dp_du_hom.xyz() - dp_du_hom.w * pos) / pos_hom.w;
+
+        // Tangente mit robustem Fallback für verschwindende Ableitungen (z.B. geklemmte Ränder)
+        let tangent = velocity.try_normalize().unwrap_or_else(|| {
+            let u_eps = if u + 0.001 <= 1.0 {
+                u + 0.001
+            } else {
+                u - 0.001
+            };
+            let dp_du_eps = a
+                .mul_add(Vec4::splat(u_eps * 3.0), b * 2.0)
+                .mul_add(Vec4::splat(u_eps), c);
+            let pos_eps_hom = a
+                .mul_add(Vec4::splat(u_eps), b)
+                .mul_add(Vec4::splat(u_eps), c)
+                .mul_add(Vec4::splat(u_eps), d);
+            let pos_eps = pos_eps_hom.xyz() / pos_eps_hom.w;
+            let vel_eps = (dp_du_eps.xyz() - dp_du_eps.w * pos_eps) / pos_eps_hom.w;
+            vel_eps.normalize()
+        });
+
+        (pos, velocity, tangent)
+    }
+
     fn to_gpu_matrices(&self) -> Vec<CubicNurbsSegmentCache> {
         let p = 3;
         let mut w_knots = self.knots.clone();
         let mut w_points = self.points.clone();
 
-        // 1. Standard Boehm's Knot Insertion to isolate Bezier control points
         let mut i = w_knots.len() - p - 2;
         while i > p {
             let knot_val = w_knots[i];
@@ -100,23 +141,18 @@ impl CubicNurbs {
             i -= count;
         }
 
-        // Constant Cubic Bezier Basis Matrix (Transposed for glam column-major order alignment)
-        // Row 0 coefficient for t^3, Row 1 for t^2, Row 2 for t, Row 3 for 1
         let bezier_basis = Mat4::from_cols(
-            Vec4::new(-1.0, 3.0, -3.0, 1.0), // Coeffs for P0
-            Vec4::new(3.0, -6.0, 3.0, 0.0),  // Coeffs for P1
-            Vec4::new(-3.0, 3.0, 0.0, 0.0),  // Coeffs for P2
-            Vec4::new(1.0, 0.0, 0.0, 0.0),   // Coeffs for P3
+            Vec4::new(-1.0, 3.0, -3.0, 1.0),
+            Vec4::new(3.0, -6.0, 3.0, 0.0),
+            Vec4::new(-3.0, 3.0, 0.0, 0.0),
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
         );
 
         let mut gpu_matrices = Vec::new();
         let num_segments = (w_points.len() - 1) / p;
 
-        // 2. Combine Basis Matrix with Control Points into a single Coefficient Matrix
         for s in 0..num_segments {
             let offset = s * p;
-
-            // Build a geometry matrix where columns are the 4 control points
             let p_matrix = Mat4::from_cols(
                 w_points[offset],
                 w_points[offset + 1],
@@ -124,15 +160,10 @@ impl CubicNurbs {
                 w_points[offset + 3],
             );
 
-            // Multiply geometry by the basis.
-            // In glam, p_matrix * bezier_basis creates a coefficient matrix where:
-            // Column 0 = A, Column 1 = B, Column 2 = C, Column 3 = D
-            // for the equation: P(t) = A*t^3 + B*t^2 + C*t + D
-            let coeff_matrix = p_matrix * bezier_basis;
             gpu_matrices.push(CubicNurbsSegmentCache {
                 length: 0.,
                 cumulative_length: 0.,
-                monomial_basis: coeff_matrix,
+                monomial_basis: p_matrix * bezier_basis,
                 rmf_start_normal: Vec2::ZERO,
             });
         }
@@ -146,31 +177,8 @@ impl CubicNurbs {
             return;
         }
 
-        // --- 1. INITIALISIERUNG AM ABSOLUTEN ANFANG (Segment 0, u = 0.0) ---
-        let segment_0 = &self.segments[0];
+        let (mut current_pos, _, mut current_tangent) = self.evaluate_monomial(0, 0.0);
 
-        // Bei u = 0.0 entspricht die Position direkt dem konstanten Vektor D (Spalte 3)
-        let pos_0_hom = segment_0.monomial_basis.col(3);
-        let mut current_pos = pos_0_hom.xyz() / pos_0_hom.w;
-
-        // Bei u = 0.0 entspricht die Ableitung dP/du exakt dem Vektor C (Spalte 2)
-        let dp_du_0 = segment_0.monomial_basis.col(2);
-        let current_velocity = (dp_du_0.xyz() - dp_du_0.w * current_pos) / pos_0_hom.w;
-
-        // Bestimme die Tangente (mit Fallback für geklemmte Ränder)
-        let mut current_tangent = current_velocity.try_normalize().unwrap_or_else(|| {
-            // Fallback: Ein winziges Stück (u = 0.001) ins Segment hineingehen
-            let u_eps = 0.001;
-            let u_splat = Vec4::splat(u_eps);
-            let c0 = segment_0.monomial_basis.col(0); // A
-            let c1 = segment_0.monomial_basis.col(1); // B
-            let c2 = segment_0.monomial_basis.col(2); // C
-
-            let dp_du_eps = c0.mul_add(u_splat * 3.0, c1 * 2.0).mul_add(u_splat, c2);
-            dp_du_eps.xyz().normalize()
-        });
-
-        // Generiere die allererste stabile 3D-Startnormale (Gram-Schmidt)
         let abs_t = current_tangent.abs();
         let ref_v = if abs_t.x < abs_t.y && abs_t.x < abs_t.z {
             Vec3::X
@@ -181,36 +189,11 @@ impl CubicNurbs {
         };
         let mut current_normal = ref_v.cross(current_tangent).normalize();
 
-        // Jedes Segment braucht ein eigenes Referenzsystem für die Kompression.
-        // Für Segment 0 ist die Start-Tangente exakt 'current_tangent'.
-        let n_ref_0 = ref_v.cross(current_tangent).normalize();
-        let b_ref_0 = current_tangent.cross(n_ref_0).normalize();
+        self.segments[0].rmf_start_normal = Vec2::X;
 
-        // Da 'current_normal' hier identisch mit 'n_ref_0' generiert wurde,
-        // ist die Projektion mathematisch exakt Vec2(1.0, 0.0)
-        self.segments[0].rmf_start_normal =
-            Vec2::new(current_normal.dot(n_ref_0), current_normal.dot(b_ref_0));
-
-        // --- 2. PROPAGATION-LOOP (u = 1.0) ÜBER ALLE INTERVALLE ---
         for idx in 0..num_segments {
-            let seg = &self.segments[idx];
+            let (next_pos, _, next_tangent) = self.evaluate_monomial(idx, 1.0);
 
-            // Evaluiere das Ende des aktuellen Segments (u = 1.0)
-            // Position = A + B + C + D
-            let pos_1_hom = seg.monomial_basis.col(0)
-                + seg.monomial_basis.col(1)
-                + seg.monomial_basis.col(2)
-                + seg.monomial_basis.col(3);
-            let next_pos = pos_1_hom.xyz() / pos_1_hom.w;
-
-            // Ableitung am Ende (u = 1.0) -> dP/du = 3A + 2B + C
-            let dp_du_1 = seg.monomial_basis.col(0) * 3.0
-                + seg.monomial_basis.col(1) * 2.0
-                + seg.monomial_basis.col(2);
-            let next_velocity = (dp_du_1.xyz() - dp_du_1.w * next_pos) / pos_1_hom.w;
-            let next_tangent = next_velocity.normalize();
-
-            // Wang's Doppel-Reflexion (Double Reflection Method)
             let v1 = next_pos - current_pos;
             let c1 = v1.length_squared();
 
@@ -227,7 +210,6 @@ impl CubicNurbs {
                     current_normal = n_curr_reflected;
                 }
 
-                // Drift bereinigen
                 current_normal = next_tangent
                     .cross(current_normal)
                     .normalize()
@@ -235,35 +217,24 @@ impl CubicNurbs {
                     .normalize();
             }
 
-            // Werte für den nächsten Schritt sichern
             current_pos = next_pos;
             current_tangent = next_tangent;
 
-            // --- 3. KOMPRESSION FÜR DAS NÄCHSTE SEGMENT ---
             if idx + 1 < num_segments {
-                let next_seg = &mut self.segments[idx + 1];
-
-                // Die Start-Tangente des NÄCHSTEN Segments ist exakt 'current_tangent' (da C-Spalte bei u=0.0)
-                let tangent_next_start = current_tangent;
-
-                // Generiere das deterministische 2D-Referenzsystem für das nächste Segment
-                let abs_t_next = tangent_next_start.abs();
-                let ref_v_next = if abs_t_next.x < abs_t_next.y && abs_t_next.x < abs_t_next.z {
+                let next_abs_t = current_tangent.abs();
+                let next_ref_v = if next_abs_t.x < next_abs_t.y && next_abs_t.x < next_abs_t.z {
                     Vec3::X
-                } else if abs_t_next.y < abs_t_next.z {
+                } else if next_abs_t.y < next_abs_t.z {
                     Vec3::Y
                 } else {
                     Vec3::Z
                 };
 
-                let n_ref_next = ref_v_next.cross(tangent_next_start).normalize();
-                let b_ref_next = tangent_next_start.cross(n_ref_next).normalize();
+                let n_ref = next_ref_v.cross(current_tangent).normalize();
+                let b_ref = current_tangent.cross(n_ref).normalize();
 
-                // Projiziere die fortgepflanzte 3D-Normale in die lokale 2D-Ebene des neuen Segments
-                next_seg.rmf_start_normal = Vec2::new(
-                    current_normal.dot(n_ref_next),
-                    current_normal.dot(b_ref_next),
-                );
+                self.segments[idx + 1].rmf_start_normal =
+                    Vec2::new(current_normal.dot(n_ref), current_normal.dot(b_ref));
             }
         }
     }
