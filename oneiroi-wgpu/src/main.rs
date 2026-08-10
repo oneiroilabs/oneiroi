@@ -118,7 +118,7 @@ impl State {
             Vec4::new(7.0, 4.0, 0.0, 1.),
         ]; */
 
-        let num_points = 10000;
+        let num_points = 15;
         let mut control_points = Vec::with_capacity(num_points);
 
         let step_distance = 0.25;

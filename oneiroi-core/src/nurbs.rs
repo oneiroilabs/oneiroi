@@ -19,7 +19,7 @@ const GAUSS_WEIGHTS: [f32; 5] = [
 /// - Caching the start normal in two dimensional space.
 /// - Caching the length of the preceeding and currect segment.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct CubicNurbsSegmentCache {
     monomial_basis: Mat4,
 
@@ -55,7 +55,7 @@ impl CubicNurbs {
             segments: Vec::new(),
         };
 
-        curve.segments = curve.to_gpu_matrices();
+        curve.segments = curve.to_gpu_matrices_old();
         curve.precompute_segment_rmf_starts();
 
         println!("{:#?}", instant.elapsed());
@@ -107,7 +107,107 @@ impl CubicNurbs {
         (pos, velocity, tangent)
     }
 
+    //WIP
     fn to_gpu_matrices(&self) -> Vec<CubicNurbsSegmentCache> {
+        let knots = &self.knots;
+        let points = &self.points;
+
+        let final_points_len = 3 * points.len() - 8;
+        let final_knots_len = final_points_len + 4;
+
+        let mut final_points = Vec::with_capacity(final_points_len);
+        let mut final_knots = Vec::with_capacity(final_knots_len);
+
+        final_knots.extend_from_slice(&knots[0..3]);
+        final_points.push(points[0]);
+
+        let mut point_cursor = 1;
+
+        for i in 3..knots.len() - 5 {
+            let k_0 = knots[i];
+            let k_1 = knots[i + 1];
+            let k_2 = knots[i + 2];
+
+            let insertions = if k_0 == k_1 {
+                if k_1 == k_2 { 0 } else { 1 }
+            } else {
+                2
+            };
+
+            for _ in 0..=insertions {
+                final_knots.push(k_0);
+            }
+
+            match insertions {
+                2 => {
+                    let alpha1 = (k_0 - knots[i - 1]) / (knots[i + 2] - knots[i - 1]);
+                    let alpha2 = (k_0 - knots[i]) / (knots[i + 3] - knots[i]);
+
+                    let p_left = points[point_cursor - 1].lerp(points[point_cursor], alpha1);
+                    let p_right = points[point_cursor].lerp(points[point_cursor + 1], alpha2);
+
+                    final_points.push(p_left);
+                    final_points.push(p_left.lerp(p_right, alpha2));
+                }
+                1 => {
+                    let alpha = (k_0 - knots[i]) / (knots[i + 3] - knots[i]);
+                    let p_interp = points[point_cursor].lerp(points[point_cursor + 1], alpha);
+                    final_points.push(p_interp);
+                }
+                _ => {}
+            }
+
+            if point_cursor < points.len() {
+                final_points.push(points[point_cursor]);
+                point_cursor += 1;
+            }
+        }
+
+        if let Some(&last_knot) = knots.last() {
+            while final_knots.len() < final_knots_len {
+                final_knots.push(last_knot);
+            }
+        }
+        if let Some(&last_point) = points.last() {
+            while final_points.len() < final_points_len {
+                final_points.push(last_point);
+            }
+        }
+
+        println!("{}, {final_points:?}", final_points.len());
+        println!("{}, {final_knots:?}", final_knots.len());
+
+        let bezier_basis = Mat4::from_cols(
+            Vec4::new(-1.0, 3.0, -3.0, 1.0),
+            Vec4::new(3.0, -6.0, 3.0, 0.0),
+            Vec4::new(-3.0, 3.0, 0.0, 0.0),
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+        );
+
+        let num_segments = (final_points.len() - 1) / 3;
+        let mut gpu_matrices = Vec::with_capacity(num_segments);
+
+        for s in 0..num_segments {
+            let offset = s * 3;
+            let p_matrix = Mat4::from_cols(
+                final_points[offset],
+                final_points[offset + 1],
+                final_points[offset + 2],
+                final_points[offset + 3],
+            );
+
+            gpu_matrices.push(CubicNurbsSegmentCache {
+                length: 0.,
+                cumulative_length: 0.,
+                monomial_basis: p_matrix * bezier_basis,
+                rmf_start_normal: Vec2::ZERO,
+            });
+        }
+
+        gpu_matrices
+    }
+
+    fn to_gpu_matrices_old(&self) -> Vec<CubicNurbsSegmentCache> {
         let p = 3;
         let mut w_knots = self.knots.clone();
         let mut w_points = self.points.clone();
@@ -140,6 +240,9 @@ impl CubicNurbs {
             }
             i -= count;
         }
+
+        println!("{}, {w_points:?}", w_points.len());
+        println!("{}, {w_knots:?}", w_knots.len());
 
         let bezier_basis = Mat4::from_cols(
             Vec4::new(-1.0, 3.0, -3.0, 1.0),
