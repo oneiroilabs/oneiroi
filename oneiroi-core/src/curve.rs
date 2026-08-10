@@ -3,6 +3,7 @@ use std::{iter, marker::PhantomData};
 
 use glam::Vec3;
 
+pub mod nurbs;
 pub mod ops;
 
 pub trait Curve<Sv> {

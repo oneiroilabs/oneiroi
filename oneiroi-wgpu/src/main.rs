@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use glam::Vec4;
-use oneiroi_core::nurbs::CubicNurbs;
+use oneiroi_core::curve::nurbs::CubicNurbs;
 use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
@@ -161,7 +161,7 @@ impl State {
             knot_vec[i] = interior_t;
         }
 
-        let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
+        let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
 
         let num_segments = curve.segments().len() as u32;
         let total_evaluated_points = num_segments * 32;

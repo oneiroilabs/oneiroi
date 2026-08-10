@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use glam::Mat4;
 
-use crate::nurbs::CubicNurbsSegmentCache;
+use crate::curve::nurbs::CubicNurbsSegmentCache;
 
 // Idea how to model the GPU cache for the Graphs without overhead. Should work with bindless iiuc.
 // The accessors HashMap would need to be moved out and maybe codegened into the arguments itself because the graph is baked hence we should be able to use hard offsets.

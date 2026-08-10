@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use glam::{Vec2, Vec4};
-use oneiroi_core::nurbs::TransformAtT;
 
 fn main() {
     let control_points = vec![
@@ -26,7 +25,7 @@ fn main() {
         let interior_t = (i - 3) as f32 / num_interior_segments as f32;
         knot_vec[i] = interior_t;
     }
-    let curve = oneiroi_core::nurbs::CubicNurbs::new(control_points, knot_vec);
+    let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
     //let iter = ResampleIter::new(&curve, 2.);
     // iter.map()
 
