@@ -1,3 +1,4 @@
+use glam::Vec4;
 use iced::widget::shader::{self, Pipeline, Primitive};
 use oneiroi_core::curve::nurbs::CubicNurbs;
 use oneiroi_wgpu::{State, orbit::OrbitCamera};
@@ -86,7 +87,7 @@ impl<Message> shader::Program<Message> for OneiroiScene {
         bounds: iced::Rectangle,
     ) -> Self::Primitive {
         Prim {
-            camera: self.camera.clone(),
+            camera: self.camera,
             curve: self.curve.clone(),
         }
     }
@@ -111,9 +112,20 @@ impl Primitive for Prim {
     ) {
         todo!()
     }
+
+    fn render(
+        &self,
+        _pipeline: &Self::Pipeline,
+        _encoder: &mut iced::wgpu::CommandEncoder,
+        _target: &iced::wgpu::TextureView,
+        _clip_bounds: &iced::Rectangle<u32>,
+    )
+    {
+        
+    }
 }
 
-pub struct OneiroiPipe;
+pub struct OneiroiPipe(PipelineState);
 
 impl Pipeline for OneiroiPipe {
     fn new(
@@ -124,6 +136,6 @@ impl Pipeline for OneiroiPipe {
     where
         Self: Sized,
     {
-        todo!()
+        OneiroiPipe(PipelineState::new(device, format))
     }
 }

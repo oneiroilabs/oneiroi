@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use glam::Vec4;
 use oneiroi_core::curve::nurbs::CubicNurbs;
-use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
+use wgpu::{BindGroup, ComputePipeline, RenderPipeline, TextureFormat, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -54,6 +54,13 @@ pub struct State {
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
 
+    pub camera: OrbitCamera,
+    curve: CubicNurbs,
+
+    pipeline_state: PipelineState,
+}
+
+pub struct PipelineState {
     compute_pipeline: ComputePipeline,
     compute_bind_group_0: BindGroup,
     compute_bind_group_1: BindGroup,
@@ -63,134 +70,19 @@ pub struct State {
 
     indirect_buffer: wgpu::Buffer,
 
-    curve: CubicNurbs,
-
     uniforms: wgpu::Buffer,
 
     debug_vis: RenderPipeline,
     debug_bind_group_0: BindGroup,
     visualizer_uniform_buffer: wgpu::Buffer,
 
-    pub camera: OrbitCamera,
     depth_texture_view: wgpu::TextureView,
     //mesh_pipeline: RenderPipeline,
     //mesh_bind_group_0: BindGroup,
 }
 
-impl State {
-    pub async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(display),
-        ));
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .unwrap();
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::SUBGROUP,
-                //| wgpu::Features::EXPERIMENTAL_MESH_SHADER,
-                required_limits: adapter.limits(),
-                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Directory(std::path::PathBuf::from(
-                    std::env!("CARGO_MANIFEST_DIR").to_string() + "/trace",
-                )),
-            })
-            .await
-            .unwrap();
-
-        let size = window.inner_size();
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-        let cap = surface.get_capabilities(&adapter);
-        let surface_format = cap.formats[0];
-
-        /* let control_points = vec![
-            Vec4::new(0.0, 4.0, 0.0, 1.),
-            Vec4::new(1.0, 2.0, 0.0, 1.),
-            Vec4::new(2.0, -1.0, 0.0, 1.),
-            Vec4::new(3.0, 3.0, 0.0, 1.),
-            Vec4::new(4.0, 0.0, 0.0, 1.),
-            Vec4::new(5.0, 2.0, 0.0, 1.),
-            Vec4::new(6.0, 1.0, 0.0, 1.),
-            Vec4::new(7.0, 4.0, 0.0, 1.),
-        ]; */
-
-        let num_points = 15;
-        let mut control_points = Vec::with_capacity(num_points);
-
-        let step_distance = 0.25;
-
-        // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
-        let expansion_rate = 0.15;
-
-        for i in 0..num_points {
-            let step = i as f64;
-
-            let target_arc_length = step * step_distance;
-
-            let theta = if target_arc_length > 0.0 {
-                (2.0 * target_arc_length / expansion_rate).sqrt()
-            } else {
-                0.0
-            };
-
-            let radius = expansion_rate * theta;
-
-            let x = radius * theta.cos();
-            let y = radius * theta.sin();
-
-            control_points.push(Vec4::new(x as f32, y as f32, 0.0, 1.0));
-        }
-
-        /* for i in 0..num_points {
-            control_points.push(Vec4::new((i as i32 - 100) as f32, 0.0, 0.0, 1.0));
-        } */
-
-        let num_knots = num_points + 4;
-
-        let mut knot_vec = vec![0.0; num_knots];
-        for i in num_points..num_knots {
-            knot_vec[i] = 1.0;
-        }
-        let num_interior_segments = num_points - 3;
-        for i in 4..num_points {
-            let interior_t = (i - 3) as f32 / num_interior_segments as f32;
-            knot_vec[i] = interior_t;
-        }
-
-        let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
-
-        let num_segments = curve.segments().len() as u32;
-        let total_evaluated_points = num_segments * 32;
-
-        let radial_segments = 16u32;
-
-        let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Curve Segments Buffer"),
-            contents: bytemuck::cast_slice(curve.segments()),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Evaluated Frames Storage Buffer"),
-            size: (total_evaluated_points as u64 * 64), //std::mem::size_of::<GpuSample>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let tube_radius = 0.5f32;
-        let aspect_ratio = size.width as f32 / size.height as f32;
-
-        let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
-
-        let view = camera.build_view_matrix();
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
-        let view_projection_matrix = projection * view;
-
+impl PipelineState {
+    pub fn new(device: &wgpu::Device, surface_format: TextureFormat) -> Self {
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
             size: wgpu::Extent3d {
@@ -488,8 +380,6 @@ impl State {
             cache: None,
         });
 
-        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-
         /* let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Tube Pure Mesh Layout"),
@@ -575,7 +465,140 @@ impl State {
             multiview: None,
         }); */
 
+        Self {
+            compute_pipeline,
+            render_pipeline,
+            compute_bind_group_0,
+            compute_bind_group_1,
+            render_bind_group_0,
+            indirect_buffer,
+            uniforms: uniform_buffer,
+            debug_vis: visualizer_pipeline,
+            debug_bind_group_0: visualizer_bind_group,
+            visualizer_uniform_buffer,
+            depth_texture_view,
+            // mesh_pipeline,
+            //mesh_bind_group_0,
+        }
+    }
+}
+
+impl State {
+    pub async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(display),
+        ));
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::SUBGROUP,
+                //| wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                required_limits: adapter.limits(),
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Directory(std::path::PathBuf::from(
+                    std::env!("CARGO_MANIFEST_DIR").to_string() + "/trace",
+                )),
+            })
+            .await
+            .unwrap();
+
+        let size = window.inner_size();
+
+        let surface = instance.create_surface(window.clone()).unwrap();
+        let cap = surface.get_capabilities(&adapter);
+        let surface_format = cap.formats[0];
+
+        /* let control_points = vec![
+            Vec4::new(0.0, 4.0, 0.0, 1.),
+            Vec4::new(1.0, 2.0, 0.0, 1.),
+            Vec4::new(2.0, -1.0, 0.0, 1.),
+            Vec4::new(3.0, 3.0, 0.0, 1.),
+            Vec4::new(4.0, 0.0, 0.0, 1.),
+            Vec4::new(5.0, 2.0, 0.0, 1.),
+            Vec4::new(6.0, 1.0, 0.0, 1.),
+            Vec4::new(7.0, 4.0, 0.0, 1.),
+        ]; */
+
+        let num_points = 15;
+        let mut control_points = Vec::with_capacity(num_points);
+
+        let step_distance = 0.25;
+
+        // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
+        let expansion_rate = 0.15;
+
+        for i in 0..num_points {
+            let step = i as f64;
+
+            let target_arc_length = step * step_distance;
+
+            let theta = if target_arc_length > 0.0 {
+                (2.0 * target_arc_length / expansion_rate).sqrt()
+            } else {
+                0.0
+            };
+
+            let radius = expansion_rate * theta;
+
+            let x = radius * theta.cos();
+            let y = radius * theta.sin();
+
+            control_points.push(Vec4::new(x as f32, y as f32, 0.0, 1.0));
+        }
+
+        /* for i in 0..num_points {
+            control_points.push(Vec4::new((i as i32 - 100) as f32, 0.0, 0.0, 1.0));
+        } */
+
+        let num_knots = num_points + 4;
+
+        let mut knot_vec = vec![0.0; num_knots];
+        for i in num_points..num_knots {
+            knot_vec[i] = 1.0;
+        }
+        let num_interior_segments = num_points - 3;
+        for i in 4..num_points {
+            let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+            knot_vec[i] = interior_t;
+        }
+
+        let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
+
+        let num_segments = curve.segments().len() as u32;
+        let total_evaluated_points = num_segments * 32;
+
+        let radial_segments = 16u32;
+
+        let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Curve Segments Buffer"),
+            contents: bytemuck::cast_slice(curve.segments()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Evaluated Frames Storage Buffer"),
+            size: (total_evaluated_points as u64 * 64), //std::mem::size_of::<GpuSample>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let tube_radius = 0.5f32;
+        let aspect_ratio = size.width as f32 / size.height as f32;
+
+        let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
+
+        let view = camera.build_view_matrix();
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
+        let view_projection_matrix = projection * view;
+
         let state = State {
+            pipeline_state: PipelineState::new(&device, surface_format),
             instance,
             window,
             device,
@@ -583,31 +606,11 @@ impl State {
             size,
             surface,
             surface_format,
-            compute_pipeline,
-            render_pipeline,
-            compute_bind_group_0,
-            compute_bind_group_1,
-            render_bind_group_0,
-            indirect_buffer,
             curve,
-            uniforms: uniform_buffer,
-            debug_vis: visualizer_pipeline,
-            debug_bind_group_0: visualizer_bind_group,
-            visualizer_uniform_buffer,
             camera,
-            depth_texture_view,
-            // mesh_pipeline,
-            //mesh_bind_group_0,
         };
 
         state.configure_surface();
-
-        if let Some(error) = pollster::block_on(error_scope.pop()) {
-            eprintln!(
-                "Detected pipeline error that might cause Device Loss: {:?}",
-                error
-            );
-        }
 
         state
     }
@@ -627,8 +630,11 @@ impl State {
             _pad0: 0,
             _pad1: 0,
         };
-        self.queue
-            .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[tube_uniforms]));
+        self.queue.write_buffer(
+            &self.pipeline_state.uniforms,
+            0,
+            bytemuck::cast_slice(&[tube_uniforms]),
+        );
 
         // 2. RMF Visualizer Uniforms aktualisieren
         let vis_uniforms = RmfVisualizerUniforms {
@@ -639,7 +645,7 @@ impl State {
             _pad2: 0,
         };
         self.queue.write_buffer(
-            &self.visualizer_uniform_buffer,
+            &self.pipeline_state.visualizer_uniform_buffer,
             0,
             bytemuck::bytes_of(&vis_uniforms),
         );
@@ -685,7 +691,7 @@ impl State {
             view_formats: &[],
         });
 
-        self.depth_texture_view =
+        self.pipeline_state.depth_texture_view =
             depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.update_camera_buffers();
     }
@@ -726,9 +732,9 @@ impl State {
                 label: Some("NURBS Compute Pass"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(&self.compute_pipeline);
-            compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
-            compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
+            compute_pass.set_pipeline(&self.pipeline_state.compute_pipeline);
+            compute_pass.set_bind_group(0, &self.pipeline_state.compute_bind_group_0, &[]);
+            compute_pass.set_bind_group(1, &self.pipeline_state.compute_bind_group_1, &[]);
 
             compute_pass.dispatch_workgroups(self.curve.segments().len() as u32, 1, 1);
         }
@@ -751,7 +757,7 @@ impl State {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture_view,
+                    view: &self.pipeline_state.depth_texture_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -764,13 +770,13 @@ impl State {
             });
 
             if DEBUG {
-                render_pass.set_pipeline(&self.debug_vis);
-                render_pass.set_bind_group(0, &self.debug_bind_group_0, &[]);
-                render_pass.draw_indirect(&self.indirect_buffer, 0);
+                render_pass.set_pipeline(&self.pipeline_state.debug_vis);
+                render_pass.set_bind_group(0, &self.pipeline_state.debug_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.pipeline_state.indirect_buffer, 0);
             } else {
-                render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
-                render_pass.draw_indirect(&self.indirect_buffer, 0);
+                render_pass.set_pipeline(&self.pipeline_state.render_pipeline);
+                render_pass.set_bind_group(0, &self.pipeline_state.render_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.pipeline_state.indirect_buffer, 0);
             }
 
             // render_pass.set_pipeline(&self.mesh_pipeline);
