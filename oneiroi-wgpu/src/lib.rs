@@ -1,184 +1,785 @@
-/* use std::println;
+use std::sync::Arc;
 
-use windows::Win32::Graphics::Direct3D12::*;
-use windows::Win32::Graphics::Dxgi::*;
-use windows::core::{Interface, PCSTR};
+use glam::Vec4;
+use oneiroi_core::curve::nurbs::CubicNurbs;
+use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    window::{Window, WindowId},
+};
 
-pub unsafe fn setup_work_graph(
-    device: &ID3D12Device14,
-) -> Result<(ID3D12StateObject, ID3D12Resource), windows::core::Error> {
-    // -------------------------------------------------------------
-    // 1. Query the device for Work Graph API Support (Shader Model 6.8)
-    // -------------------------------------------------------------
-    let mut feature_data = D3D12_FEATURE_DATA_D3D12_OPTIONS21::default();
-    device.CheckFeatureSupport(
-        D3D12_FEATURE_D3D12_OPTIONS21,
-        &mut feature_data as *mut _ as *mut _,
-        std::mem::size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS21>() as u32,
-    )?;
+use crate::orbit::OrbitCamera;
 
-    if feature_data.WorkGraphsTier == D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED {
-        panic!("Work Graphs are not supported on this GPU/Driver combination.");
+mod orbit;
+
+pub const DEBUG: bool = false;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TubeUniforms {
+    view_projection: glam::Mat4,
+    tube_radius: f32,
+    radial_segments: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct DrawIndirectArgs {
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RmfVisualizerUniforms {
+    view_projection: glam::Mat4,
+    vector_scale: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+pub struct State {
+    instance: wgpu::Instance,
+    window: Arc<Window>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    size: winit::dpi::PhysicalSize<u32>,
+    surface: wgpu::Surface<'static>,
+    surface_format: wgpu::TextureFormat,
+
+    compute_pipeline: ComputePipeline,
+    compute_bind_group_0: BindGroup,
+    compute_bind_group_1: BindGroup,
+
+    render_bind_group_0: BindGroup,
+    render_pipeline: RenderPipeline,
+
+    indirect_buffer: wgpu::Buffer,
+
+    curve: CubicNurbs,
+
+    uniforms: wgpu::Buffer,
+
+    debug_vis: RenderPipeline,
+    debug_bind_group_0: BindGroup,
+    visualizer_uniform_buffer: wgpu::Buffer,
+
+    pub camera: OrbitCamera,
+    depth_texture_view: wgpu::TextureView,
+    //mesh_pipeline: RenderPipeline,
+    //mesh_bind_group_0: BindGroup,
+}
+
+impl State {
+    pub async fn new(display: OwnedDisplayHandle, window: Arc<Window>) -> State {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
+            Box::new(display),
+        ));
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::SUBGROUP,
+                //| wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                required_limits: adapter.limits(),
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                trace: wgpu::Trace::Directory(std::path::PathBuf::from(
+                    std::env!("CARGO_MANIFEST_DIR").to_string() + "/trace",
+                )),
+            })
+            .await
+            .unwrap();
+
+        let size = window.inner_size();
+
+        let surface = instance.create_surface(window.clone()).unwrap();
+        let cap = surface.get_capabilities(&adapter);
+        let surface_format = cap.formats[0];
+
+        /* let control_points = vec![
+            Vec4::new(0.0, 4.0, 0.0, 1.),
+            Vec4::new(1.0, 2.0, 0.0, 1.),
+            Vec4::new(2.0, -1.0, 0.0, 1.),
+            Vec4::new(3.0, 3.0, 0.0, 1.),
+            Vec4::new(4.0, 0.0, 0.0, 1.),
+            Vec4::new(5.0, 2.0, 0.0, 1.),
+            Vec4::new(6.0, 1.0, 0.0, 1.),
+            Vec4::new(7.0, 4.0, 0.0, 1.),
+        ]; */
+
+        let num_points = 15;
+        let mut control_points = Vec::with_capacity(num_points);
+
+        let step_distance = 0.25;
+
+        // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
+        let expansion_rate = 0.15;
+
+        for i in 0..num_points {
+            let step = i as f64;
+
+            let target_arc_length = step * step_distance;
+
+            let theta = if target_arc_length > 0.0 {
+                (2.0 * target_arc_length / expansion_rate).sqrt()
+            } else {
+                0.0
+            };
+
+            let radius = expansion_rate * theta;
+
+            let x = radius * theta.cos();
+            let y = radius * theta.sin();
+
+            control_points.push(Vec4::new(x as f32, y as f32, 0.0, 1.0));
+        }
+
+        /* for i in 0..num_points {
+            control_points.push(Vec4::new((i as i32 - 100) as f32, 0.0, 0.0, 1.0));
+        } */
+
+        let num_knots = num_points + 4;
+
+        let mut knot_vec = vec![0.0; num_knots];
+        for i in num_points..num_knots {
+            knot_vec[i] = 1.0;
+        }
+        let num_interior_segments = num_points - 3;
+        for i in 4..num_points {
+            let interior_t = (i - 3) as f32 / num_interior_segments as f32;
+            knot_vec[i] = interior_t;
+        }
+
+        let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
+
+        let num_segments = curve.segments().len() as u32;
+        let total_evaluated_points = num_segments * 32;
+
+        let radial_segments = 16u32;
+
+        let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Curve Segments Buffer"),
+            contents: bytemuck::cast_slice(curve.segments()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+        let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Evaluated Frames Storage Buffer"),
+            size: (total_evaluated_points as u64 * 64), //std::mem::size_of::<GpuSample>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let tube_radius = 0.5f32;
+        let aspect_ratio = size.width as f32 / size.height as f32;
+
+        let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
+
+        let view = camera.build_view_matrix();
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
+        let view_projection_matrix = projection * view;
+
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let uniform_data = TubeUniforms {
+            view_projection: view_projection_matrix,
+            tube_radius,
+            radial_segments,
+            _pad0: 0,
+            _pad1: 0,
+        };
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Tube Render Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[uniform_data]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let indirect_args = DrawIndirectArgs {
+            vertex_count: if DEBUG { 6 } else { radial_segments * 6 },
+            instance_count: total_evaluated_points - 1,
+            first_vertex: 0,
+            first_instance: 0,
+        };
+
+        let indirect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Tube Draw Indirect Buffer"),
+            contents: bytemuck::cast_slice(&[indirect_args]),
+            usage: wgpu::BufferUsages::INDIRECT,
+        });
+
+        let compute_bind_group_layout_0 =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Compute Input Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        min_binding_size: None,
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                }],
+            });
+
+        let compute_bind_group_layout_1 =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Compute Output Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        min_binding_size: None,
+                        has_dynamic_offset: false,
+                    },
+                    count: None,
+                }],
+            });
+
+        let compute_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Input Bind Group"),
+            layout: &compute_bind_group_layout_0,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: segments_buffer.as_entire_binding(),
+            }],
+        });
+
+        let compute_bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Output Bind Group"),
+            layout: &compute_bind_group_layout_1,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: evaluated_frames_buffer.as_entire_binding(),
+            }],
+        });
+
+        let compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Layout"),
+                bind_group_layouts: &[
+                    Some(&compute_bind_group_layout_0),
+                    Some(&compute_bind_group_layout_1),
+                ],
+                immediate_size: 0,
+            });
+
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("NURBS Compute Pipeline"),
+            layout: Some(&compute_pipeline_layout),
+            module: &device.create_shader_module(wgpu::include_wgsl!("shader.wgsl")),
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let render_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Tube Render Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let render_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Tube Render Bind Group"),
+            layout: &render_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: evaluated_frames_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Layout"),
+                bind_group_layouts: &[Some(&render_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("3D Tube Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("tube.wgsl")),
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("tube.wgsl")),
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+            multiview_mask: None,
+        });
+
+        let visualizer_uniform_data = RmfVisualizerUniforms {
+            view_projection: view_projection_matrix,
+            vector_scale: 0.25,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+
+        let visualizer_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("RMF Visualizer Uniform Buffer"),
+                contents: bytemuck::bytes_of(&visualizer_uniform_data),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let visualizer_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("RMF Visualizer Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let visualizer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RMF Visualizer Bind Group"),
+            layout: &visualizer_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: visualizer_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: evaluated_frames_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let visualizer_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("RMF Visualizer Pipeline Layout"),
+                bind_group_layouts: &[Some(&visualizer_bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let visualizer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("RMF Visualizer Pipeline"),
+            layout: Some(&visualizer_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("rmf_vis.wgsl")),
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &device.create_shader_module(wgpu::include_wgsl!("rmf_vis.wgsl")),
+                entry_point: Some("fr_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        /* let mesh_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Tube Pure Mesh Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            min_binding_size: None,
+                            has_dynamic_offset: false,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let mesh_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Mesh Render Bind Group"),
+            layout: &mesh_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: segments_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mesh_shader_module =
+            device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
+
+        let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Mesh Render Layout"),
+            bind_group_layouts: &[Some(&mesh_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+            label: Some("Mesh Shading Tube Pipeline"),
+            layout: Some(&mesh_pipeline_layout),
+            task: Some(TaskState {
+                module: &mesh_shader_module,
+                entry_point: Some("ts_main"),
+                compilation_options: Default::default(),
+            }),
+            mesh: MeshState {
+                module: &mesh_shader_module,
+                entry_point: Some("ms_main"),
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &mesh_shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            cache: None,
+            multiview: None,
+        }); */
+
+        let state = State {
+            instance,
+            window,
+            device,
+            queue,
+            size,
+            surface,
+            surface_format,
+            compute_pipeline,
+            render_pipeline,
+            compute_bind_group_0,
+            compute_bind_group_1,
+            render_bind_group_0,
+            indirect_buffer,
+            curve,
+            uniforms: uniform_buffer,
+            debug_vis: visualizer_pipeline,
+            debug_bind_group_0: visualizer_bind_group,
+            visualizer_uniform_buffer,
+            camera,
+            depth_texture_view,
+            // mesh_pipeline,
+            //mesh_bind_group_0,
+        };
+
+        state.configure_surface();
+
+        if let Some(error) = pollster::block_on(error_scope.pop()) {
+            eprintln!(
+                "Detected pipeline error that might cause Device Loss: {:?}",
+                error
+            );
+        }
+
+        state
     }
 
-    // -------------------------------------------------------------
-    // 2. Load and Compile Shader Library (Pre-compiled or via DXC)
-    // -------------------------------------------------------------
-    // For production, load your compiled DXIL bytecode (.bin) file containing SM 6.8
-    let dxil_bytecode: Vec<u8> =
-        std::fs::read(env!("CARGO_MANIFEST_DIR").to_string() + "/src/output.dxil")
-            .expect("Failed to load DXIL");
-    let root_sig: ID3D12RootSignature = device.CreateRootSignature(0, &dxil_bytecode).unwrap();
-    let root_sig_ptr = root_sig.as_raw();
+    pub fn update_camera_buffers(&self) {
+        let aspect_ratio = self.size.width as f32 / self.size.height as f32;
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
+        let view = self.camera.build_view_matrix();
+        let view_projection = projection * view;
 
-    // -------------------------------------------------------------
-    // 3. Define the State Object Subobjects to assemble the Work Graph
-    // -------------------------------------------------------------
-    let mut subobjects = Vec::new();
+        // 1. Tube Uniforms aktualisieren
+        let tube_uniforms = TubeUniforms {
+            view_projection,
+            tube_radius: 0.2f32,
+            radial_segments: 16,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.queue
+            .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[tube_uniforms]));
 
-    // A. Define the DXIL Library container
-    let dxil_lib_desc = D3D12_DXIL_LIBRARY_DESC {
-        DXILLibrary: D3D12_SHADER_BYTECODE {
-            pShaderBytecode: dxil_bytecode.as_ptr() as *const _,
-            BytecodeLength: dxil_bytecode.len(),
-        },
-        NumExports: 0, // 0 exports means implicitly export all nodes in the file
-        pExports: std::ptr::null(),
-    };
+        // 2. RMF Visualizer Uniforms aktualisieren
+        let vis_uniforms = RmfVisualizerUniforms {
+            view_projection,
+            vector_scale: 0.25,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        self.queue.write_buffer(
+            &self.visualizer_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&vis_uniforms),
+        );
+    }
 
-    subobjects.push(D3D12_STATE_SUBOBJECT {
-        Type: D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY,
-        pDesc: &dxil_lib_desc as *const _ as *const _,
-    });
+    pub fn get_window(&self) -> &Window {
+        &self.window
+    }
 
-    subobjects.push(D3D12_STATE_SUBOBJECT {
-        Type: D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE,
-        pDesc: &root_sig_ptr as *const _ as *const std::ffi::c_void,
-    });
+    pub fn configure_surface(&self) {
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            view_formats: vec![self.surface_format.add_srgb_suffix()],
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            width: self.size.width,
+            height: self.size.height,
+            desired_maximum_frame_latency: 2,
+            present_mode: wgpu::PresentMode::AutoVsync,
+        };
+        self.surface.configure(&self.device, &surface_config);
+    }
 
-    // B. Explicitly define the Work Graph Config
-    let graph_name = windows::core::w!("HelloWorkGraphs");
-    let work_graph_desc = D3D12_WORK_GRAPH_DESC {
-        ProgramName: graph_name,
-        Flags: D3D12_WORK_GRAPH_FLAG_NONE,
-        NumEntrypoints: 0,
-        pEntrypoints: std::ptr::null(),
-        NumExplicitlyDefinedNodes: 0,
-        pExplicitlyDefinedNodes: std::ptr::null(),
-    };
-
-    subobjects.push(D3D12_STATE_SUBOBJECT {
-        Type: D3D12_STATE_SUBOBJECT_TYPE_WORK_GRAPH,
-        pDesc: &work_graph_desc as *const _ as *const _,
-    });
-
-    // -------------------------------------------------------------
-    // 4. Create the final Executable State Object
-    // -------------------------------------------------------------
-    let state_object_desc = D3D12_STATE_OBJECT_DESC {
-        Type: D3D12_STATE_OBJECT_TYPE_EXECUTABLE,
-        NumSubobjects: subobjects.len() as u32,
-        pSubobjects: subobjects.as_ptr(),
-    };
-    println!("H");
-    let state_object: ID3D12StateObject = unsafe { device.CreateStateObject(&state_object_desc)? };
-    println!("HM");
-
-    // -------------------------------------------------------------
-    // 5. Query Graph Properties and Allocate Backing Memory
-    // -------------------------------------------------------------
-    // Work Graphs require scratch memory allocated by the CPU for internal GPU scheduling data
-    let work_graph_properties: ID3D12WorkGraphProperties = state_object.cast()?;
-    println!("{work_graph_properties:?}");
-    let graph_index = work_graph_properties.GetWorkGraphIndex(graph_name);
-    let huh = work_graph_properties.GetNumEntrypoints(graph_index);
-    let aha = work_graph_properties.GetProgramName(graph_index);
-    let mut memory_requirements = D3D12_WORK_GRAPH_MEMORY_REQUIREMENTS::default();
-    unsafe {
-        work_graph_properties.GetWorkGraphMemoryRequirements(graph_index, &mut memory_requirements)
-    };
-    println!(
-        "{graph_index}, {huh}, {},{}",
-        aha.to_string().unwrap(),
-        memory_requirements.MaxSizeInBytes
-    );
-
-    println!("HMM");
-    // Allocate a raw GPU buffer matched exactly to 'memory_requirements.MaxSizeInBytes'
-    let backing_memory_buffer = create_gpu_buffer(device, memory_requirements.MaxSizeInBytes)?;
-    println!("HMMM");
-    Ok((state_object, backing_memory_buffer))
-}
-
-// Utility function to instantiate raw default-heap buffers natively
-unsafe fn create_gpu_buffer(
-    device: &ID3D12Device,
-    mut size: u64,
-) -> Result<ID3D12Resource, windows::core::Error> {
-    println!("{size}");
-
-    size = 1024;
-    let mut resource: Option<ID3D12Resource> = None;
-    let heap_properties = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_DEFAULT,
-        ..Default::default()
-    };
-    let resource_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Width: size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        ..Default::default()
-    };
-    device.CreateCommittedResource(
-        &heap_properties,
-        D3D12_HEAP_FLAG_NONE,
-        &resource_desc,
-        D3D12_RESOURCE_STATE_COMMON,
-        None,
-        &mut resource,
-    )?;
-    Ok(resource.unwrap())
-}
-
-pub unsafe fn dispatch_graph(
-    command_list: &mut ID3D12GraphicsCommandList,
-    state_object: &ID3D12StateObject,
-    backing_memory: &ID3D12Resource,
-) -> Result<(), windows::core::Error> {
-    // 1. Cast command list up to Interface version 10 to expose DispatchGraph
-    let cmd_list_10: ID3D12GraphicsCommandList10 = command_list.cast()?;
-    println!("UHM");
-
-    // 2. Provide the GPU memory pointer where the graph schedules nodes
-    let program_identifier = state_object
-        .cast::<ID3D12StateObjectProperties>()?
-        .GetShaderIdentifier(windows::core::w!("MyWorkGraph"));
-
-    let dispatch_desc = D3D12_DISPATCH_GRAPH_DESC {
-        Mode: D3D12_DISPATCH_MODE_NODE_CPU_INPUT,
-        Anonymous: D3D12_DISPATCH_GRAPH_DESC_0 {
-            // Point the internal scheduler to our allocated backing memory pool
-            NodeCPUInput: D3D12_NODE_CPU_INPUT {
-                EntrypointIndex: 0,
-                NumRecords: 1,
-                pRecords: std::ptr::null(), // Populate with entry point data structs if needed
-                RecordStrideInBytes: std::mem::size_of::<u32>() as u64,
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        self.size = new_size;
+        self.configure_surface();
+        let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: new_size.width,
+                height: new_size.height,
+                depth_or_array_layers: 1,
             },
-        },
-    };
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
 
-    // 3. Dispatch the workload autonomously outside of any render pass or draw scopes
-    cmd_list_10.DispatchGraph(&dispatch_desc);
+        self.depth_texture_view =
+            depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.update_camera_buffers();
+    }
 
-    println!("YEP");
-    Ok(())
+    pub fn render(&mut self) {
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                drop(texture);
+                self.configure_surface();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.configure_surface();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                unreachable!("No error scope registered, so validation errors will panic")
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self.instance.create_surface(self.window.clone()).unwrap();
+                self.configure_surface();
+                return;
+            }
+        };
+        let texture_view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.surface_format.add_srgb_suffix()),
+                ..Default::default()
+            });
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NURBS Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
+            compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
+
+            compute_pass.dispatch_workgroups(self.curve.segments().len() as u32, 1, 1);
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Tube Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture_view, // Hier die aktuelle View der Swapchain übergeben
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.01,
+                            g: 0.01,
+                            b: 0.02,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            if DEBUG {
+                render_pass.set_pipeline(&self.debug_vis);
+                render_pass.set_bind_group(0, &self.debug_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            }
+
+            // render_pass.set_pipeline(&self.mesh_pipeline);
+            // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
+            // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
+        }
+
+        self.queue.submit([encoder.finish()]);
+        self.window.pre_present_notify();
+        self.queue.present(surface_texture);
+    }
 }
- */

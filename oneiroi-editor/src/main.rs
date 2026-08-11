@@ -1,244 +1,233 @@
-//! This example showcases an interactive `Canvas` for drawing Bézier curves.
-use iced::wgpu::{Backend, BackendOptions};
-use iced::widget::{button, container, hover, right, space};
-use iced::{Element, Settings, Theme};
+use iced::widget::{
+    Text, button, center, center_x, container, operation, scrollable, space, text, text_input,
+};
+use iced::window;
+use iced::{Center, Element, Fill, Function, Subscription, Task, Theme, Vector};
+use iced_aw::{TabBar, TabLabel, Tabs};
+use oneiroi_editor::viewport::OneiroiScene;
 
-pub fn main() -> iced::Result {
-    iced::application(Example::default, Example::update, Example::view)
-        .theme(Theme::Dracula)
+use std::collections::BTreeMap;
+
+fn main() -> iced::Result {
+    iced::daemon(Example::new, Example::update, Example::view)
+        .subscription(Example::subscription)
+        .title(Example::title)
+        .theme(Example::theme)
+        .scale_factor(Example::scale_factor)
         .run()
 }
 
-#[derive(Default)]
 struct Example {
-    bezier: bezier::State,
-    curves: Vec<bezier::Curve>,
+    windows: BTreeMap<window::Id, Window>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
+struct Window {
+    title: String,
+    scale_input: String,
+    current_scale: f32,
+    theme: Theme,
+}
+
+#[derive(Debug, Clone)]
 enum Message {
-    AddCurve(bezier::Curve),
-    Clear,
+    OpenWindow,
+    WindowOpened(window::Id),
+    WindowClosed(window::Id),
+    ScaleInputChanged(window::Id, String),
+    ScaleChanged(window::Id, String),
+    TitleChanged(window::Id, String),
+    TabSelected(u32),
 }
 
 impl Example {
-    fn update(&mut self, message: Message) {
-        match message {
-            Message::AddCurve(curve) => {
-                self.curves.push(curve);
-                self.bezier.request_redraw();
-            }
-            Message::Clear => {
-                self.bezier = bezier::State::default();
-                self.curves.clear();
-            }
-        }
-    }
+    fn new() -> (Self, Task<Message>) {
+        let (_, open) = window::open(window::Settings::default());
 
-    fn view(&self) -> Element<'_, Message> {
-        container(hover(
-            self.bezier.view(&self.curves).map(Message::AddCurve),
-            if self.curves.is_empty() {
-                container(space::horizontal())
-            } else {
-                right(
-                    button("Clear")
-                        .style(button::danger)
-                        .on_press(Message::Clear),
-                )
-                .padding(10)
+        (
+            Self {
+                windows: BTreeMap::new(),
             },
-        ))
-        .padding(20)
-        .into()
-    }
-}
-
-mod bezier {
-    use iced::mouse;
-    use iced::widget::canvas::{self, Canvas, Event, Frame, Geometry, Path, Stroke};
-    use iced::{Element, Fill, Point, Rectangle, Renderer, Theme};
-
-    #[derive(Default)]
-    pub struct State {
-        cache: canvas::Cache,
+            open.map(Message::WindowOpened),
+        )
     }
 
-    impl State {
-        pub fn view<'a>(&'a self, curves: &'a [Curve]) -> Element<'a, Curve> {
-            Canvas::new(Bezier {
-                state: self,
-                curves,
-            })
-            .width(Fill)
-            .height(Fill)
-            .into()
-        }
-
-        pub fn request_redraw(&mut self) {
-            self.cache.clear();
-        }
+    fn title(&self, window: window::Id) -> String {
+        self.windows
+            .get(&window)
+            .map(|window| window.title.clone())
+            .unwrap_or_default()
     }
 
-    struct Bezier<'a> {
-        state: &'a State,
-        curves: &'a [Curve],
-    }
-
-    impl canvas::Program<Curve> for Bezier<'_> {
-        type State = Option<Pending>;
-
-        fn update(
-            &self,
-            state: &mut Self::State,
-            event: &Event,
-            bounds: Rectangle,
-            cursor: mouse::Cursor,
-        ) -> Option<canvas::Action<Curve>> {
-            let cursor_position = cursor.position_in(bounds)?;
-
-            match event {
-                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(
-                    match *state {
-                        None => {
-                            *state = Some(Pending::One {
-                                from: cursor_position,
-                            });
-
-                            canvas::Action::request_redraw()
-                        }
-                        Some(Pending::One { from }) => {
-                            *state = Some(Pending::Two {
-                                from,
-                                to: cursor_position,
-                            });
-
-                            canvas::Action::request_redraw()
-                        }
-                        Some(Pending::Two { from, to }) => {
-                            *state = None;
-
-                            canvas::Action::publish(Curve {
-                                from,
-                                to,
-                                control: cursor_position,
-                            })
-                        }
-                    }
-                    .and_capture(),
-                ),
-                Event::Mouse(mouse::Event::CursorMoved { .. }) if state.is_some() => {
-                    Some(canvas::Action::request_redraw())
-                }
-                _ => None,
-            }
-        }
-
-        fn draw(
-            &self,
-            state: &Self::State,
-            renderer: &Renderer,
-            theme: &Theme,
-            bounds: Rectangle,
-            cursor: mouse::Cursor,
-        ) -> Vec<Geometry> {
-            let content = self.state.cache.draw(renderer, bounds.size(), |frame| {
-                Curve::draw_all(self.curves, frame, theme);
-
-                frame.stroke(
-                    &Path::rectangle(Point::ORIGIN, frame.size()),
-                    Stroke::default()
-                        .with_width(2.0)
-                        .with_color(theme.seed().text),
-                );
-            });
-
-            if let Some(pending) = state {
-                vec![content, pending.draw(renderer, theme, bounds, cursor)]
-            } else {
-                vec![content]
-            }
-        }
-
-        fn mouse_interaction(
-            &self,
-            _state: &Self::State,
-            bounds: Rectangle,
-            cursor: mouse::Cursor,
-        ) -> mouse::Interaction {
-            if cursor.is_over(bounds) {
-                mouse::Interaction::Crosshair
-            } else {
-                mouse::Interaction::default()
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub struct Curve {
-        from: Point,
-        to: Point,
-        control: Point,
-    }
-
-    impl Curve {
-        fn draw_all(curves: &[Curve], frame: &mut Frame, theme: &Theme) {
-            let curves = Path::new(|p| {
-                for curve in curves {
-                    p.move_to(curve.from);
-                    p.quadratic_curve_to(curve.control, curve.to);
-                }
-            });
-
-            frame.stroke(
-                &curves,
-                Stroke::default()
-                    .with_width(2.0)
-                    .with_color(theme.seed().text),
-            );
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    enum Pending {
-        One { from: Point },
-        Two { from: Point, to: Point },
-    }
-
-    impl Pending {
-        fn draw(
-            &self,
-            renderer: &Renderer,
-            theme: &Theme,
-            bounds: Rectangle,
-            cursor: mouse::Cursor,
-        ) -> Geometry {
-            let mut frame = Frame::new(renderer, bounds.size());
-
-            if let Some(cursor_position) = cursor.position_in(bounds) {
-                match *self {
-                    Pending::One { from } => {
-                        let line = Path::line(from, cursor_position);
-                        frame.stroke(
-                            &line,
-                            Stroke::default()
-                                .with_width(2.0)
-                                .with_color(theme.seed().text),
-                        );
-                    }
-                    Pending::Two { from, to } => {
-                        let curve = Curve {
-                            from,
-                            to,
-                            control: cursor_position,
-                        };
-
-                        Curve::draw_all(&[curve], &mut frame, theme);
-                    }
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::OpenWindow => {
+                let Some(last_window) = self.windows.keys().last() else {
+                    return Task::none();
                 };
-            }
 
-            frame.into_geometry()
+                window::position(*last_window)
+                    .then(|last_position| {
+                        let position =
+                            last_position.map_or(window::Position::Default, |last_position| {
+                                window::Position::Specific(last_position + Vector::new(20.0, 20.0))
+                            });
+
+                        let (_, open) = window::open(window::Settings {
+                            position,
+                            ..window::Settings::default()
+                        });
+
+                        open
+                    })
+                    .map(Message::WindowOpened)
+            }
+            Message::WindowOpened(id) => {
+                let window = Window::new(self.windows.len() + 1);
+                let focus_input = operation::focus(format!("input-{id}"));
+
+                self.windows.insert(id, window);
+
+                focus_input
+            }
+            Message::WindowClosed(id) => {
+                self.windows.remove(&id);
+
+                if self.windows.is_empty() {
+                    iced::exit()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ScaleInputChanged(id, scale) => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.scale_input = scale;
+                }
+
+                Task::none()
+            }
+            Message::ScaleChanged(id, scale) => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.current_scale = scale
+                        .parse()
+                        .unwrap_or(window.current_scale)
+                        .clamp(0.5, 5.0);
+                }
+
+                Task::none()
+            }
+            Message::TitleChanged(id, title) => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.title = title;
+                }
+
+                Task::none()
+            }
+            Message::TabSelected(a) => {
+                println!("{a}");
+                Task::none()
+            }
         }
     }
+
+    fn view(&self, window_id: window::Id) -> Element<'_, Message> {
+        if let Some(window) = self.windows.get(&window_id) {
+            center(window.view(window_id)).into()
+        } else {
+            space().into()
+        }
+    }
+
+    fn theme(&self, window: window::Id) -> Option<Theme> {
+        Some(self.windows.get(&window)?.theme.clone())
+    }
+
+    fn scale_factor(&self, window: window::Id) -> f32 {
+        self.windows
+            .get(&window)
+            .map(|window| window.current_scale)
+            .unwrap_or(1.0)
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        window::close_events().map(Message::WindowClosed)
+    }
 }
+
+impl Window {
+    fn new(count: usize) -> Self {
+        Self {
+            title: format!("Oneiroi - {}", env!("CARGO_PKG_VERSION")),
+            scale_input: "1.0".to_string(),
+            current_scale: 1.0,
+            theme: Theme::ALL[count % Theme::ALL.len()].clone(),
+        }
+    }
+
+    fn view(&self, id: window::Id) -> Element<'_, Message> {
+        let scale_input = iced::widget::column![
+            text("Window scale factor:"),
+            text_input("Window Scale", &self.scale_input)
+                .on_input(Message::ScaleInputChanged.with(id))
+                .on_submit(Message::ScaleChanged(id, self.scale_input.to_string()))
+        ];
+
+        let title_input = iced::widget::column![
+            text("Window title:"),
+            text_input("Window Title", &self.title)
+                .on_input(Message::TitleChanged.with(id))
+                .id(format!("input-{id}"))
+        ];
+
+        let new_window_button = button(text("New Window")).on_press(Message::OpenWindow);
+
+        /* let tab = TabBar::new(Message::TabSelected)
+        .push(1, iced_aw::TabLabel::Text("Snakish".into()))
+        .set_active_tab(&1); */
+        /* let tabs = Tabs::new(Message::TabSelected)
+        .push(
+            1,
+            TabLabel::Text(String::from("One")),
+            Text::new(String::from("One")).into(),
+        )
+        /* .push(
+            2,
+            TabLabel::Text(String::from("Two")),
+            Text::new(String::from("Two")).into(),
+        )
+        .push(
+            3,
+            TabLabel::Text(String::from("Three")),
+            Text::new(String::from("Three")).into(),
+        ) */
+        .set_active_tab(&1)
+        //.tab_bar_style(|t, s| Sty)
+        //.icon_font(ICON)
+        .tab_bar_position(iced_aw::TabBarPosition::Top)
+        .into(); */
+
+        let tab_bar = TabBar::new(Message::TabSelected)
+            .push(1, iced_aw::TabLabel::Text("Test".into()))
+            .set_active_tab(&1);
+
+        let viewport = OneiroiScene::new();
+
+        let content = iced::widget::column![
+            scale_input,
+            title_input,
+            new_window_button,
+            tab_bar,
+            viewport
+        ]
+        .spacing(50)
+        .width(Fill)
+        .align_x(Center)
+        .width(200);
+
+        container(scrollable(center_x(content))).padding(10).into()
+    }
+}
+
+/* enum TabMessage {
+    TabSelected(u32),
+} */

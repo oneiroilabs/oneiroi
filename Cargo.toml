@@ -4,7 +4,7 @@ members = [
     "oneiroi-godot",
     "oneiroi",
     "oneiroi-cpp",
-    "oneiroi-bevy",
+    #"oneiroi-bevy",
     "oneiroi-wgpu",
     "oneiroi-core",
     "oneiroi-editor",
@@ -32,8 +32,18 @@ oneiroi = { path = "./oneiroi" }
 oneiroi-core = { path = "./oneiroi-core" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
+oneiroi-wgpu = { path = "./oneiroi-wgpu" }
 
 wgpu = { version = "30", features = ["trace"] }
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
 encase = { version = "0.12" }
+
+
+[patch.crates-io]
+iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_core = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_runtime = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_widget = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_test = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+#iced_fonts = { git = "https://github.com/Redhawk18/iced_fonts" }
