@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, Copy)]
 pub struct OrbitCamera {
     pub target: glam::Vec3,
     pub yaw: f32,    // Rotation um die Y-Achse (in Radiant)

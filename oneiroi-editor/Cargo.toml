@@ -24,3 +24,4 @@ iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", fea
 oneiroi.workspace = true
 oneiroi-core.workspace = true
 oneiroi-wgpu.workspace = true
+glam.workspace = true

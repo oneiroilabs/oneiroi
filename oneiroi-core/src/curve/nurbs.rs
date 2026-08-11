@@ -30,6 +30,7 @@ pub struct CubicNurbsSegmentCache {
 }
 
 /// A Cubic Nurbs curve that can be evaluated extremly efficiently on the CPU and GPU.
+#[derive(Debug, Clone)]
 pub struct CubicNurbs {
     /// Includes the weight of the point in the w coordinate.
     points: Vec<Vec4>,

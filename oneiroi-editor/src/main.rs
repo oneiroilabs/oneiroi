@@ -1,5 +1,6 @@
 use iced::widget::{
-    Text, button, center, center_x, container, operation, scrollable, space, text, text_input,
+    Text, button, center, center_x, container, operation, scrollable, shader, space, text,
+    text_input,
 };
 use iced::window;
 use iced::{Center, Element, Fill, Function, Subscription, Task, Theme, Vector};
@@ -210,7 +211,7 @@ impl Window {
             .push(1, iced_aw::TabLabel::Text("Test".into()))
             .set_active_tab(&1);
 
-        let viewport = OneiroiScene::new();
+        let viewport = shader(OneiroiScene::new()).width(Fill).height(Fill);
 
         let content = iced::widget::column![
             scale_input,

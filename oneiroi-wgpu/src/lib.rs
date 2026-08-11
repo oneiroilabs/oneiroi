@@ -12,7 +12,7 @@ use winit::{
 
 use crate::orbit::OrbitCamera;
 
-mod orbit;
+pub mod orbit;
 
 pub const DEBUG: bool = false;
 
