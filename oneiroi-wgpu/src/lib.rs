@@ -2,13 +2,8 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec4};
 use oneiroi_core::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
-use wgpu::{BindGroup, Buffer, ComputePipeline, RenderPipeline, TextureFormat, util::DeviceExt};
-use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
-    window::{Window, WindowId},
-};
+use wgpu::{BindGroup, BindGroupLayout, Buffer, ComputePipeline, RenderPipeline, TextureFormat};
+use winit::{event_loop::OwnedDisplayHandle, window::Window};
 
 use crate::orbit::OrbitCamera;
 
@@ -87,11 +82,14 @@ pub struct State {
 
 pub struct PipelineState {
     compute_pipeline: ComputePipeline,
+    compute_bind_group_layout_0: BindGroupLayout,
+    compute_bind_group_layout_1: BindGroupLayout,
     compute_bind_group_0: BindGroup,
     compute_bind_group_1: BindGroup,
     segments_buffer: Buffer,
     evaluated_frames_buffer: Buffer,
 
+    render_bind_group_layout_0: BindGroupLayout,
     render_bind_group_0: BindGroup,
     render_pipeline: RenderPipeline,
 
@@ -100,6 +98,7 @@ pub struct PipelineState {
     tube_uniforms: wgpu::Buffer,
 
     debug_vis: RenderPipeline,
+    debug_bind_group_layout_0: BindGroupLayout,
     debug_bind_group_0: BindGroup,
     visualizer_uniform_buffer: wgpu::Buffer,
 
@@ -130,7 +129,7 @@ impl PipelineState {
         let segments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Curve Segments Buffer"),
             size: 80,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -166,7 +165,7 @@ impl PipelineState {
         let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tube Draw Indirect Buffer"),
             size: std::mem::size_of::<DrawIndirectArgs>() as u64,
-            usage: wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -522,6 +521,10 @@ impl PipelineState {
             depth_texture_view,
             segments_buffer,
             evaluated_frames_buffer,
+            compute_bind_group_layout_0,
+            compute_bind_group_layout_1,
+            render_bind_group_layout_0: render_bind_group_layout,
+            debug_bind_group_layout_0: visualizer_bind_group_layout,
             // mesh_pipeline,
             //mesh_bind_group_0,
         }
@@ -571,7 +574,69 @@ impl PipelineState {
             bytemuck::bytes_of(vis_uniforms),
         );
 
+        self.segments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Evaluated Frames Storage Buffer"),
+            size: std::mem::size_of_val(segments) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         queue.write_buffer(&self.segments_buffer, 0, bytemuck::cast_slice(segments));
+
+        self.evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Evaluated Frames Storage Buffer"),
+            size: (segments.len() as u64 * 32 * 64), //std::mem::size_of::<GpuSample>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        self.compute_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Output Bind Group"),
+            layout: &self.compute_bind_group_layout_0,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.segments_buffer.as_entire_binding(),
+            }],
+        });
+
+        self.compute_bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compute Output Bind Group"),
+            layout: &self.compute_bind_group_layout_1,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.evaluated_frames_buffer.as_entire_binding(),
+            }],
+        });
+
+        self.render_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Tube Render Bind Group"),
+            layout: &self.render_bind_group_layout_0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.evaluated_frames_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.tube_uniforms.as_entire_binding(),
+                },
+            ],
+        });
+
+        self.debug_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RMF Visualizer Bind Group"),
+            layout: &self.debug_bind_group_layout_0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.visualizer_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.evaluated_frames_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
         let indirect_args = DrawIndirectArgs {
             vertex_count: if DEBUG {
@@ -805,6 +870,8 @@ impl State {
             0,
             bytemuck::bytes_of(&vis_uniforms),
         );
+
+        //self.pipeline_state.up
     }
 
     pub fn get_window(&self) -> &Window {
@@ -882,6 +949,52 @@ impl State {
             });
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
+
+        let aspect_ratio = self.size.width as f32 / self.size.height as f32;
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
+        let view = self.camera.build_view_matrix();
+        let view_projection = projection * view;
+
+        // 1. Tube Uniforms aktualisieren
+        let tube_uniforms = TubeUniforms {
+            view_projection,
+            tube_radius: 0.2f32,
+            radial_segments: 16,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        self.queue.write_buffer(
+            &self.pipeline_state.tube_uniforms,
+            0,
+            bytemuck::cast_slice(&[tube_uniforms]),
+        );
+
+        // 2. RMF Visualizer Uniforms aktualisieren
+        let vis_uniforms = RmfVisualizerUniforms {
+            view_projection,
+            vector_scale: 0.25,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        self.queue.write_buffer(
+            &self.pipeline_state.visualizer_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&vis_uniforms),
+        );
+
+        self.pipeline_state.update(
+            &self.device,
+            &self.queue,
+            (
+                surface_texture.texture.width(),
+                surface_texture.texture.height(),
+            ),
+            &tube_uniforms,
+            &vis_uniforms,
+            self.curve.segments(),
+        );
 
         self.pipeline_state.render(
             &texture_view,

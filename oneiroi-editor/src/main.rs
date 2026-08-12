@@ -28,6 +28,7 @@ struct Window {
     scale_input: String,
     current_scale: f32,
     theme: Theme,
+    scene: OneiroiScene,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +163,7 @@ impl Window {
             scale_input: "1.0".to_string(),
             current_scale: 1.0,
             theme: Theme::ALL[count % Theme::ALL.len()].clone(),
+            scene: OneiroiScene::new(),
         }
     }
 
@@ -211,7 +213,7 @@ impl Window {
         //    .push(1, iced_aw::TabLabel::Text("Test".into()))
         //    .set_active_tab(&1);
 
-        let viewport = shader(OneiroiScene::new()).width(Fill).height(Fill);
+        let viewport = shader(&self.scene).width(Fill).height(Fill);
 
         let content = iced::widget::column![
             scale_input,

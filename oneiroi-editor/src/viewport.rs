@@ -3,6 +3,7 @@ use iced::widget::shader::{self, Pipeline, Primitive};
 use oneiroi_core::curve::nurbs::CubicNurbs;
 use oneiroi_wgpu::{PipelineState, RmfVisualizerUniforms, State, TubeUniforms, orbit::OrbitCamera};
 
+#[derive(Debug)]
 pub struct OneiroiScene {
     curve: CubicNurbs,
     camera: OrbitCamera,
