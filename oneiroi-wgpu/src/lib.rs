@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use glam::Vec4;
-use oneiroi_core::curve::nurbs::CubicNurbs;
-use wgpu::{BindGroup, ComputePipeline, RenderPipeline, TextureFormat, util::DeviceExt};
+use glam::{Mat4, Vec4};
+use oneiroi_core::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
+use wgpu::{BindGroup, Buffer, ComputePipeline, RenderPipeline, TextureFormat, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -18,7 +18,7 @@ pub const DEBUG: bool = false;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct TubeUniforms {
+pub struct TubeUniforms {
     view_projection: glam::Mat4,
     tube_radius: f32,
     radial_segments: u32,
@@ -26,9 +26,21 @@ struct TubeUniforms {
     _pad1: u32,
 }
 
+impl TubeUniforms {
+    pub fn new(view_projection: Mat4, tube_radius: f32, radial_segments: u32) -> Self {
+        Self {
+            view_projection,
+            tube_radius,
+            radial_segments,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct DrawIndirectArgs {
+pub struct DrawIndirectArgs {
     vertex_count: u32,
     instance_count: u32,
     first_vertex: u32,
@@ -37,12 +49,25 @@ struct DrawIndirectArgs {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct RmfVisualizerUniforms {
+pub struct RmfVisualizerUniforms {
     view_projection: glam::Mat4,
     vector_scale: f32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+}
+
+impl RmfVisualizerUniforms {
+    pub fn new(view_projection: Mat4, vector_scale: f32) -> Self {
+        Self {
+            view_projection,
+            vector_scale,
+
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        }
+    }
 }
 
 pub struct State {
@@ -64,13 +89,15 @@ pub struct PipelineState {
     compute_pipeline: ComputePipeline,
     compute_bind_group_0: BindGroup,
     compute_bind_group_1: BindGroup,
+    segments_buffer: Buffer,
+    evaluated_frames_buffer: Buffer,
 
     render_bind_group_0: BindGroup,
     render_pipeline: RenderPipeline,
 
     indirect_buffer: wgpu::Buffer,
 
-    uniforms: wgpu::Buffer,
+    tube_uniforms: wgpu::Buffer,
 
     debug_vis: RenderPipeline,
     debug_bind_group_0: BindGroup,
@@ -86,8 +113,8 @@ impl PipelineState {
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
             size: wgpu::Extent3d {
-                width: size.width,
-                height: size.height,
+                width: 1,  //size.width,
+                height: 1, // size.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -100,31 +127,47 @@ impl PipelineState {
 
         let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let uniform_data = TubeUniforms {
+        let segments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Curve Segments Buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Evaluated Frames Storage Buffer"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        /* let uniform_data = TubeUniforms {
             view_projection: view_projection_matrix,
             tube_radius,
             radial_segments,
             _pad0: 0,
             _pad1: 0,
-        };
+        }; */
 
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let tube_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tube Render Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[uniform_data]),
+            size: std::mem::size_of::<TubeUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
-        let indirect_args = DrawIndirectArgs {
+        /* let indirect_args = DrawIndirectArgs {
             vertex_count: if DEBUG { 6 } else { radial_segments * 6 },
             instance_count: total_evaluated_points - 1,
             first_vertex: 0,
             first_instance: 0,
-        };
+        }; */
 
-        let indirect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tube Draw Indirect Buffer"),
-            contents: bytemuck::cast_slice(&[indirect_args]),
+            size: std::mem::size_of::<DrawIndirectArgs>() as u64,
             usage: wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
         });
 
         let compute_bind_group_layout_0 =
@@ -231,7 +274,7 @@ impl PipelineState {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: tube_uniforms.as_entire_binding(),
                 },
             ],
         });
@@ -281,20 +324,20 @@ impl PipelineState {
             multiview_mask: None,
         });
 
-        let visualizer_uniform_data = RmfVisualizerUniforms {
+        /* let visualizer_uniform_data = RmfVisualizerUniforms {
             view_projection: view_projection_matrix,
             vector_scale: 0.25,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
-        };
+        }; */
 
-        let visualizer_uniform_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("RMF Visualizer Uniform Buffer"),
-                contents: bytemuck::bytes_of(&visualizer_uniform_data),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+        let visualizer_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RMF Visualizer Uniform Buffer"),
+            size: std::mem::size_of::<RmfVisualizerUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let visualizer_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -472,13 +515,122 @@ impl PipelineState {
             compute_bind_group_1,
             render_bind_group_0,
             indirect_buffer,
-            uniforms: uniform_buffer,
+            tube_uniforms,
             debug_vis: visualizer_pipeline,
             debug_bind_group_0: visualizer_bind_group,
             visualizer_uniform_buffer,
             depth_texture_view,
+            segments_buffer,
+            evaluated_frames_buffer,
             // mesh_pipeline,
             //mesh_bind_group_0,
+        }
+    }
+
+    fn update_depth_texture(&mut self, device: &wgpu::Device, size: (u32, u32)) {
+        if self.depth_texture_view.texture().height() != size.1
+            || self.depth_texture_view.texture().width() != size.0
+        {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("cubes depth texture"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+
+            self.depth_texture_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+            //self.depth_pipeline.update(device, &tex);
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_size: (u32, u32),
+        tube_uniforms: &TubeUniforms,
+        vis_uniforms: &RmfVisualizerUniforms,
+        segments: &[CubicNurbsSegmentCache],
+    ) {
+        self.update_depth_texture(device, target_size);
+
+        queue.write_buffer(&self.tube_uniforms, 0, bytemuck::bytes_of(tube_uniforms));
+
+        queue.write_buffer(&self.segments_buffer, 0, bytemuck::cast_slice(segments));
+    }
+
+    pub fn render(
+        &self,
+        target: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+        //clip_bounds: Rectangle<u32>,
+        num_segments: u32,
+    ) {
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("NURBS Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
+            compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
+
+            compute_pass.dispatch_workgroups(num_segments, 1, 1);
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Tube Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.01,
+                            g: 0.01,
+                            b: 0.02,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            if DEBUG {
+                render_pass.set_pipeline(&self.debug_vis);
+                render_pass.set_bind_group(0, &self.debug_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
+                render_pass.draw_indirect(&self.indirect_buffer, 0);
+            }
+
+            // render_pass.set_pipeline(&self.mesh_pipeline);
+            // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
+            // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
         }
     }
 }
@@ -574,19 +726,6 @@ impl State {
 
         let radial_segments = 16u32;
 
-        let segments_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Curve Segments Buffer"),
-            contents: bytemuck::cast_slice(curve.segments()),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-
-        let evaluated_frames_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Evaluated Frames Storage Buffer"),
-            size: (total_evaluated_points as u64 * 64), //std::mem::size_of::<GpuSample>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
         let tube_radius = 0.5f32;
         let aspect_ratio = size.width as f32 / size.height as f32;
 
@@ -631,7 +770,7 @@ impl State {
             _pad1: 0,
         };
         self.queue.write_buffer(
-            &self.pipeline_state.uniforms,
+            &self.pipeline_state.tube_uniforms,
             0,
             bytemuck::cast_slice(&[tube_uniforms]),
         );
@@ -727,62 +866,12 @@ impl State {
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("NURBS Compute Pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.pipeline_state.compute_pipeline);
-            compute_pass.set_bind_group(0, &self.pipeline_state.compute_bind_group_0, &[]);
-            compute_pass.set_bind_group(1, &self.pipeline_state.compute_bind_group_1, &[]);
-
-            compute_pass.dispatch_workgroups(self.curve.segments().len() as u32, 1, 1);
-        }
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Tube Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture_view, // Hier die aktuelle View der Swapchain übergeben
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.01,
-                            g: 0.01,
-                            b: 0.02,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.pipeline_state.depth_texture_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            if DEBUG {
-                render_pass.set_pipeline(&self.pipeline_state.debug_vis);
-                render_pass.set_bind_group(0, &self.pipeline_state.debug_bind_group_0, &[]);
-                render_pass.draw_indirect(&self.pipeline_state.indirect_buffer, 0);
-            } else {
-                render_pass.set_pipeline(&self.pipeline_state.render_pipeline);
-                render_pass.set_bind_group(0, &self.pipeline_state.render_bind_group_0, &[]);
-                render_pass.draw_indirect(&self.pipeline_state.indirect_buffer, 0);
-            }
-
-            // render_pass.set_pipeline(&self.mesh_pipeline);
-            // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
-            // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
-        }
+        self.pipeline_state.render(
+            &texture_view,
+            &mut encoder,
+            //clip_bounds,
+            self.curve.segments().len() as u32,
+        );
 
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();

@@ -1,11 +1,14 @@
 use glam::Vec4;
 use iced::widget::shader::{self, Pipeline, Primitive};
 use oneiroi_core::curve::nurbs::CubicNurbs;
-use oneiroi_wgpu::{State, orbit::OrbitCamera};
+use oneiroi_wgpu::{PipelineState, RmfVisualizerUniforms, State, TubeUniforms, orbit::OrbitCamera};
 
 pub struct OneiroiScene {
     curve: CubicNurbs,
     camera: OrbitCamera,
+
+    vis_uniforms: RmfVisualizerUniforms,
+    tube_uniforms: TubeUniforms,
 }
 
 impl OneiroiScene {
@@ -71,7 +74,25 @@ impl OneiroiScene {
             camera
         };
 
-        Self { curve, camera }
+        let radial_segments = 16;
+
+        let tube_radius = 0.5;
+
+        let view = camera.build_view_matrix();
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 1.0, 0.1);
+        let view_projection = projection * view;
+
+        let tube_uniforms = TubeUniforms::new(view_projection, tube_radius, radial_segments);
+
+        let vis_uniforms = RmfVisualizerUniforms::new(view_projection, 0.25);
+
+        Self {
+            curve,
+            camera,
+            vis_uniforms,
+            tube_uniforms,
+        }
     }
 }
 
@@ -110,18 +131,29 @@ impl Primitive for Prim {
         bounds: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
-        todo!()
+        let size = (
+            viewport.physical_size().width,
+            viewport.physical_size().height,
+        );
+
+        pipeline
+            .0
+            .update(device, queue, size, self.curve.segments());
     }
 
     fn render(
         &self,
-        _pipeline: &Self::Pipeline,
-        _encoder: &mut iced::wgpu::CommandEncoder,
-        _target: &iced::wgpu::TextureView,
-        _clip_bounds: &iced::Rectangle<u32>,
-    )
-    {
-        
+        pipeline: &Self::Pipeline,
+        encoder: &mut iced::wgpu::CommandEncoder,
+        target: &iced::wgpu::TextureView,
+        clip_bounds: &iced::Rectangle<u32>,
+    ) {
+        pipeline.0.render(
+            target,
+            encoder,
+            //*clip_bounds,
+            self.curve.segments().len() as u32,
+        );
     }
 }
 
