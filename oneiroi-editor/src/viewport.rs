@@ -76,11 +76,11 @@ impl OneiroiScene {
 
         let radial_segments = 16;
 
-        let tube_radius = 0.5;
+        let tube_radius = 0.2;
 
         let view = camera.build_view_matrix();
         let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 1.0, 0.1);
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 4. / 3., 0.1);
         let view_projection = projection * view;
 
         let tube_uniforms = TubeUniforms::new(view_projection, tube_radius, radial_segments);
