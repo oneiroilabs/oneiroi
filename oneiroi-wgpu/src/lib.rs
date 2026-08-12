@@ -655,8 +655,8 @@ impl PipelineState {
         &self,
         target: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
-        //clip_bounds: Rectangle<u32>,
         num_segments: u32,
+        bounds: Option<(f32, f32, f32, f32)>,
     ) {
         println!(
             "Width: {}, Heigth: {}",
@@ -694,12 +694,12 @@ impl PipelineState {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.01,
-                            g: 0.01,
-                            b: 0.02,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Load, /* wgpu::LoadOp::Clear(wgpu::Color {
+                                                      r: 0.01,
+                                                      g: 0.01,
+                                                      b: 0.02,
+                                                      a: 1.0,
+                                                  }) */
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -716,6 +716,10 @@ impl PipelineState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            if let Some(bounds) = bounds {
+                render_pass.set_viewport(bounds.0, bounds.1, bounds.2, bounds.3, 0., 1.);
+            }
 
             if DEBUG {
                 render_pass.set_pipeline(&self.debug_vis);
@@ -1018,6 +1022,7 @@ impl State {
             &mut encoder,
             //clip_bounds,
             self.curve.segments().len() as u32,
+            None,
         );
 
         self.queue.submit([encoder.finish()]);

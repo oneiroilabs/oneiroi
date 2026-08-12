@@ -160,8 +160,13 @@ impl Primitive for Prim {
         pipeline.0.render(
             target,
             encoder,
-            //*clip_bounds,
             self.curve.segments().len() as u32,
+            Some((
+                clip_bounds.x as f32,
+                clip_bounds.y as f32,
+                clip_bounds.width as f32,
+                clip_bounds.height as f32,
+            )),
         );
     }
 }
