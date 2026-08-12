@@ -658,6 +658,23 @@ impl PipelineState {
         //clip_bounds: Rectangle<u32>,
         num_segments: u32,
     ) {
+        println!(
+            "Width: {}, Heigth: {}",
+            target.texture().width(),
+            target.texture().height()
+        );
+
+        /* let target = if target.texture().format() != wgpu::TextureFormat::Rgba8UnormSrgb {
+            println!("Conversion triggered!");
+            &target.texture().create_view(&wgpu::TextureViewDescriptor {
+                label: Some("sRGB View Casting for Iced"),
+                format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+                ..Default::default()
+            })
+        } else {
+            target
+        }; */
+
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NURBS Compute Pass"),

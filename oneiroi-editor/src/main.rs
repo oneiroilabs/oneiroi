@@ -1,5 +1,5 @@
 use iced::widget::{
-    Text, button, center, center_x, container, operation, scrollable, shader, space, text,
+    Text, button, center, center_x, column, container, operation, scrollable, shader, space, text,
     text_input,
 };
 use iced::window;
@@ -10,6 +10,8 @@ use oneiroi_editor::viewport::OneiroiScene;
 use std::collections::BTreeMap;
 
 fn main() -> iced::Result {
+    env_logger::init();
+
     iced::daemon(Example::new, Example::update, Example::view)
         .subscription(Example::subscription)
         .title(Example::title)
@@ -168,7 +170,7 @@ impl Window {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        let scale_input = iced::widget::column![
+        /* let scale_input = iced::widget::column![
             text("Window scale factor:"),
             text_input("Window Scale", &self.scale_input)
                 .on_input(Message::ScaleInputChanged.with(id))
@@ -182,7 +184,7 @@ impl Window {
                 .id(format!("input-{id}"))
         ];
 
-        let new_window_button = button(text("New Window")).on_press(Message::OpenWindow);
+        let new_window_button = button(text("New Window")).on_press(Message::OpenWindow); */
 
         /* let tab = TabBar::new(Message::TabSelected)
         .push(1, iced_aw::TabLabel::Text("Snakish".into()))
@@ -213,21 +215,21 @@ impl Window {
         //    .push(1, iced_aw::TabLabel::Text("Test".into()))
         //    .set_active_tab(&1);
 
-        let viewport = shader(&self.scene).width(Fill).height(Fill);
-
-        let content = iced::widget::column![
+        /*  let content = iced::widget::column![
             scale_input,
             title_input,
             new_window_button,
             //tab_bar,
-            viewport
         ]
         .spacing(50)
         .width(Fill)
         .align_x(Center)
-        .width(Fill);
+        .height(400); */
 
-        container(scrollable(center_x(content))).padding(10).into()
+        let viewport = shader(&self.scene).width(200).height(200);
+        //let content = column![content, viewport];
+        //container(scrollable(center_x(content))).padding(10).into()
+        viewport.into()
     }
 }
 

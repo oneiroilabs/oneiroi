@@ -177,6 +177,7 @@ impl Pipeline for OneiroiPipe {
     where
         Self: Sized,
     {
+        println!("{format:?}");
         OneiroiPipe(PipelineState::new(device, format))
     }
 }

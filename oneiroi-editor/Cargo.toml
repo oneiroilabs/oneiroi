@@ -9,12 +9,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-iced = { version = "0.15.0-dev", features = [
+iced = { version = "0.15.0-dev", default-features = false, features = [
     "wgpu",
     "canvas",
+    "crisp",
     "debug",
     "image",
     "advanced",
+    "thread-pool",
 ] }
 iced_core = { version = "0.15.0-dev" }
 #iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", features = [
@@ -25,3 +27,4 @@ oneiroi.workspace = true
 oneiroi-core.workspace = true
 oneiroi-wgpu.workspace = true
 glam.workspace = true
+env_logger.workspace = true

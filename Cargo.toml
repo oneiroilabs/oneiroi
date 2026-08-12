@@ -38,11 +38,12 @@ wgpu = { version = "30", features = ["trace"] }
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
 encase = { version = "0.12" }
+env_logger = { version = "0.11" }
 
 
 [patch.crates-io]
-iced = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }         #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_core = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_runtime = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" } #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_widget = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }  #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_test = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }         #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_core = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_runtime = { git = "https://github.com/kistz/iced.git", branch = "patch-features" } #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_widget = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }  #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_test = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
