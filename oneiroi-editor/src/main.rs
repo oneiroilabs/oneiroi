@@ -4,7 +4,7 @@ use iced::widget::{
 };
 use iced::window;
 use iced::{Center, Element, Fill, Function, Subscription, Task, Theme, Vector};
-use iced_aw::{TabBar, TabLabel, Tabs};
+//use iced_aw::{TabBar, TabLabel, Tabs};
 use oneiroi_editor::viewport::OneiroiScene;
 
 use std::collections::BTreeMap;
@@ -207,9 +207,9 @@ impl Window {
         .tab_bar_position(iced_aw::TabBarPosition::Top)
         .into(); */
 
-        let tab_bar = TabBar::new(Message::TabSelected)
-            .push(1, iced_aw::TabLabel::Text("Test".into()))
-            .set_active_tab(&1);
+        //let tab_bar = TabBar::new(Message::TabSelected)
+        //    .push(1, iced_aw::TabLabel::Text("Test".into()))
+        //    .set_active_tab(&1);
 
         let viewport = shader(OneiroiScene::new()).width(Fill).height(Fill);
 
@@ -217,13 +217,13 @@ impl Window {
             scale_input,
             title_input,
             new_window_button,
-            tab_bar,
+            //tab_bar,
             viewport
         ]
         .spacing(50)
         .width(Fill)
         .align_x(Center)
-        .width(200);
+        .width(Fill);
 
         container(scrollable(center_x(content))).padding(10).into()
     }

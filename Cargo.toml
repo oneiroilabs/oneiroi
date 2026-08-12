@@ -41,9 +41,8 @@ encase = { version = "0.12" }
 
 
 [patch.crates-io]
-iced = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_core = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_runtime = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_widget = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_test = { git = "https://github.com/iced-rs/iced.git", rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-#iced_fonts = { git = "https://github.com/Redhawk18/iced_fonts" }
+iced = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }         #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_core = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_runtime = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" } #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_widget = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }  #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced_test = { git = "https://github.com/kistz/iced.git", branch = "wgpu30" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }

@@ -6,7 +6,6 @@ use oneiroi_wgpu::{PipelineState, RmfVisualizerUniforms, State, TubeUniforms, or
 pub struct OneiroiScene {
     curve: CubicNurbs,
     camera: OrbitCamera,
-
     vis_uniforms: RmfVisualizerUniforms,
     tube_uniforms: TubeUniforms,
 }
@@ -110,6 +109,8 @@ impl<Message> shader::Program<Message> for OneiroiScene {
         Prim {
             camera: self.camera,
             curve: self.curve.clone(),
+            vis_uniforms: self.vis_uniforms,
+            tube_uniforms: self.tube_uniforms,
         }
     }
 }
@@ -118,6 +119,8 @@ impl<Message> shader::Program<Message> for OneiroiScene {
 pub struct Prim {
     camera: OrbitCamera,
     curve: CubicNurbs,
+    vis_uniforms: RmfVisualizerUniforms,
+    tube_uniforms: TubeUniforms,
 }
 
 impl Primitive for Prim {
@@ -136,9 +139,14 @@ impl Primitive for Prim {
             viewport.physical_size().height,
         );
 
-        pipeline
-            .0
-            .update(device, queue, size, self.curve.segments());
+        pipeline.0.update(
+            device,
+            queue,
+            size,
+            &self.tube_uniforms,
+            &self.vis_uniforms,
+            self.curve.segments(),
+        );
     }
 
     fn render(

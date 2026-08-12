@@ -17,7 +17,7 @@ pub mod orbit;
 pub const DEBUG: bool = false;
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TubeUniforms {
     view_projection: glam::Mat4,
     tube_radius: f32,
@@ -129,7 +129,7 @@ impl PipelineState {
 
         let segments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Curve Segments Buffer"),
-            size: 16,
+            size: 80,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -565,8 +565,25 @@ impl PipelineState {
         self.update_depth_texture(device, target_size);
 
         queue.write_buffer(&self.tube_uniforms, 0, bytemuck::bytes_of(tube_uniforms));
+        queue.write_buffer(
+            &self.visualizer_uniform_buffer,
+            0,
+            bytemuck::bytes_of(vis_uniforms),
+        );
 
         queue.write_buffer(&self.segments_buffer, 0, bytemuck::cast_slice(segments));
+
+        let indirect_args = DrawIndirectArgs {
+            vertex_count: if DEBUG {
+                6
+            } else {
+                tube_uniforms.radial_segments * 6
+            },
+            instance_count: segments.len() as u32 * 32 - 1,
+            first_vertex: 0,
+            first_instance: 0,
+        };
+        queue.write_buffer(&self.indirect_buffer, 0, bytemuck::bytes_of(&indirect_args));
     }
 
     pub fn render(
@@ -592,7 +609,7 @@ impl PipelineState {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tube Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
+                    view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {

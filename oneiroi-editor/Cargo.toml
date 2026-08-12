@@ -17,9 +17,9 @@ iced = { version = "0.15.0-dev", features = [
     "advanced",
 ] }
 iced_core = { version = "0.15.0-dev" }
-iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", features = [
-    "full",
-] }
+#iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", features = [
+#    "full",
+#] }
 #iced_nodegraph = { version = "0.4" }
 oneiroi.workspace = true
 oneiroi-core.workspace = true
