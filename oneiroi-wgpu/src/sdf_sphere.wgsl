@@ -32,25 +32,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let near_target = uniforms.inv_view_proj * vec4f(in.uv.x, in.uv.y, 1.0, 1.0);
     let world_near  = near_target.xyz / near_target.w;
 
-    // 2. Um Richtungsfehler durch die unendliche Reverse-Z-Fernebene (Z=0.0) zu vermeiden,
-    // nutzen wir einen Delta-Schritt in NDC-Tiefe (z.B. Z=0.9), um die Richtung exakt zu bestimmen.
     let dir_target  = uniforms.inv_view_proj * vec4f(in.uv.x, in.uv.y, 0.9, 1.0);
     let world_dir_p = dir_target.xyz / dir_target.w;
 
-    // Strahl-Setup
     let ray_origin = world_near;
     let ray_dir    = normalize(world_dir_p - world_near);
 
     var depth = 0.0;
-    let max_depth = 150.0; // Leicht erhöht für große Entfernungen
+    let max_depth = 150.0;
     var hit = false;
 
-    // 5. Raymarching-Schleife mit angepasster Trefferschwelle
     for (var i = 0; i < 128; i++) {
         let hit_pos = ray_origin + ray_dir * depth;
         let dist = sdf_sphere(hit_pos, uniforms.origin, uniforms.radius);
         
-        // Da wir eine riesige Kugel (Radius 20) rendern, erhöhen wir die Toleranz leicht
         if (dist < 0.005) {
             hit = true;
             break;
@@ -62,7 +57,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         }
     }
 
-    // Wenn nichts getroffen wurde, Pixel komplett verwerfen (damit die Tube sichtbar bleibt)
     if (!hit) {
       discard;
     }

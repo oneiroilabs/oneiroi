@@ -34,7 +34,7 @@ struct Window {
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
     OpenWindow,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
@@ -42,6 +42,7 @@ enum Message {
     ScaleChanged(window::Id, String),
     TitleChanged(window::Id, String),
     TabSelected(u32),
+    SphereHit(window::Id),
 }
 
 impl Example {
@@ -129,6 +130,10 @@ impl Example {
             }
             Message::TabSelected(a) => {
                 println!("{a}");
+                Task::none()
+            }
+            Message::SphereHit(id) => {
+                println!("Message published.");
                 Task::none()
             }
         }

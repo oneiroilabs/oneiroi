@@ -1,5 +1,10 @@
-use glam::{Vec2, Vec3, Vec4};
-use iced::widget::shader::{self, Pipeline, Primitive};
+use std::time::Instant;
+
+use glam::{Vec2, Vec3, Vec4, Vec4Swizzles};
+use iced::{
+    Event,
+    widget::shader::{self, Pipeline, Primitive},
+};
 use oneiroi_core::curve::nurbs::CubicNurbs;
 use oneiroi_wgpu::{
     PipelineState, RmfVisualizerUniforms, SdfUniforms, State, TubeUniforms, orbit::OrbitCamera,
@@ -22,7 +27,6 @@ impl OneiroiScene {
 
             let step_distance = 0.25;
 
-            // Scale factor for how quickly the spiral expands outwards (the 'a' coefficient)
             let expansion_rate = 0.15;
 
             for i in 0..num_points {
@@ -104,12 +108,71 @@ impl OneiroiScene {
             sdf_uniforms,
         }
     }
+
+    fn test_ray(&self, ndc_x: f32, ndc_y: f32) -> bool {
+        let view = self.camera.build_view_matrix();
+        let projection =
+            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 4. / 3., 0.1);
+        let inv_view_proj = (projection * view).inverse_or_zero();
+
+        let near_target = inv_view_proj * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+        let world_near = near_target.xyz() / near_target.w;
+
+        let dir_target = inv_view_proj * glam::Vec4::new(ndc_x, ndc_y, 0.9, 1.0);
+        let world_dir_p = dir_target.xyz() / dir_target.w;
+
+        let ray_origin = world_near;
+        let ray_dir = (world_dir_p - world_near).normalize();
+
+        let oc = ray_origin - self.sdf_uniforms.origin;
+
+        let b = oc.dot(ray_dir);
+        let c = oc.dot(oc) - (self.sdf_uniforms.radius * self.sdf_uniforms.radius);
+
+        let discriminant = b * b - c;
+
+        if discriminant < 0.0 {
+            return false;
+        }
+
+        let t = -b - discriminant.sqrt();
+
+        t > 0.0
+    }
 }
 
 impl<Message> shader::Program<Message> for OneiroiScene {
     type State = ();
 
     type Primitive = Prim;
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &iced_core::Event,
+        bounds: iced::Rectangle,
+        cursor: iced_core::mouse::Cursor,
+    ) -> Option<shader::Action<Message>> {
+        if let Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) = event {
+            if let Some(cursor_position) = cursor.position_in(bounds) {
+                // 1. Pixel-Koordinaten in NDC-Raum (-1.0 bis 1.0) umrechnen
+                // Wichtig: WebGPU NDC Y geht von unten (-1) nach oben (1)
+                let ndc_x = (cursor_position.x / bounds.width) * 2.0 - 1.0;
+                let ndc_y = 1.0 - (cursor_position.y / bounds.height) * 2.0;
+
+                let instant = Instant::now();
+                if self.test_ray(ndc_x, ndc_y) {
+                    println!("SDF Kugel im GUI-Widget angeklickt!");
+                    // Hier müsstest du die Message zurückgeben.
+                    // Da OneiroiScene aktuell generisch über <Message> ist, kannst du eine
+                    // Callback-Struktur nutzen oder OneiroiScene fest an dein Custom Message-Enum binden.
+                    //return Some(shader::Action::publish(Message::));
+                }
+                println!("{:?}", instant.elapsed());
+            }
+        }
+        None
+    }
 
     fn draw(
         &self,
