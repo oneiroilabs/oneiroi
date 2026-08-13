@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use oneiroi_core::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
-use wgpu::{BindGroup, BindGroupLayout, Buffer, ComputePipeline, RenderPipeline, TextureFormat};
+use wgpu::{
+    BindGroup, BindGroupLayout, Buffer, ComputePipeline, RenderPipeline, TextureFormat,
+    util::DeviceExt,
+};
 use winit::{event_loop::OwnedDisplayHandle, window::Window};
 
 use crate::orbit::OrbitCamera;
@@ -65,6 +68,15 @@ impl RmfVisualizerUniforms {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SdfUniforms {
+    pub view_projection: glam::Mat4,
+    pub color: Vec4,
+    pub origin: Vec3,
+    pub radius: f32,
+}
+
 pub struct State {
     instance: wgpu::Instance,
     window: Arc<Window>,
@@ -101,6 +113,10 @@ pub struct PipelineState {
     debug_bind_group_layout_0: BindGroupLayout,
     debug_bind_group_0: BindGroup,
     visualizer_uniform_buffer: wgpu::Buffer,
+
+    sdf_pipeline: RenderPipeline,
+    sdf_bind_group: BindGroup,
+    sdf_uniform_buffer: wgpu::Buffer,
 
     depth_texture_view: wgpu::TextureView,
     //mesh_pipeline: RenderPipeline,
@@ -422,6 +438,82 @@ impl PipelineState {
             cache: None,
         });
 
+        let sdf_shader = device.create_shader_module(wgpu::include_wgsl!("sdf_sphere.wgsl"));
+
+        let sdf_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("SDF Uniform Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let sdf_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SDF Pipeline Layout"),
+            bind_group_layouts: &[Some(&sdf_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let sdf_uniforms = SdfUniforms {
+            color: Vec4::new(1.0, 0., 0., 1.),
+            origin: Vec3::new(0., 0., 0.),
+            radius: 0.4,
+            view_projection: Mat4::IDENTITY,
+        };
+
+        let sdf_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("SDF Uniform Buffer"),
+            contents: bytemuck::bytes_of(&sdf_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sdf_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SDF Bind Group"),
+            layout: &sdf_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sdf_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let sdf_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("SDF Render Pipeline"),
+            layout: Some(&sdf_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sdf_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sdf_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format.add_srgb_suffix(),
+                    // Anti Alias
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+            multiview_mask: None,
+        });
+
         /* let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Tube Pure Mesh Layout"),
@@ -525,6 +617,9 @@ impl PipelineState {
             compute_bind_group_layout_1,
             render_bind_group_layout_0: render_bind_group_layout,
             debug_bind_group_layout_0: visualizer_bind_group_layout,
+            sdf_pipeline,
+            sdf_bind_group,
+            sdf_uniform_buffer,
             // mesh_pipeline,
             //mesh_bind_group_0,
         }
@@ -563,10 +658,16 @@ impl PipelineState {
         target_size: (u32, u32),
         tube_uniforms: &TubeUniforms,
         vis_uniforms: &RmfVisualizerUniforms,
+        sdf_uniforms: &SdfUniforms,
         segments: &[CubicNurbsSegmentCache],
     ) {
         self.update_depth_texture(device, target_size);
 
+        queue.write_buffer(
+            &self.sdf_uniform_buffer,
+            0,
+            bytemuck::bytes_of(sdf_uniforms),
+        );
         queue.write_buffer(&self.tube_uniforms, 0, bytemuck::bytes_of(tube_uniforms));
         queue.write_buffer(
             &self.visualizer_uniform_buffer,
@@ -699,7 +800,7 @@ impl PipelineState {
                                                       g: 0.01,
                                                       b: 0.02,
                                                       a: 1.0,
-                                                  }) */
+                                                  }), */
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -734,6 +835,33 @@ impl PipelineState {
             // render_pass.set_pipeline(&self.mesh_pipeline);
             // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
             // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
+        }
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SDF Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, //wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            if let Some(bounds) = bounds {
+                render_pass.set_viewport(bounds.0, bounds.1, bounds.2, bounds.3, 0., 1.);
+            }
+
+            render_pass.set_pipeline(&self.sdf_pipeline);
+            render_pass.set_bind_group(0, &self.sdf_bind_group, &[]);
+            render_pass.draw(0..4, 0..1);
         }
     }
 }
@@ -991,6 +1119,18 @@ impl State {
             bytemuck::cast_slice(&[tube_uniforms]),
         );
 
+        let sdf_uniforms = SdfUniforms {
+            color: Vec4::new(0.0, 1.0, 1.0, 1.0),
+            origin: Vec3::new(0.0, 0.0, 0.0),
+            radius: 0.2,
+            view_projection: view_projection.inverse_or_zero(),
+        };
+        self.queue.write_buffer(
+            &self.pipeline_state.sdf_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&sdf_uniforms),
+        );
+
         // 2. RMF Visualizer Uniforms aktualisieren
         let vis_uniforms = RmfVisualizerUniforms {
             view_projection,
@@ -1014,6 +1154,7 @@ impl State {
             ),
             &tube_uniforms,
             &vis_uniforms,
+            &sdf_uniforms,
             self.curve.segments(),
         );
 

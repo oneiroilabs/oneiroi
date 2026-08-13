@@ -215,12 +215,12 @@ impl Window {
         //    .push(1, iced_aw::TabLabel::Text("Test".into()))
         //    .set_active_tab(&1);
 
-        //let viewport = shader(&self.scene).width(400).height(300);
+        let viewport = shader(&self.scene).width(400).height(300);
         let content = iced::widget::column![
             scale_input,
             title_input,
             new_window_button,
-            //viewport //tab_bar,
+            viewport //tab_bar,
         ]
         .spacing(50)
         .width(400)

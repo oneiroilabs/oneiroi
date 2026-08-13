@@ -1,7 +1,9 @@
-use glam::Vec4;
+use glam::{Vec2, Vec3, Vec4};
 use iced::widget::shader::{self, Pipeline, Primitive};
 use oneiroi_core::curve::nurbs::CubicNurbs;
-use oneiroi_wgpu::{PipelineState, RmfVisualizerUniforms, State, TubeUniforms, orbit::OrbitCamera};
+use oneiroi_wgpu::{
+    PipelineState, RmfVisualizerUniforms, SdfUniforms, State, TubeUniforms, orbit::OrbitCamera,
+};
 
 #[derive(Debug)]
 pub struct OneiroiScene {
@@ -9,6 +11,7 @@ pub struct OneiroiScene {
     camera: OrbitCamera,
     vis_uniforms: RmfVisualizerUniforms,
     tube_uniforms: TubeUniforms,
+    sdf_uniforms: SdfUniforms,
 }
 
 impl OneiroiScene {
@@ -86,12 +89,19 @@ impl OneiroiScene {
         let tube_uniforms = TubeUniforms::new(view_projection, tube_radius, radial_segments);
 
         let vis_uniforms = RmfVisualizerUniforms::new(view_projection, 0.25);
+        let sdf_uniforms = SdfUniforms {
+            color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            origin: Vec3::new(0., 0., 0.),
+            radius: 0.2,
+            view_projection: view_projection.inverse(),
+        };
 
         Self {
             curve,
             camera,
             vis_uniforms,
             tube_uniforms,
+            sdf_uniforms,
         }
     }
 }
@@ -112,6 +122,7 @@ impl<Message> shader::Program<Message> for OneiroiScene {
             curve: self.curve.clone(),
             vis_uniforms: self.vis_uniforms,
             tube_uniforms: self.tube_uniforms,
+            sdf_uniforms: self.sdf_uniforms,
         }
     }
 }
@@ -122,6 +133,7 @@ pub struct Prim {
     curve: CubicNurbs,
     vis_uniforms: RmfVisualizerUniforms,
     tube_uniforms: TubeUniforms,
+    sdf_uniforms: SdfUniforms,
 }
 
 impl Primitive for Prim {
@@ -146,6 +158,7 @@ impl Primitive for Prim {
             size,
             &self.tube_uniforms,
             &self.vis_uniforms,
+            &self.sdf_uniforms,
             self.curve.segments(),
         );
     }
