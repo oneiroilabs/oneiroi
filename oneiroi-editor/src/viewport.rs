@@ -19,6 +19,12 @@ pub struct OneiroiScene {
     sdf_uniforms: SdfUniforms,
 }
 
+impl Default for OneiroiScene {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OneiroiScene {
     pub fn new() -> Self {
         let curve = {
@@ -67,28 +73,13 @@ impl OneiroiScene {
             oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec)
         };
 
-        let camera = {
-            let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
-
-            /* let aspect_ratio = size.width as f32 / size.height as f32;
-            let view = camera.build_view_matrix();
-            let projection = glam::Mat4::perspective_infinite_reverse_lh(
-                45.0f32.to_radians(),
-                aspect_ratio,
-                0.1,
-            );
-            let view_projection_matrix = projection * view; */
-            camera
-        };
+        let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
 
         let radial_segments = 16;
 
         let tube_radius = 0.2;
 
-        let view = camera.build_view_matrix();
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 4. / 3., 0.1);
-        let view_projection = projection * view;
+        let view_projection = camera.view_projection(4. / 3.);
 
         let tube_uniforms = TubeUniforms::new(view_projection, tube_radius, radial_segments);
 
@@ -110,10 +101,7 @@ impl OneiroiScene {
     }
 
     fn test_ray(&self, ndc_x: f32, ndc_y: f32) -> bool {
-        let view = self.camera.build_view_matrix();
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), 4. / 3., 0.1);
-        let inv_view_proj = (projection * view).inverse_or_zero();
+        let inv_view_proj = self.camera.view_projection(4. / 3.).inverse_or_zero();
 
         let near_target = inv_view_proj * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
         let world_near = near_target.xyz() / near_target.w;
@@ -153,23 +141,18 @@ impl<Message> shader::Program<Message> for OneiroiScene {
         bounds: iced::Rectangle,
         cursor: iced_core::mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
-        if let Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) = event {
-            if let Some(cursor_position) = cursor.position_in(bounds) {
-                // 1. Pixel-Koordinaten in NDC-Raum (-1.0 bis 1.0) umrechnen
-                // Wichtig: WebGPU NDC Y geht von unten (-1) nach oben (1)
-                let ndc_x = (cursor_position.x / bounds.width) * 2.0 - 1.0;
-                let ndc_y = 1.0 - (cursor_position.y / bounds.height) * 2.0;
+        if let Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) = event
+            && let Some(cursor_position) = cursor.position_in(bounds)
+        {
+            let ndc_x = (cursor_position.x / bounds.width) * 2.0 - 1.0;
+            let ndc_y = 1.0 - (cursor_position.y / bounds.height) * 2.0;
 
-                let instant = Instant::now();
-                if self.test_ray(ndc_x, ndc_y) {
-                    println!("SDF Kugel im GUI-Widget angeklickt!");
-                    // Hier müsstest du die Message zurückgeben.
-                    // Da OneiroiScene aktuell generisch über <Message> ist, kannst du eine
-                    // Callback-Struktur nutzen oder OneiroiScene fest an dein Custom Message-Enum binden.
-                    //return Some(shader::Action::publish(Message::));
-                }
-                println!("{:?}", instant.elapsed());
+            let instant = Instant::now();
+            if self.test_ray(ndc_x, ndc_y) {
+                println!("Clicked Sphere");
+                //TODO return message
             }
+            println!("{:?}", instant.elapsed());
         }
         None
     }

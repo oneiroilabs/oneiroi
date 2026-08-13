@@ -952,20 +952,7 @@ impl State {
 
         let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
 
-        let num_segments = curve.segments().len() as u32;
-        let total_evaluated_points = num_segments * 32;
-
-        let radial_segments = 16u32;
-
-        let tube_radius = 0.5f32;
-        let aspect_ratio = size.width as f32 / size.height as f32;
-
         let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
-
-        let view = camera.build_view_matrix();
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
-        let view_projection_matrix = projection * view;
 
         let state = State {
             pipeline_state: PipelineState::new(&device, surface_format),
@@ -987,10 +974,8 @@ impl State {
 
     pub fn update_camera_buffers(&self) {
         let aspect_ratio = self.size.width as f32 / self.size.height as f32;
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
-        let view = self.camera.build_view_matrix();
-        let view_projection = projection * view;
+
+        let view_projection = self.camera.view_projection(aspect_ratio);
 
         // 1. Tube Uniforms aktualisieren
         let tube_uniforms = TubeUniforms {
@@ -1100,10 +1085,7 @@ impl State {
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
         let aspect_ratio = self.size.width as f32 / self.size.height as f32;
-        let projection =
-            glam::Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
-        let view = self.camera.build_view_matrix();
-        let view_projection = projection * view;
+        let view_projection = self.camera.view_projection(aspect_ratio);
 
         // 1. Tube Uniforms aktualisieren
         let tube_uniforms = TubeUniforms {

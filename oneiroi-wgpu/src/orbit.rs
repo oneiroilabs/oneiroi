@@ -1,26 +1,26 @@
+use glam::{Mat4, Vec3};
+
 #[derive(Debug, Clone, Copy)]
 pub struct OrbitCamera {
-    pub target: glam::Vec3,
-    pub yaw: f32,    // Rotation um die Y-Achse (in Radiant)
-    pub pitch: f32,  // Rotation hoch/runter (in Radiant)
-    pub radius: f32, // Abstand zum Target
-    pub is_dragging: bool,
+    target: glam::Vec3,
+    yaw: f32,
+    pitch: f32,
+    radius: f32,
+    dragging: bool,
 }
 
 impl OrbitCamera {
-    pub fn new(target: glam::Vec3, radius: f32) -> Self {
+    pub fn new(target: Vec3, radius: f32) -> Self {
         Self {
             target,
             yaw: 0.0f32.to_radians(),
             pitch: 0.0f32.to_radians(),
             radius,
-            is_dragging: false,
+            dragging: false,
         }
     }
 
-    // Berechnet die aktuelle View-Matrix basierend auf den Orbit-Koordinaten
-    pub fn build_view_matrix(&self) -> glam::Mat4 {
-        // Sphärische Koordinaten in kartesische umrechnen
+    fn view_matrix(&self) -> Mat4 {
         let cos_pitch = self.pitch.cos();
         let sin_pitch = self.pitch.sin();
         let cos_yaw = self.yaw.cos();
@@ -33,6 +33,34 @@ impl OrbitCamera {
                 self.radius * cos_pitch * cos_yaw,
             );
 
-        glam::Mat4::look_at_lh(camera_pos, self.target, glam::Vec3::Y)
+        Mat4::look_at_lh(camera_pos, self.target, Vec3::Y)
+    }
+
+    pub fn view_projection(&self, aspect_ratio: f32) -> Mat4 {
+        let view = self.view_matrix();
+        let projection =
+            Mat4::perspective_infinite_reverse_lh(45.0f32.to_radians(), aspect_ratio, 0.1);
+        projection * view
+    }
+
+    pub fn set_dragging(&mut self, dragging: bool) {
+        self.dragging = dragging
+    }
+
+    pub fn radius_delta(&mut self, delta: f32) {
+        self.radius -= delta;
+        //TODO maybe clamp?
+    }
+    pub fn yaw_pitch_delta(&mut self, yaw: f32, pitch: f32) {
+        self.yaw += yaw;
+        self.pitch -= pitch;
+        // Prevent camera flipping over.
+        self.pitch = self
+            .pitch
+            .clamp(-89.0f32.to_radians(), 89.0f32.to_radians());
+    }
+
+    pub fn dragging(&self) -> bool {
+        self.dragging
     }
 }

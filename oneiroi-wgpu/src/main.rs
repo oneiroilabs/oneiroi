@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use oneiroi_wgpu::State;
-use wgpu::{BindGroup, ComputePipeline, RenderPipeline, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
 };
 
@@ -54,7 +53,9 @@ impl ApplicationHandler for App {
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
-                state.camera.is_dragging = button_state == winit::event::ElementState::Pressed;
+                state
+                    .camera
+                    .set_dragging(button_state == winit::event::ElementState::Pressed);
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -64,8 +65,7 @@ impl ApplicationHandler for App {
                 };
 
                 let zoom_sensitivity = 0.5f32;
-                state.camera.radius -= scroll_amount * zoom_sensitivity;
-                state.camera.radius = state.camera.radius.clamp(2.0, 100.0);
+                state.camera.radius_delta(scroll_amount * zoom_sensitivity);
 
                 state.update_camera_buffers();
             }
@@ -82,16 +82,12 @@ impl ApplicationHandler for App {
     ) {
         let state = self.state.as_mut().unwrap();
         if let winit::event::DeviceEvent::MouseMotion { delta } = event
-            && state.camera.is_dragging
+            && state.camera.dragging()
         {
             let sensitivity = 0.005f32;
-            state.camera.yaw += delta.0 as f32 * sensitivity;
-            state.camera.pitch -= delta.1 as f32 * sensitivity;
-
-            state.camera.pitch = state
+            state
                 .camera
-                .pitch
-                .clamp(-89.0f32.to_radians(), 89.0f32.to_radians());
+                .yaw_pitch_delta(delta.0 as f32 * sensitivity, delta.1 as f32 * sensitivity);
 
             state.update_camera_buffers();
         }
