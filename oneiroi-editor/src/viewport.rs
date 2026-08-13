@@ -3,12 +3,18 @@ use std::time::Instant;
 use glam::{Vec2, Vec3, Vec4, Vec4Swizzles};
 use iced::{
     Event,
-    widget::shader::{self, Pipeline, Primitive},
+    widget::{
+        Action,
+        shader::{self, Pipeline, Primitive},
+    },
+    window::Id,
 };
 use oneiroi_core::curve::nurbs::CubicNurbs;
 use oneiroi_wgpu::{
     PipelineState, RmfVisualizerUniforms, SdfUniforms, State, TubeUniforms, orbit::OrbitCamera,
 };
+
+use crate::Message;
 
 #[derive(Debug)]
 pub struct OneiroiScene {
@@ -129,7 +135,7 @@ impl OneiroiScene {
     }
 }
 
-impl<Message> shader::Program<Message> for OneiroiScene {
+impl shader::Program<Message> for OneiroiScene {
     type State = ();
 
     type Primitive = Prim;
@@ -151,6 +157,7 @@ impl<Message> shader::Program<Message> for OneiroiScene {
             if self.test_ray(ndc_x, ndc_y) {
                 println!("Clicked Sphere");
                 //TODO return message
+                return Some(Action::publish(Message::SphereHit(Id::unique())));
             }
             println!("{:?}", instant.elapsed());
         }
