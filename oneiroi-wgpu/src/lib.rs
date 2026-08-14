@@ -34,6 +34,11 @@ impl TubeUniforms {
             _pad1: 0,
         }
     }
+
+    pub fn set_view_proj(mut self, view_projection: Mat4) -> Self {
+        self.view_projection = view_projection;
+        self
+    }
 }
 
 #[repr(C)]
@@ -66,15 +71,44 @@ impl RmfVisualizerUniforms {
             _pad2: 0,
         }
     }
+
+    pub fn set_view_proj(mut self, view_projection: Mat4) -> Self {
+        self.view_projection = view_projection;
+        self
+    }
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SdfUniforms {
-    pub view_projection: glam::Mat4,
-    pub color: Vec4,
-    pub origin: Vec3,
-    pub radius: f32,
+    view_projection: glam::Mat4,
+    color: Vec4,
+    origin: Vec3,
+    radius: f32,
+}
+
+impl SdfUniforms {
+    pub fn new(color: Vec4, origin: Vec3, radius: f32) -> Self {
+        Self {
+            view_projection: Mat4::IDENTITY,
+            color,
+            origin,
+            radius,
+        }
+    }
+
+    pub fn set_view_proj(mut self, view_projection: Mat4) -> Self {
+        self.view_projection = view_projection;
+        self
+    }
+
+    pub fn origin(&self) -> Vec3 {
+        self.origin
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
 }
 
 pub struct State {

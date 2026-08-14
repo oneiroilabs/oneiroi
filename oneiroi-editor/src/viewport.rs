@@ -90,12 +90,8 @@ impl OneiroiScene {
         let tube_uniforms = TubeUniforms::new(view_projection, tube_radius, radial_segments);
 
         let vis_uniforms = RmfVisualizerUniforms::new(view_projection, 0.25);
-        let sdf_uniforms = SdfUniforms {
-            color: Vec4::new(1.0, 0.0, 0.0, 1.0),
-            origin: Vec3::new(0., 0., 0.),
-            radius: 0.2,
-            view_projection: view_projection.inverse(),
-        };
+        let sdf_uniforms =
+            SdfUniforms::new(Vec4::new(1.0, 0.0, 0.0, 1.0), Vec3::new(0., 0., 0.), 0.2);
 
         Self {
             curve,
@@ -118,10 +114,10 @@ impl OneiroiScene {
         let ray_origin = world_near;
         let ray_dir = (world_dir_p - world_near).normalize();
 
-        let oc = ray_origin - self.sdf_uniforms.origin;
+        let oc = ray_origin - self.sdf_uniforms.origin();
 
         let b = oc.dot(ray_dir);
-        let c = oc.dot(oc) - (self.sdf_uniforms.radius * self.sdf_uniforms.radius);
+        let c = oc.dot(oc) - (self.sdf_uniforms.radius() * self.sdf_uniforms.radius());
 
         let discriminant = b * b - c;
 
@@ -136,13 +132,13 @@ impl OneiroiScene {
 }
 
 impl shader::Program<Message> for OneiroiScene {
-    type State = ();
+    type State = (OrbitCamera, Vec2);
 
     type Primitive = Prim;
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: &iced_core::Event,
         bounds: iced::Rectangle,
         cursor: iced_core::mouse::Cursor,
@@ -161,6 +157,51 @@ impl shader::Program<Message> for OneiroiScene {
             }
             println!("{:?}", instant.elapsed());
         }
+
+        match event {
+            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Middle)) => {
+                if let Some(cursor_position) = cursor.position_in(bounds) {
+                    state.0.set_dragging(true);
+                    state.1 = Vec2::new(cursor_position.x, cursor_position.y);
+                }
+            }
+
+            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Middle)) => {
+                state.0.set_dragging(false);
+            }
+
+            Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                if state.0.dragging()
+                    && let Some(cursor_position) = cursor.position_in(bounds)
+                {
+                    let current_pos = glam::Vec2::new(cursor_position.x, cursor_position.y);
+                    let delta = current_pos - state.1;
+
+                    let sensitivity = 0.005;
+
+                    state.1 = current_pos;
+
+                    state
+                        .0
+                        .yaw_pitch_delta(delta.x * sensitivity, delta.y * sensitivity);
+
+                    return Some(Action::request_redraw());
+                }
+            }
+            Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                if let Some(_cursor_position) = cursor.position_in(bounds) {
+                    let scroll_amount = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. } => *y,
+                        iced::mouse::ScrollDelta::Pixels { y, .. } => y * 0.02,
+                    };
+                    println!("{scroll_amount}");
+                    state.0.radius_delta(scroll_amount);
+
+                    return Some(Action::request_redraw());
+                }
+            }
+            _ => {}
+        }
         None
     }
 
@@ -171,11 +212,17 @@ impl shader::Program<Message> for OneiroiScene {
         bounds: iced::Rectangle,
     ) -> Self::Primitive {
         Prim {
-            camera: self.camera,
+            camera: state.0,
             curve: self.curve.clone(),
-            vis_uniforms: self.vis_uniforms,
-            tube_uniforms: self.tube_uniforms,
-            sdf_uniforms: self.sdf_uniforms,
+            vis_uniforms: self
+                .vis_uniforms
+                .set_view_proj(state.0.view_projection(4. / 3.)),
+            tube_uniforms: self
+                .tube_uniforms
+                .set_view_proj(state.0.view_projection(4. / 3.)),
+            sdf_uniforms: self
+                .sdf_uniforms
+                .set_view_proj(state.0.view_projection(4. / 3.).inverse()),
         }
     }
 }

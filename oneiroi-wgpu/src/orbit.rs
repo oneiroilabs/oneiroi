@@ -9,6 +9,12 @@ pub struct OrbitCamera {
     dragging: bool,
 }
 
+impl Default for OrbitCamera {
+    fn default() -> Self {
+        Self::new(Vec3::new(0.0, 0.0, 0.0), 10.)
+    }
+}
+
 impl OrbitCamera {
     pub fn new(target: Vec3, radius: f32) -> Self {
         Self {
