@@ -292,7 +292,7 @@ impl PipelineState {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::MESH,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             min_binding_size: None,
@@ -302,7 +302,7 @@ impl PipelineState {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::MESH,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             min_binding_size: None,
@@ -593,11 +593,11 @@ impl PipelineState {
         let mesh_shader_module =
             device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
 
-        let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        /* let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Mesh Render Layout"),
             bind_group_layouts: &[Some(&render_bind_group_layout)],
             immediate_size: 0,
-        });
+        }); */
 
         let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Mesh Shading Tube Pipeline"),
@@ -617,7 +617,13 @@ impl PipelineState {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Greater),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &mesh_shader_module,
@@ -868,7 +874,7 @@ impl PipelineState {
 
             render_pass.set_pipeline(&self.mesh_pipeline);
             render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
-            render_pass.draw_mesh_tasks(num_segments, 1, 1);
+            render_pass.draw_mesh_tasks(num_segments * 32 - 1, 1, 1);
         }
 
         {

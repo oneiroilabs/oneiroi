@@ -49,8 +49,6 @@ var<workgroup> mesh_output: MeshOutput;
 
 const PI: f32 = 3.14159265359;
 
-// Max limits declared up front for GPU boundaries. 
-// 32 vertices (16 local, 16 next ring) & 32 triangles forming the cylinder walls.
 @mesh(mesh_output)
 @workgroup_size(16, 1, 1) 
 fn ms_main(
@@ -61,30 +59,25 @@ fn ms_main(
     let total_subdivisions = config.radial_segments;
     let local_vertex_id = local_id.x;
 
-    // Set the output sizes dynamically per workgroup
     let num_vertices = total_subdivisions * 2u;
     let num_triangles = total_subdivisions * 2u;
     mesh_output.vertex_count  = num_vertices;
     mesh_output.primitive_count = num_triangles;
 
-    // Compute layout angle positions
     let angle = (f32(local_vertex_id) / f32(total_subdivisions)) * 2.0 * PI;
     let cos_a = cos(angle);
     let sin_a = sin(angle);
 
-    // Vertex 1: Current Frame Ring
     let frame_curr = evaluated_frames[inst_idx];
     let normal_curr = (frame_curr.normal * cos_a) + (frame_curr.binormal * sin_a);
     let pos_curr = frame_curr.position + (normal_curr * config.tube_radius);
     let v_idx_curr = local_vertex_id;
 
-    // Vertex 2: Next Frame Ring
     let frame_next = evaluated_frames[inst_idx + 1u];
     let normal_next = (frame_next.normal * cos_a) + (frame_next.binormal * sin_a);
     let pos_next = frame_next.position + (normal_next * config.tube_radius);
     let v_idx_next = local_vertex_id + total_subdivisions;
 
-    // Write current ring vertex out
     let clip_pos_curr = config.view_projection * vec4<f32>(pos_curr, 1.0);
     //mesh_output.vertices[v_idx_curr].position = clip_pos_curr;
     mesh_output.vertices[v_idx_curr] = VertexOutput(vec4<f32>(pos_curr,1.0),normalize(normal_curr));
@@ -106,7 +99,6 @@ fn ms_main(
     //    pos_next
     //);
 
-    // Topology Indexing Generation (Generating indices for the quad faces)
     let next_local_id = (local_vertex_id + 1u) % total_subdivisions;
     
     let i0 = local_vertex_id;
@@ -157,7 +149,7 @@ fn evaluate_voronoi_2d(p: vec2<f32>, jitter: f32) -> vec2<f32> {
     return vec2<f32>(min_dist, cell_id);
 }
 
-fn generate_triplanar_voronoi(world_pos: vec3<f32>, world_normal: vec3<f32>, params: TriplanarVoronoiParams) -> vec4<f32> { 
+fn generate_triplanar_voronoi(world_pos: vec4<f32>, world_normal: vec3<f32>, params: TriplanarVoronoiParams) -> vec4<f32> { 
     var weights = abs(world_normal);
     weights = pow(weights, vec3<f32>(params.triplanar_sharpness));
     weights = weights / (weights.x + weights.y + weights.z);
