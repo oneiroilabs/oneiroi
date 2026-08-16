@@ -3,7 +3,7 @@ use std::sync::Arc;
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use oneiroi_core::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
 use wgpu::{
-    BindGroup, BindGroupLayout, Buffer, ComputePipeline, RenderPipeline, TextureFormat,
+    BindGroup, BindGroupLayout, Buffer, ComputePipeline, MeshState, RenderPipeline, TextureFormat,
     util::DeviceExt,
 };
 use winit::{event_loop::OwnedDisplayHandle, window::Window};
@@ -153,7 +153,7 @@ pub struct PipelineState {
     sdf_uniform_buffer: wgpu::Buffer,
 
     depth_texture_view: wgpu::TextureView,
-    //mesh_pipeline: RenderPipeline,
+    mesh_pipeline: RenderPipeline,
     //mesh_bind_group_0: BindGroup,
 }
 
@@ -548,7 +548,7 @@ impl PipelineState {
             multiview_mask: None,
         });
 
-        /* let mesh_bind_group_layout =
+        /*  let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Tube Pure Mesh Layout"),
                 entries: &[
@@ -588,25 +588,25 @@ impl PipelineState {
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
-        });
+        }); */
 
         let mesh_shader_module =
             device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Mesh Render Layout"),
-            bind_group_layouts: &[Some(&mesh_bind_group_layout)],
+            bind_group_layouts: &[Some(&render_bind_group_layout)],
             immediate_size: 0,
         });
 
         let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Mesh Shading Tube Pipeline"),
-            layout: Some(&mesh_pipeline_layout),
-            task: Some(TaskState {
-                module: &mesh_shader_module,
-                entry_point: Some("ts_main"),
-                compilation_options: Default::default(),
-            }),
+            layout: Some(&render_pipeline_layout),
+            task: None, /* Some(TaskState {
+                            module: &mesh_shader_module,
+                            entry_point: Some("ts_main"),
+                            compilation_options: Default::default(),
+                        }) */
             mesh: MeshState {
                 module: &mesh_shader_module,
                 entry_point: Some("ms_main"),
@@ -631,7 +631,7 @@ impl PipelineState {
             }),
             cache: None,
             multiview: None,
-        }); */
+        });
 
         Self {
             compute_pipeline,
@@ -654,7 +654,7 @@ impl PipelineState {
             sdf_pipeline,
             sdf_bind_group,
             sdf_uniform_buffer,
-            // mesh_pipeline,
+            mesh_pipeline,
             //mesh_bind_group_0,
         }
     }
@@ -866,9 +866,9 @@ impl PipelineState {
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             }
 
-            // render_pass.set_pipeline(&self.mesh_pipeline);
-            // render_pass.set_bind_group(0, &self.mesh_bind_group_0, &[]);
-            // render_pass.draw_mesh_tasks(self.curve.segments.len() as u32, 1, 1);
+            render_pass.set_pipeline(&self.mesh_pipeline);
+            render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
+            render_pass.draw_mesh_tasks(num_segments, 1, 1);
         }
 
         {
@@ -906,14 +906,17 @@ impl State {
             Box::new(display),
         ));
         let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                force_fallback_adapter: true,
+                ..Default::default()
+            })
             .await
             .unwrap();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
-                required_features: wgpu::Features::SUBGROUP,
-                //| wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                required_features: wgpu::Features::SUBGROUP
+                    | wgpu::Features::EXPERIMENTAL_MESH_SHADER,
                 required_limits: adapter.limits(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
