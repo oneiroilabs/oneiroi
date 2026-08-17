@@ -12,7 +12,7 @@ use crate::orbit::OrbitCamera;
 
 pub mod orbit;
 
-pub const DEBUG: bool = false;
+pub const DEBUG: bool = true;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -154,7 +154,6 @@ pub struct PipelineState {
 
     depth_texture_view: wgpu::TextureView,
     mesh_pipeline: RenderPipeline,
-    //mesh_bind_group_0: BindGroup,
 }
 
 impl PipelineState {
@@ -590,15 +589,14 @@ impl PipelineState {
             ],
         }); */
 
-        let mesh_shader_module =
-            device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
-
         /* let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Mesh Render Layout"),
-            bind_group_layouts: &[Some(&render_bind_group_layout)],
-            immediate_size: 0,
+        label: Some("Mesh Render Layout"),
+        bind_group_layouts: &[Some(&render_bind_group_layout)],
+        immediate_size: 0,
         }); */
 
+        let mesh_shader_module =
+            device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
         let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Mesh Shading Tube Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -686,8 +684,6 @@ impl PipelineState {
             });
 
             self.depth_texture_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-            //self.depth_pipeline.update(device, &tex);
         }
     }
 
@@ -804,17 +800,6 @@ impl PipelineState {
             target.texture().width(),
             target.texture().height()
         );
-
-        /* let target = if target.texture().format() != wgpu::TextureFormat::Rgba8UnormSrgb {
-            println!("Conversion triggered!");
-            &target.texture().create_view(&wgpu::TextureViewDescriptor {
-                label: Some("sRGB View Casting for Iced"),
-                format: Some(wgpu::TextureFormat::Rgba8UnormSrgb),
-                ..Default::default()
-            })
-        } else {
-            target
-        }; */
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1020,7 +1005,6 @@ impl State {
 
         let view_projection = self.camera.view_projection(aspect_ratio);
 
-        // 1. Tube Uniforms aktualisieren
         let tube_uniforms = TubeUniforms {
             view_projection,
             tube_radius: 0.2f32,
@@ -1034,7 +1018,6 @@ impl State {
             bytemuck::cast_slice(&[tube_uniforms]),
         );
 
-        // 2. RMF Visualizer Uniforms aktualisieren
         let vis_uniforms = RmfVisualizerUniforms {
             view_projection,
             vector_scale: 0.25,
@@ -1130,7 +1113,6 @@ impl State {
         let aspect_ratio = self.size.width as f32 / self.size.height as f32;
         let view_projection = self.camera.view_projection(aspect_ratio);
 
-        // 1. Tube Uniforms aktualisieren
         let tube_uniforms = TubeUniforms {
             view_projection,
             tube_radius: 0.2f32,
@@ -1156,7 +1138,6 @@ impl State {
             bytemuck::bytes_of(&sdf_uniforms),
         );
 
-        // 2. RMF Visualizer Uniforms aktualisieren
         let vis_uniforms = RmfVisualizerUniforms {
             view_projection,
             vector_scale: 0.25,

@@ -39,8 +39,8 @@ struct PrimitiveOutput {
 }
 
 struct MeshOutput {
-    @builtin(vertices) vertices: array<VertexOutput, 3>,
-    @builtin(primitives) primitives: array<PrimitiveOutput, 1>,
+    @builtin(vertices) vertices: array<VertexOutput, 32>,
+    @builtin(primitives) primitives: array<PrimitiveOutput, 32>,
     @builtin(vertex_count) vertex_count: u32,
     @builtin(primitive_count) primitive_count: u32,
 }
@@ -80,7 +80,7 @@ fn ms_main(
 
     let clip_pos_curr = config.view_projection * vec4<f32>(pos_curr, 1.0);
     //mesh_output.vertices[v_idx_curr].position = clip_pos_curr;
-    mesh_output.vertices[v_idx_curr] = VertexOutput(vec4<f32>(pos_curr,1.0),normalize(normal_curr));
+    mesh_output.vertices[v_idx_curr] = VertexOutput(clip_pos_curr,normalize(normal_curr));
     // = VertexOutput(
     //    normalize(normal_curr),
     //    vec2<f32>(f32(local_vertex_id) / f32(total_subdivisions), f32(inst_idx) * 0.1),
@@ -91,7 +91,7 @@ fn ms_main(
     // Write next ring vertex out
     let clip_pos_next = config.view_projection * vec4<f32>(pos_next, 1.0);
     //mesh_output.vertices[v_idx_next].position = clip_pos_next;
-    mesh_output.vertices[v_idx_next]= VertexOutput(vec4<f32>(pos_next,1.0),normalize(normal_next));;
+    mesh_output.vertices[v_idx_next]= VertexOutput(clip_pos_next,normalize(normal_next));;
     // = VertexOutput(
     //    normalize(normal_next),
     //    vec2<f32>(f32(local_vertex_id) / f32(total_subdivisions), f32(inst_idx + 1u) * 0.1),
