@@ -31,7 +31,14 @@ impl HeterogeneousArena {
 
 #[derive(Clone, Copy)]
 pub enum StorageLocation {
-    F64(f32),
+    F32(f32),
     CubicNurbs(u32, u32),
     Matrix(usize),
+}
+
+pub trait GlobalCache {
+    //type Index;
+
+    fn get_unchecked<T>(&self, index: u32) -> T;
+    fn set_unchecked<T>(&self, index: u32, value: T);
 }

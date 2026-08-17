@@ -2,22 +2,18 @@ use glam::Vec2;
 
 use crate::curve::{Curve, RmfSample, ops::resample::ResampleIter};
 
-pub trait IntoCurveProfile {
-    fn profile(&self) -> &[Vec2];
-}
-
 pub struct CurveSweepIter<
     'a,
-    Sub: Iterator<Item = RmfSample>,
-    Profile: IntoCurveProfile,
-    Taper: Curve<Vec2>,
+    Target: Iterator<Item = RmfSample>,
+    Profile: Curve<Vec2>,
+    Taper: Curve<f32>,
 > {
     // Upstream resampled path stream
-    primary: &'a Sub,
+    target: &'a Target,
 
-    profile: &'a Profile,
+    profile: Option<&'a Profile>,
 
-    taper: &'a Taper,
+    taper: Option<&'a Taper>,
     /* // The cross-section shape data (borrowed, no allocation)
     profile: &'a [ProfileVertex],
 

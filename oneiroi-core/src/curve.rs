@@ -6,13 +6,13 @@ use glam::Vec3;
 pub mod nurbs;
 pub mod ops;
 
-pub trait Curve<Sv> {
+pub trait Curve<Sample> {
     // Required methods
     fn domain(&self) -> Range<f32>;
-    fn sample_unchecked(&self, t: f32) -> Sv;
+    fn sample_unchecked(&self, t: f32) -> Sample;
 
     // Provided methods
-    fn sample(&self, t: f32) -> Sv;
+    fn sample(&self, t: f32) -> Sample;
 
     fn length(&self) -> f32;
 

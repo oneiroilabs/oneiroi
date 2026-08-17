@@ -7,7 +7,7 @@ members = [
     #"oneiroi-bevy",
     "oneiroi-wgpu",
     "oneiroi-core",
-    "oneiroi-editor",
+    "oneiroi-editor", "oneiroi-nodes",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
