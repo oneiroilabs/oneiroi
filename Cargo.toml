@@ -41,6 +41,7 @@ bytemuck = { version = "1.25" }
 encase = { version = "0.12" }
 env_logger = { version = "0.11" }
 serde = { version = "1" }
+mlua = { version = "0.12", features = ["luau"] }
 
 
 [patch.crates-io]

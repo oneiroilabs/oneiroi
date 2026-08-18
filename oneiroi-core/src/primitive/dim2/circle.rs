@@ -1,5 +1,3 @@
-/* use std::range::Range;
-
 use glam::Vec2;
 
 use crate::curve::Curve;
@@ -16,10 +14,6 @@ impl Circle {
 }
 
 impl Curve<Vec2> for Circle {
-    fn domain(&self) -> core::range::Range<f32> {
-        Range::from(f32::MIN..f32::MAX)
-    }
-
     fn sample_unchecked(&self, t: f32) -> Vec2 {
         todo!()
     }
@@ -27,4 +21,16 @@ impl Curve<Vec2> for Circle {
     fn sample(&self, t: f32) -> Vec2 {
         todo!()
     }
-} */
+
+    fn domain(&self) -> std::ops::Range<f32> {
+        todo!()
+    }
+
+    fn length(&self) -> f32 {
+        todo!()
+    }
+
+    fn t_at_distance(&self, distance: f32) -> f32 {
+        todo!()
+    }
+}
