@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 
-struct UniqueGraph {
+struct GraphDef {
     graph: u32,
     instances: u32,
 }
 
 pub struct OneiroiData {
-    compiled_graphs: HashMap<u32, UniqueGraph>,
+    compiled_graphs: HashMap<u32, GraphDef>,
 }
 
 // The Graph is compiled once.

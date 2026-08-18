@@ -1,4 +1,4 @@
-use oneiroi_core::data_type::DataType;
+use oneiroi_core::types::DataType;
 use serde::{Deserialize, Serialize};
 
 /* use crate::{

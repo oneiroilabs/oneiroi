@@ -1,15 +1,11 @@
-use std::collections::HashMap;
-
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
-use crate::{curve::nurbs::CubicNurbsSegmentCache, data_type::DataType};
+use crate::{curve::nurbs::CubicNurbsSegmentCache, types::DataType};
 
-// Idea how to model the GPU cache for the Graphs without overhead. Should work with bindless iiuc.
-// The accessors HashMap would need to be moved out and maybe codegened into the arguments itself because the graph is baked hence we should be able to use hard offsets.
+/// This is an arena available to [DataType]s
 pub struct HeterogeneousArena {
     vectors: Vec<Vec4>,
     cubic_nurbs: Vec<CubicNurbsSegmentCache>,
-    //accessors: HashMap<u32, StorageLocation>,
 }
 
 trait ArenaAccess<T: DataType> {

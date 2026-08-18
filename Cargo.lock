@@ -5755,8 +5755,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "iced_test"
-version = "0.15.0-dev"
-source = "git+https://github.com/kistz/iced.git?branch=patch-features#e6b1fe17b2edae1aa165334dcad9a984a9b0957e"

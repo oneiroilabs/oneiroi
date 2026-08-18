@@ -42,6 +42,7 @@ encase = { version = "0.12" }
 env_logger = { version = "0.11" }
 serde = { version = "1" }
 mlua = { version = "0.12", features = ["luau"] }
+fixedbitset = { version = "0" }
 
 
 [patch.crates-io]
@@ -49,4 +50,4 @@ iced = { git = "https://github.com/kistz/iced.git", branch = "patch-features" } 
 iced_core = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
 iced_runtime = { git = "https://github.com/kistz/iced.git", branch = "patch-features" } #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
 iced_widget = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }  #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_test = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+#iced_test = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
