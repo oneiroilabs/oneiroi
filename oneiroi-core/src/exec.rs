@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use fixedbitset::FixedBitSet;
+use mlua::{Function, Lua};
 
 use crate::{arena::Arena, types::DataType};
 
@@ -13,18 +14,24 @@ struct GraphDef {
     // This could be used for gc if instances is 0 we have an empty slot and can be overridden.
     // The type is so small tho that we should maybe just retain the thing.
     instances: u32,
-    connectivity_masks: Vec<FixedBitSet>,
-    nodes: Vec<Nodes>,
+    connectivity_masks: Box<[FixedBitSet]>,
+    nodes: Box<[Nodes]>,
     variable_count: u32,
-    //scripts: Vec<
+    scripts: Box<[Function]>,
+}
+
+impl GraphDef {
+    fn mhm(&self) {
+        //self.scripts[0].call(args)
+    }
 }
 
 enum Nodes {}
 
-struct GraphInstance {
-    changeset: FixedBitSet,
+pub struct GraphInstance {
     graph_id: u32,
     instance_id: u32,
+    changeset: FixedBitSet,
     variables: Box<[Variable]>,
 }
 
@@ -33,12 +40,19 @@ struct Variable(u32);
 pub struct OneiroiData {
     compiled_graphs: HashMap<u32, GraphDef>,
     arena: Arena,
+    script: Lua,
 }
 
 impl OneiroiData {
     pub fn set_node_variable<T: DataType>(&self, value: T) {}
 
     pub fn evaluate_graph(&self, instance: &mut GraphInstance) {}
+}
+
+pub struct DebugGraph {
+    nodes: Vec<Nodes>,
+    node_graph: u32,
+    property_graph: u32,
 }
 
 // The Graph is compiled once.

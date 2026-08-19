@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use glam::{Vec2, Vec4};
+use mlua::Lua;
 
 fn main() {
-    let control_points = vec![
+    /* let control_points = vec![
         Vec4::new(0.0, 0.0, 0.0, 1.),
         Vec4::new(1.0, 2.0, 0.0, 1.),
         Vec4::new(2.0, -1.0, 0.0, 1.),
@@ -34,7 +35,30 @@ fn main() {
             let angle = (i as f32 / 16.0) * std::f32::consts::TAU;
             Vec2::new(angle.cos(), angle.sin())
         })
-        .collect();
+        .collect(); */
+
+    let lua = Lua::new();
+    lua.sandbox(true).unwrap();
+    //lua.globals().set("bink", 8);
+    let chunk = lua.load(
+        r#"
+    at("test")
+    bink=25
+    return bink+3"#,
+    );
+
+    let table = lua.create_table().unwrap();
+    let func = lua
+        .create_function(|_, a: String| Ok(println!("Got: {a}")))
+        .unwrap();
+    table.set("bink", 12).unwrap();
+    table.set("at", func).unwrap();
+
+    //let res: u32 = chunk.eval().unwrap();
+    let func = chunk.into_function().unwrap();
+    func.set_environment(table).unwrap();
+    let res: u32 = func.call(()).unwrap();
+    println!("{res}");
 
     /* let (vertices, indices) = curve.sweep_profile_transformed(
         &circle_profile,
