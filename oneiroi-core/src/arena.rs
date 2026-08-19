@@ -3,7 +3,7 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 use crate::{curve::nurbs::CubicNurbsSegmentCache, types::DataType};
 
 /// This is an arena available to [DataType]s
-pub struct HeterogeneousArena {
+pub struct Arena {
     vectors: Vec<Vec4>,
     cubic_nurbs: Vec<CubicNurbsSegmentCache>,
 }
@@ -13,7 +13,7 @@ trait ArenaAccess<T: DataType> {
     fn set(&mut self, index: u32, value: T) -> u32;
 }
 
-impl ArenaAccess<Vec3> for HeterogeneousArena {
+impl ArenaAccess<Vec3> for Arena {
     #[inline(always)]
     fn get(&self, index: u32) -> Option<Vec3> {
         self.vectors
@@ -28,7 +28,7 @@ impl ArenaAccess<Vec3> for HeterogeneousArena {
     }
 }
 
-impl ArenaAccess<Vec2> for HeterogeneousArena {
+impl ArenaAccess<Vec2> for Arena {
     #[inline(always)]
     fn get(&self, index: u32) -> Option<Vec2> {
         self.vectors
@@ -43,7 +43,7 @@ impl ArenaAccess<Vec2> for HeterogeneousArena {
     }
 }
 
-impl HeterogeneousArena {
+impl Arena {
     #[inline(always)]
     pub fn get<T: DataType>(&self, idx: u32) -> Option<T>
     where

@@ -3105,6 +3105,7 @@ version = "0.0.0"
 dependencies = [
  "bytemuck",
  "encase",
+ "fixedbitset",
  "glam 0.32.1",
  "wgpu 29.0.4",
 ]

@@ -2,13 +2,43 @@
 
 use std::collections::HashMap;
 
+use fixedbitset::FixedBitSet;
+
+use crate::{arena::Arena, types::DataType};
+
+/// Shared Graph definition of a compiled Graph
 struct GraphDef {
+    //TODO this could maybe be removed if HashMap with graph path hash is used. hmmge.
     graph: u32,
+    // This could be used for gc if instances is 0 we have an empty slot and can be overridden.
+    // The type is so small tho that we should maybe just retain the thing.
     instances: u32,
+    connectivity_masks: Vec<FixedBitSet>,
+    nodes: Vec<Nodes>,
+    variable_count: u32,
+    //scripts: Vec<
 }
+
+enum Nodes {}
+
+struct GraphInstance {
+    changeset: FixedBitSet,
+    graph_id: u32,
+    instance_id: u32,
+    variables: Box<[Variable]>,
+}
+
+struct Variable(u32);
 
 pub struct OneiroiData {
     compiled_graphs: HashMap<u32, GraphDef>,
+    arena: Arena,
+}
+
+impl OneiroiData {
+    pub fn set_node_variable<T: DataType>(&self, value: T) {}
+
+    pub fn evaluate_graph(&self, instance: &mut GraphInstance) {}
 }
 
 // The Graph is compiled once.
