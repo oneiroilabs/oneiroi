@@ -46,8 +46,8 @@ fixedbitset = { version = "0" }
 
 
 [patch.crates-io]
-iced = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }         #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_core = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_runtime = { git = "https://github.com/kistz/iced.git", branch = "patch-features" } #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-iced_widget = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }  #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
-#iced_test = { git = "https://github.com/kistz/iced.git", branch = "patch-features" }    #rev = "23604ff22ab0aad9e00b9327cb7b8546ed84db39" }
+iced = { path = "../iced/" }                #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_core = { path = "../iced/core" }       #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_runtime = { path = "../iced/runtime" } #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_widget = { path = "../iced/widget" }   #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+#iced_nodegraph = { git = "https://github.com/tuco86/iced_nodegraph.git", branch = "main" }

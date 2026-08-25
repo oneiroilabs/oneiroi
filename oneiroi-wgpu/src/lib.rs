@@ -153,7 +153,7 @@ pub struct PipelineState {
     sdf_uniform_buffer: wgpu::Buffer,
 
     depth_texture_view: wgpu::TextureView,
-    mesh_pipeline: RenderPipeline,
+    //mesh_pipeline: RenderPipeline,
 }
 
 impl PipelineState {
@@ -189,27 +189,12 @@ impl PipelineState {
             mapped_at_creation: false,
         });
 
-        /* let uniform_data = TubeUniforms {
-            view_projection: view_projection_matrix,
-            tube_radius,
-            radial_segments,
-            _pad0: 0,
-            _pad1: 0,
-        }; */
-
         let tube_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tube Render Uniform Buffer"),
             size: std::mem::size_of::<TubeUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        /* let indirect_args = DrawIndirectArgs {
-            vertex_count: if DEBUG { 6 } else { radial_segments * 6 },
-            instance_count: total_evaluated_points - 1,
-            first_vertex: 0,
-            first_instance: 0,
-        }; */
 
         let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tube Draw Indirect Buffer"),
@@ -291,7 +276,9 @@ impl PipelineState {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::MESH,
+                        visibility: wgpu::ShaderStages::VERTEX
+                            | wgpu::ShaderStages::MESH
+                            | wgpu::ShaderStages::TASK,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             min_binding_size: None,
@@ -301,7 +288,9 @@ impl PipelineState {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::MESH,
+                        visibility: wgpu::ShaderStages::VERTEX
+                            | wgpu::ShaderStages::MESH
+                            | wgpu::ShaderStages::TASK,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             min_binding_size: None,
@@ -371,14 +360,6 @@ impl PipelineState {
             cache: None,
             multiview_mask: None,
         });
-
-        /* let visualizer_uniform_data = RmfVisualizerUniforms {
-            view_projection: view_projection_matrix,
-            vector_scale: 0.25,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-        }; */
 
         let visualizer_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RMF Visualizer Uniform Buffer"),
@@ -547,64 +528,12 @@ impl PipelineState {
             multiview_mask: None,
         });
 
-        /*  let mesh_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Tube Pure Mesh Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            min_binding_size: None,
-                            has_dynamic_offset: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::MESH | wgpu::ShaderStages::TASK,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            min_binding_size: None,
-                            has_dynamic_offset: false,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let mesh_bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Mesh Render Bind Group"),
-            layout: &mesh_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: segments_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        }); */
-
-        /* let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Mesh Render Layout"),
-        bind_group_layouts: &[Some(&render_bind_group_layout)],
-        immediate_size: 0,
-        }); */
-
-        let mesh_shader_module =
+        /* let mesh_shader_module =
             device.create_shader_module(wgpu::include_wgsl!("tube_task_mesh.wgsl"));
         let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Mesh Shading Tube Pipeline"),
             layout: Some(&render_pipeline_layout),
-            task: None, /* Some(TaskState {
-                            module: &mesh_shader_module,
-                            entry_point: Some("ts_main"),
-                            compilation_options: Default::default(),
-                        }) */
+            task: None,
             mesh: MeshState {
                 module: &mesh_shader_module,
                 entry_point: Some("ms_main"),
@@ -635,7 +564,7 @@ impl PipelineState {
             }),
             cache: None,
             multiview: None,
-        });
+        }); */
 
         Self {
             compute_pipeline,
@@ -658,8 +587,7 @@ impl PipelineState {
             sdf_pipeline,
             sdf_bind_group,
             sdf_uniform_buffer,
-            mesh_pipeline,
-            //mesh_bind_group_0,
+            //mesh_pipeline,
         }
     }
 
@@ -712,7 +640,7 @@ impl PipelineState {
         );
 
         self.segments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Evaluated Frames Storage Buffer"),
+            label: Some("Segments Buffer"),
             size: std::mem::size_of_val(segments) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -857,9 +785,9 @@ impl PipelineState {
                 render_pass.draw_indirect(&self.indirect_buffer, 0);
             }
 
-            render_pass.set_pipeline(&self.mesh_pipeline);
-            render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
-            render_pass.draw_mesh_tasks(num_segments * 32 - 1, 1, 1);
+            //render_pass.set_pipeline(&self.mesh_pipeline);
+            //render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
+            //render_pass.draw_mesh_tasks(num_segments * 32 - 1, 1, 1);
         }
 
         {
@@ -898,7 +826,7 @@ impl State {
         ));
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                force_fallback_adapter: true,
+                force_fallback_adapter: false,
                 ..Default::default()
             })
             .await
@@ -996,7 +924,6 @@ impl State {
         };
 
         state.configure_surface();
-
         state
     }
 
@@ -1080,6 +1007,7 @@ impl State {
     }
 
     pub fn render(&mut self) {
+        println!("asgfoisdng");
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => return,
@@ -1107,6 +1035,7 @@ impl State {
                 format: Some(self.surface_format.add_srgb_suffix()),
                 ..Default::default()
             });
+        println!("asgfoisdng");
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
