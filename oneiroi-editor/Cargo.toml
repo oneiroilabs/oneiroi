@@ -22,7 +22,7 @@ iced_core = { version = "0.15.0-dev" }
 #iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", features = [
 #    "full",
 #] }
-#iced_nodegraph = { version = "0.5.0-dev" }
+iced_nodegraph = { version = "0.5.0-dev" }
 oneiroi.workspace = true
 oneiroi-core.workspace = true
 oneiroi-wgpu.workspace = true

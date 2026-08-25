@@ -4,6 +4,7 @@ use iced::widget::{
 };
 use iced::window;
 use iced::{Center, Element, Fill, Function, Subscription, Task, Theme, Vector};
+use iced_nodegraph::{EdgeId, NodeGraph, NodeId, node_graph};
 use oneiroi_editor::Message;
 //use iced_aw::{TabBar, TabLabel, Tabs};
 use oneiroi_editor::viewport::OneiroiScene;
@@ -164,7 +165,7 @@ impl Window {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        let scale_input = iced::widget::column![
+        /* let scale_input = iced::widget::column![
             text("Window scale factor:"),
             text_input("Window Scale", &self.scale_input)
                 .on_input(Message::ScaleInputChanged.with(id))
@@ -176,7 +177,7 @@ impl Window {
             text_input("Window Title", &self.title)
                 .on_input(Message::TitleChanged.with(id))
                 .id(format!("input-{id}"))
-        ];
+        ]; */
 
         let new_window_button = button(text("New Window")).on_press(Message::OpenWindow);
 
@@ -209,16 +210,17 @@ impl Window {
         //    .push(1, iced_aw::TabLabel::Text("Test".into()))
         //    .set_active_tab(&1);
 
+        let node_graph = node_graph::<Message, iced::Renderer>();
+
         let viewport = shader(&self.scene).width(400).height(300);
-        let content = iced::widget::column![
-            scale_input,
-            title_input,
+        let content = iced::widget::row![
+            node_graph,
             new_window_button,
             viewport //tab_bar,
         ]
         .spacing(50)
         .width(400)
-        .align_x(Center)
+        //.align_x(Center)
         .height(700);
 
         container(scrollable(center_x(content))).padding(10).into()

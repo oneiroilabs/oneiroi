@@ -46,8 +46,10 @@ fixedbitset = { version = "0" }
 
 
 [patch.crates-io]
-iced = { path = "../iced/" }                #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_core = { path = "../iced/core" }       #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_runtime = { path = "../iced/runtime" } #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_widget = { path = "../iced/widget" }   #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-#iced_nodegraph = { git = "https://github.com/tuco86/iced_nodegraph.git", branch = "main" }
+iced = { path = "../iced/" }                                   #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_core = { path = "../iced/core" }                          #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_runtime = { path = "../iced/runtime" }                    #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_widget = { path = "../iced/widget" }                      #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
+iced_nodegraph = { path = "../iced_nodegraph/iced_nodegraph" }
+iced_wgpu = { path = "../iced/wgpu" }
+iced_test = { path = "../iced/test" }
