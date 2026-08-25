@@ -2,10 +2,13 @@ use iced::widget::{
     Text, button, center, center_x, column, container, operation, scrollable, shader, space, text,
     text_input,
 };
-use iced::window;
-use iced::{Center, Element, Fill, Function, Subscription, Task, Theme, Vector};
-use iced_nodegraph::{EdgeId, NodeGraph, NodeId, node_graph};
+use iced::{Center, Color, Element, Fill, Function, Subscription, Task, Theme, Vector};
+use iced::{Point, window};
+use iced_nodegraph::{
+    ColorQuad, EdgeId, Node, NodeGraph, NodeId, PinStyle, default_pin_style, node, node_graph,
+};
 use oneiroi_editor::Message;
+use oneiroi_editor::node_test::my_node;
 //use iced_aw::{TabBar, TabLabel, Tabs};
 use oneiroi_editor::viewport::OneiroiScene;
 
@@ -179,7 +182,7 @@ impl Window {
                 .id(format!("input-{id}"))
         ]; */
 
-        let new_window_button = button(text("New Window")).on_press(Message::OpenWindow);
+        //let new_window_button = button(text("New Window")).on_press(Message::OpenWindow);
 
         /* let tab = TabBar::new(Message::TabSelected)
         .push(1, iced_aw::TabLabel::Text("Snakish".into()))
@@ -210,18 +213,18 @@ impl Window {
         //    .push(1, iced_aw::TabLabel::Text("Test".into()))
         //    .set_active_tab(&1);
 
-        let node_graph = node_graph::<Message, iced::Renderer>();
+        let mut node_graph = node_graph().width(500).height(300);
+        node_graph.push_node(node(0, Point::default(), my_node(&self.theme)));
 
         let viewport = shader(&self.scene).width(400).height(300);
-        let content = iced::widget::row![
-            node_graph,
-            new_window_button,
-            viewport //tab_bar,
+        let content = iced::widget::column![
+            node_graph, //new_window_button,
+            viewport    //tab_bar,
         ]
         .spacing(50)
-        .width(400)
+        .width(Fill)
         //.align_x(Center)
-        .height(700);
+        .height(Fill);
 
         container(scrollable(center_x(content))).padding(10).into()
     }

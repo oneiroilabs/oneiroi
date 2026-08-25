@@ -2,6 +2,8 @@ use iced::window;
 
 pub mod viewport;
 
+pub mod node_test;
+
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenWindow,
