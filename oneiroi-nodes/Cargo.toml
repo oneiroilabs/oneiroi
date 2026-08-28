@@ -11,5 +11,6 @@ edition.workspace = true
 [dependencies]
 glam.workspace = true
 serde.workspace = true
+petgraph.workspace = true
 
 oneiroi-core.workspace = true

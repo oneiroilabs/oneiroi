@@ -28,7 +28,7 @@ im = { package = "imbl", version = "6", features = ["serde", "triomphe"] }
 smallvec = { version = "=2.0.0-alpha.10", features = ['serde'] }
 
 #Graph Library
-petgraph = { version = "0.8", features = ["serde-1"] }
+petgraph.workspace = true
 
 #Serialization
 serde = { version = "1", features = ["derive"] }

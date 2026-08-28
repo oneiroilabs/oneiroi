@@ -8,9 +8,9 @@ pub struct Arena {
     cubic_nurbs: Vec<CubicNurbsSegmentCache>,
 }
 
-trait ArenaAccess<T: DataType> {
+pub trait ArenaAccess<T: DataType> {
     fn get(&self, index: u32) -> Option<T>;
-    fn set(&mut self, index: u32, value: T) -> u32;
+    fn set(&mut self, index: u32, value: T);
 }
 
 impl ArenaAccess<Vec3> for Arena {
@@ -22,9 +22,8 @@ impl ArenaAccess<Vec3> for Arena {
     }
 
     #[inline(always)]
-    fn set(&mut self, index: u32, value: Vec3) -> u32 {
+    fn set(&mut self, index: u32, value: Vec3) {
         self.vectors[index as usize] = Vec4::new(value.x, value.y, value.z, 0.);
-        0
     }
 }
 
@@ -37,9 +36,8 @@ impl ArenaAccess<Vec2> for Arena {
     }
 
     #[inline(always)]
-    fn set(&mut self, index: u32, value: Vec2) -> u32 {
+    fn set(&mut self, index: u32, value: Vec2) {
         self.vectors[index as usize] = Vec4::new(value.x, value.y, 0., 0.);
-        0
     }
 }
 
@@ -53,7 +51,7 @@ impl Arena {
     }
 
     #[inline(always)]
-    pub fn set<T: DataType>(&mut self, idx: u32, value: T) -> u32
+    pub fn set<T: DataType>(&mut self, idx: u32, value: T)
     where
         Self: ArenaAccess<T>,
     {
@@ -61,9 +59,29 @@ impl Arena {
     }
 }
 
-/* pub trait ExecutionContext {
+pub trait ExecutionContext {
     //type Index;
 
-    fn get_unchecked<T>(&self, index: u32) -> T;
-    fn set_unchecked<T>(&self, index: u32, value: T);
-} */
+    fn get_unchecked<T: DataType>(&self, index: u32) -> T
+    where
+        Self: ArenaAccess<T>;
+    fn set_unchecked<T: DataType>(&mut self, index: u32, value: T)
+    where
+        Self: ArenaAccess<T>;
+}
+
+impl ExecutionContext for Arena {
+    fn get_unchecked<T: DataType>(&self, index: u32) -> T
+    where
+        Self: ArenaAccess<T>,
+    {
+        self.get(index).unwrap()
+    }
+
+    fn set_unchecked<T: DataType>(&mut self, index: u32, value: T)
+    where
+        Self: ArenaAccess<T>,
+    {
+        self.set(index, value)
+    }
+}

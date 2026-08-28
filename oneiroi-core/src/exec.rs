@@ -16,7 +16,7 @@ struct GraphDef {
     instances: u32,
     connectivity_masks: Box<[FixedBitSet]>,
     nodes: Box<[Nodes]>,
-    variable_count: u32,
+    variables: Box<[Variable]>,
     scripts: Box<[Function]>,
 }
 
@@ -27,6 +27,8 @@ impl GraphDef {
 }
 
 enum Nodes {}
+
+// Where would we store the type definitions of the Compiled Graphs?
 
 pub struct GraphInstance {
     graph_id: u32,
@@ -49,11 +51,11 @@ impl OneiroiData {
     pub fn evaluate_graph(&self, instance: &mut GraphInstance) {}
 }
 
-pub struct DebugGraph {
+/* pub struct DebugGraph {
     nodes: Vec<Nodes>,
-    node_graph: u32,
+    node_graph: ,
     property_graph: u32,
-}
+} */
 
 // The Graph is compiled once.
 // The Compiled Graph lives in core.
