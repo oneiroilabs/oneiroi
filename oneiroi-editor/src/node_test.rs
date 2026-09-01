@@ -60,7 +60,7 @@ where
     .spacing(4);
 
     iced::widget::column![
-        node_title_bar("Email Parser" /* style */,),
+        node_title_bar("Email Parser"),
         container(pin_list).padding([10, 12])
     ]
     .width(200.0)

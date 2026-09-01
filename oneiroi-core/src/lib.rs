@@ -1,9 +1,10 @@
 pub mod curve;
 
-mod graph;
 pub mod arena;
+mod graph;
 pub mod primitive;
 
 pub mod exec;
 
+pub mod node;
 pub mod types;

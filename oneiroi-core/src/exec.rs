@@ -5,28 +5,30 @@ use std::collections::HashMap;
 use fixedbitset::FixedBitSet;
 use mlua::{Function, Lua};
 
-use crate::{arena::Arena, types::DataType};
+use crate::{
+    arena::{Arena, ExecutionContext},
+    node::{ErasedNode, Node},
+    types::DataType,
+};
 
 /// Shared Graph definition of a compiled Graph
-struct GraphDef {
+struct GraphDef<Ctx: ExecutionContext> {
     //TODO this could maybe be removed if HashMap with graph path hash is used. hmmge.
     graph: u32,
     // This could be used for gc if instances is 0 we have an empty slot and can be overridden.
     // The type is so small tho that we should maybe just retain the thing.
     instances: u32,
     connectivity_masks: Box<[FixedBitSet]>,
-    nodes: Box<[Nodes]>,
     variables: Box<[Variable]>,
     scripts: Box<[Function]>,
+    nodes: Box<[ErasedNode<Ctx>]>,
 }
 
-impl GraphDef {
+/* impl GraphDef {
     fn mhm(&self) {
         //self.scripts[0].call(args)
     }
-}
-
-enum Nodes {}
+} */
 
 // Where would we store the type definitions of the Compiled Graphs?
 
@@ -39,7 +41,7 @@ pub struct GraphInstance {
 
 struct Variable(u32);
 
-pub struct OneiroiData {
+/* pub struct OneiroiData {
     compiled_graphs: HashMap<u32, GraphDef>,
     arena: Arena,
     script: Lua,
@@ -49,7 +51,7 @@ impl OneiroiData {
     pub fn set_node_variable<T: DataType>(&self, value: T) {}
 
     pub fn evaluate_graph(&self, instance: &mut GraphInstance) {}
-}
+} */
 
 /* pub struct DebugGraph {
     nodes: Vec<Nodes>,
