@@ -7,15 +7,17 @@ pub trait Node<Ctx: ExecutionContext>: Send + Sync {
 
     fn display_name(&self) -> &str; //Cow<'_, str>;
 
-    fn evaluate(&self, ctx: &mut Ctx, inputs: &[u32], outputs: &[u32]) -> String;
+    fn evaluate(&self, ctx: &mut Ctx, inputs: &[u32], outputs: &[u32]);
 }
 
 pub struct ErasedNode<Ctx: ExecutionContext> {
     node: Arc<dyn Node<Ctx>>,
 
-    input_ids: Vec<u32>,
-    output_ids: Vec<u32>,
+    inputs: Box<[u32]>,
+    outputs: Box<[u32]>,
 }
+
+trait DebugNode {}
 
 /* pub struct VariableMetadata {
     pub buffer_id: u32,

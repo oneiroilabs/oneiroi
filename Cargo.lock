@@ -3161,6 +3161,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneiroi-core-macro"
+version = "0.0.0"
+dependencies = [
+ "oneiroi-core",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "oneiroi-cpp"
 version = "0.0.1"
 dependencies = [
@@ -3197,6 +3206,7 @@ version = "0.0.0"
 dependencies = [
  "glam 0.32.1",
  "oneiroi-core",
+ "oneiroi-core-macro",
  "petgraph",
  "serde",
 ]

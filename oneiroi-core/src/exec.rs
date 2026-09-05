@@ -19,7 +19,7 @@ struct GraphDef<Ctx: ExecutionContext> {
     // The type is so small tho that we should maybe just retain the thing.
     instances: u32,
     connectivity_masks: Box<[FixedBitSet]>,
-    variables: Box<[Variable]>,
+    variables: Box<[u32]>,
     scripts: Box<[Function]>,
     nodes: Box<[ErasedNode<Ctx>]>,
 }
@@ -36,10 +36,9 @@ pub struct GraphInstance {
     graph_id: u32,
     instance_id: u32,
     changeset: FixedBitSet,
-    variables: Box<[Variable]>,
+    inputs: Box<[u32]>,
+    outputs: Box<[u32]>,
 }
-
-struct Variable(u32);
 
 /* pub struct OneiroiData {
     compiled_graphs: HashMap<u32, GraphDef>,

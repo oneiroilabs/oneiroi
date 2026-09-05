@@ -14,3 +14,6 @@ serde.workspace = true
 petgraph.workspace = true
 
 oneiroi-core.workspace = true
+
+#[dev-dependencies]
+oneiroi-core-macro.workspace = true

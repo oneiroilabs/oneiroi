@@ -9,6 +9,7 @@ members = [
     "oneiroi-core",
     "oneiroi-editor",
     "oneiroi-nodes",
+    "oneiroi-core-macro",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
 package.repository = "https://github.com/oneiroilabs/oneiroi"
@@ -31,6 +32,7 @@ panic = "abort"
 [workspace.dependencies]
 oneiroi = { path = "./oneiroi" }
 oneiroi-core = { path = "./oneiroi-core" }
+oneiroi-core-macro = { path = "./oneiroi-core-macro" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 oneiroi-wgpu = { path = "./oneiroi-wgpu" }
