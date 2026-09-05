@@ -1,9 +1,10 @@
 use oneiroi_core::{arena::ExecutionContext, node::Node};
-use oneiroi_core_macro::GraphNode;
+use oneiroi_core_macro::graph_node;
 
-//#[derive(GraphNode)]
+#[graph_node]
 struct Nurbs {
-    //#[slot]
+    /// This is some nice docs.
+    #[slot]
     whatever: u32,
 }
 

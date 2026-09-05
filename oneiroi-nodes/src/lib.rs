@@ -1,4 +1,4 @@
 mod graph;
-mod property;
+pub mod property;
 
 mod nurbs;
