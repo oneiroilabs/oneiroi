@@ -6,6 +6,9 @@ struct Nurbs {
     /// This is some nice docs.
     #[slot]
     whatever: u32,
+
+    #[property]
+    this_and_that: u32,
 }
 
 impl<Ctx: ExecutionContext> Node<Ctx> for Nurbs {
@@ -21,3 +24,5 @@ impl<Ctx: ExecutionContext> Node<Ctx> for Nurbs {
         todo!()
     }
 }
+
+fn nurbs_thing<Ctx: ExecutionContext>(ctx: &mut Ctx, inputs: &[u32], outputs: &[u32]) {}

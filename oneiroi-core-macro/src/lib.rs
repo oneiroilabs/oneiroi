@@ -33,8 +33,9 @@ pub fn graph_node(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     && let Lit::Str(lit_str) = &expr_lit.lit
                 {
                     doc_lines.push(lit_str.value().trim_start().to_string());
+                } else {
+                    retained_attrs.push(attr);
                 }
-                retained_attrs.push(attr);
             }
             field.attrs = retained_attrs;
         }

@@ -4,6 +4,7 @@ pub enum DataTypeVariant {
     CubicNurbs,
     Vec3,
     Vec2,
+    U32,
 }
 
 /// The main way to declare a DataType.
@@ -24,4 +25,10 @@ impl DataType for Vec2 {
     type ConfigurationOptions = ();
 
     const DATA_TYPE_VARIANT: DataTypeVariant = DataTypeVariant::Vec2;
+}
+
+impl DataType for u32 {
+    type ConfigurationOptions = ();
+
+    const DATA_TYPE_VARIANT: DataTypeVariant = DataTypeVariant::U32;
 }

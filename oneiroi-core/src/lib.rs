@@ -7,4 +7,5 @@ pub mod primitive;
 pub mod exec;
 
 pub mod node;
+pub mod property;
 pub mod types;
