@@ -27,6 +27,19 @@ pub const FORMAT_VERSION: u32 = 1;
 #[serde(transparent)]
 pub struct NodeId(u32);
 
+impl NodeId {
+    /// The number behind the id, for interfaces which want plain numbers.
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for NodeId {
+    fn from(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
 /// A value written out by hand: all elements of it, one number after the
 /// other. A port of type `vec3` takes three `f32` per element.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
