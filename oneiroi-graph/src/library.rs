@@ -1,0 +1,126 @@
+//! Several graphs which can use each other.
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
+
+use oneiroi_core::{
+    node::NodeRegistry,
+    program::{ProgramId, ProgramSet},
+};
+
+use crate::{Context, Graph, LowerError};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibraryError {
+    /// The graph uses itself, directly or through other graphs.
+    Cycle(String),
+    Lower { graph: String, error: LowerError },
+}
+
+impl fmt::Display for LibraryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cycle(graph) => write!(f, "the graph `{graph}` uses itself"),
+            Self::Lower { graph, error } => write!(f, "graph `{graph}`, {error}"),
+        }
+    }
+}
+
+impl std::error::Error for LibraryError {}
+
+/// Graphs by their name.
+#[derive(Debug, Clone, Default)]
+pub struct Library {
+    graphs: BTreeMap<String, Graph>,
+}
+
+impl Library {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a graph under its name, replacing the one that had it before.
+    pub fn insert(&mut self, graph: Graph) -> Option<Graph> {
+        self.graphs.insert(graph.name.clone(), graph)
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<Graph> {
+        self.graphs.remove(name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Graph> {
+        self.graphs.get(name)
+    }
+
+    /// A graph to edit. Its name must stay the one it was added under.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Graph> {
+        self.graphs.get_mut(name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Graph> {
+        self.graphs.values()
+    }
+
+    /// Lowers every graph into `programs`, each one after the graphs it
+    /// uses, and returns which program belongs to which graph.
+    ///
+    /// A graph whose program is in `programs` already gets that one again.
+    /// Lowering after an edit therefore only adds programs for the graphs
+    /// which do something else now, and moving a node around adds none.
+    pub fn lower_into(
+        &self,
+        registry: &NodeRegistry,
+        programs: &mut ProgramSet,
+    ) -> Result<HashMap<String, ProgramId>, LibraryError> {
+        let mut lowered = HashMap::new();
+        let mut visiting = Vec::new();
+        for name in self.graphs.keys() {
+            self.lower_graph(name, registry, programs, &mut lowered, &mut visiting)?;
+        }
+        Ok(lowered)
+    }
+
+    fn lower_graph(
+        &self,
+        name: &str,
+        registry: &NodeRegistry,
+        programs: &mut ProgramSet,
+        lowered: &mut HashMap<String, ProgramId>,
+        visiting: &mut Vec<String>,
+    ) -> Result<(), LibraryError> {
+        if lowered.contains_key(name) {
+            return Ok(());
+        }
+        // A graph which is not in here is reported where it is used.
+        let Some(graph) = self.graphs.get(name) else {
+            return Ok(());
+        };
+        if visiting.iter().any(|open| open == name) {
+            return Err(LibraryError::Cycle(name.into()));
+        }
+
+        visiting.push(name.into());
+        for dependency in graph.dependencies() {
+            self.lower_graph(dependency, registry, programs, lowered, visiting)?;
+        }
+        visiting.pop();
+
+        let context = Context {
+            registry,
+            programs,
+            graphs: lowered,
+        };
+        let program = graph.lower(context).map_err(|error| LibraryError::Lower {
+            graph: name.into(),
+            error,
+        })?;
+        let id = match programs.find(program.hash) {
+            Some(id) => id,
+            None => programs.add(program),
+        };
+        lowered.insert(name.into(), id);
+        Ok(())
+    }
+}
