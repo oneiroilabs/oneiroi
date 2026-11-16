@@ -10,7 +10,7 @@ readme.workspace = true
 publish = true
 
 [dependencies]
-bevy = { version = "0.19", features = ["free_camera"] }
+bevy = { version = "0.20.1", features = ["free_camera"] }
 oneiroi-core.workspace = true
 oneiroi-nodes.workspace = true
 glam.workspace = true
