@@ -14,7 +14,10 @@ use bevy::{
 };
 use oneiroi_bevy::{Oneiroi, OneiroiInstance, OneiroiPlugin};
 use oneiroi_core::program::{ProgramBuilder, ProgramId};
-use oneiroi_nodes::curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube};
+use oneiroi_nodes::{
+    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube},
+    surface::TESSELLATE,
+};
 
 fn main() {
     App::new()
@@ -54,7 +57,7 @@ fn tube_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let mesh = b
         .call(oneiroi.programs(), tube, &[Some(spine), Some(radius), None, None])
         .unwrap();
-    for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
         b.output(port.name, slot);
     }
     oneiroi.add_program(b.finish())
@@ -85,12 +88,16 @@ fn beam_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let points = b.constant(&square);
     let knots = b.constant(&square_knots);
     let profile = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    let surface = b
+        .generic(oneiroi.registry(), &SWEEP, &[spine, profile])
+        .unwrap()[0];
+    // Each edge of the square is flat, so one step across it is enough.
     let rings = b.constant::<u32>(&[16]);
-    let sides = b.constant::<u32>(&[4]);
+    let sides = b.constant::<u32>(&[1]);
     let mesh = b
-        .generic(oneiroi.registry(), &SWEEP, &[spine, profile, rings, sides])
+        .generic(oneiroi.registry(), &TESSELLATE, &[surface, rings, sides])
         .unwrap();
-    for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
         b.output(port.name, slot);
     }
     oneiroi.add_program(b.finish())

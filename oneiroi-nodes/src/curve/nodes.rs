@@ -275,7 +275,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        assert_eq!(registry.iter().count(), 6);
+        assert_eq!(registry.iter().count(), 8);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

@@ -7,7 +7,7 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use crate::curve::{Curve, Profile};
+use crate::curve::{Curve, Profile, TubePatch, fractions, nurbs::CubicNurbsSegmentCache};
 
 /// A circle around the origin. It is its radius and nothing else, every
 /// point on it is computed when it is asked for.
@@ -61,9 +61,17 @@ impl Curve<Vec2> for Circle {
 }
 
 impl Profile for Circle {
-    fn point(profile: &[Self], v: f32) -> (Vec2, Vec2) {
-        let direction = Vec2::from_angle(v * TAU);
-        (direction * profile[0].radius, direction)
+    type Patch = TubePatch;
+
+    fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<TubePatch> {
+        let Some(circle) = profile.first() else {
+            return Vec::new();
+        };
+        spine
+            .iter()
+            .zip(fractions(spine))
+            .map(|(segment, along)| TubePatch::new(*segment, circle.radius, along))
+            .collect()
     }
 }
 

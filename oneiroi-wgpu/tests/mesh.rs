@@ -5,7 +5,10 @@
 
 use glam::Vec3;
 use oneiroi_core::{exec::Engine, node::NodeRegistry, program::ProgramBuilder};
-use oneiroi_nodes::curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube};
+use oneiroi_nodes::{
+    curve::{NURBS, nurbs::clamped_uniform_knots, tube},
+    surface::TESSELLATE,
+};
 use oneiroi_wgpu::{MeshData, MeshPreview, orbit::OrbitCamera};
 
 const SIZE: u32 = 128;
@@ -42,7 +45,7 @@ fn tube_mesh() -> (Vec<Vec3>, Vec<Vec3>, Vec<u32>) {
     let mesh = b
         .call(engine.programs(), tube, &[Some(spine), None, None, None])
         .unwrap();
-    for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
         b.output(port.name, slot);
     }
     let id = engine.add_program(b.finish());

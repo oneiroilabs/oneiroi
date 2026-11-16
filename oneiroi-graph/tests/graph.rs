@@ -13,6 +13,7 @@ use oneiroi_graph::{
 use oneiroi_nodes::{
     curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots},
     primitive::CIRCLE,
+    surface::TESSELLATE,
 };
 
 const POINTS: [[f32; 4]; 5] = [
@@ -33,9 +34,11 @@ struct Nodes {
     curve: NodeId,
     circle: NodeId,
     sweep: NodeId,
+    mesh: NodeId,
 }
 
-/// A circle swept along a curve, with the radius exposed.
+/// A circle swept along a curve and turned into a mesh, with the radius
+/// exposed.
 fn tube() -> (Graph, Nodes) {
     let mut graph = Graph::new("tube");
     let curve = graph.add("curve.nurbs");
@@ -54,17 +57,21 @@ fn tube() -> (Graph, Nodes) {
     let sweep = graph.add("curve.sweep");
     graph.connect(curve, "segments", sweep, "spine").unwrap();
     graph.connect(circle, "circle", sweep, "profile").unwrap();
-    graph.set(sweep, "sides", 6u32).unwrap();
 
-    graph.add_output("positions", sweep, "positions").unwrap();
-    graph.add_output("indices", sweep, "indices").unwrap();
-    graph.display = Some(sweep);
+    let mesh = graph.add("surface.tessellate");
+    graph.connect(sweep, "surface", mesh, "surface").unwrap();
+    graph.set(mesh, "sides", 6u32).unwrap();
+
+    graph.add_output("positions", mesh, "positions").unwrap();
+    graph.add_output("indices", mesh, "indices").unwrap();
+    graph.display = Some(mesh);
     (
         graph,
         Nodes {
             curve,
             circle,
             sweep,
+            mesh,
         },
     )
 }
@@ -105,8 +112,9 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let sides = b.constant::<u32>(&[6]);
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+    let surface = b.generic(&registry(), &SWEEP, &[spine, circle]).unwrap()[0];
     let mesh = b
-        .generic(&registry(), &SWEEP, &[spine, circle, rings, sides])
+        .generic(&registry(), &TESSELLATE, &[surface, rings, sides])
         .unwrap();
     b.output("positions", mesh[0]);
     let by_hand = engine.add_program(b.finish());
@@ -114,19 +122,19 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let mut a = engine.instantiate(lowered);
     let mut b = engine.instantiate(by_hand);
     // The same nodes on the same values are the same work.
-    assert_eq!(engine.evaluate([&mut a]), 3);
+    assert_eq!(engine.evaluate([&mut a]), 4);
     assert_eq!(engine.evaluate([&mut b]), 0);
     assert_eq!(
         engine.output_key(&a, "positions"),
         engine.output_key(&b, "positions")
     );
 
-    // 2 segments with the default of 16 rings, 6 sides and the seam.
+    // 2 segments, each a grid with the default of 16 rings and 6 sides.
     let positions = engine.read::<Vec3>(&a, "positions").unwrap();
-    assert_eq!(positions.len(), (2 * 16 + 1) * 7);
+    assert_eq!(positions.len(), 2 * 17 * 7);
 
     engine.set_param(&mut a, "radius", &[0.5f32]).unwrap();
-    assert_eq!(engine.evaluate([&mut a]), 2);
+    assert_eq!(engine.evaluate([&mut a]), 3);
 }
 
 #[test]
@@ -174,7 +182,7 @@ fn metadata_does_not_change_the_program() {
     let moved = hash(&graph, &mut engine);
     assert_eq!(before, moved);
 
-    graph.set(nodes.sweep, "sides", 8u32).unwrap();
+    graph.set(nodes.mesh, "sides", 8u32).unwrap();
     let changed = hash(&graph, &mut engine);
     assert_ne!(before, changed);
 }
@@ -190,7 +198,7 @@ fn a_node_can_be_previewed_on_its_own() {
                 programs: engine.programs(),
                 graphs: &HashMap::new(),
             },
-            nodes.sweep,
+            nodes.mesh,
         )
         .unwrap();
 
@@ -213,8 +221,10 @@ fn graphs_use_each_other() {
     let sweep = pipe.add("curve.sweep");
     pipe.expose(sweep, "spine", "spine", None).unwrap();
     pipe.connect(circle, "circle", sweep, "profile").unwrap();
-    pipe.set(sweep, "sides", 6u32).unwrap();
-    pipe.add_output("positions", sweep, "positions").unwrap();
+    let mesh = pipe.add("surface.tessellate");
+    pipe.connect(sweep, "surface", mesh, "surface").unwrap();
+    pipe.set(mesh, "sides", 6u32).unwrap();
+    pipe.add_output("positions", mesh, "positions").unwrap();
 
     let mut scene = Graph::new("scene");
     let curve = scene.add("curve.nurbs");
@@ -245,8 +255,8 @@ fn graphs_use_each_other() {
     assert_eq!(engine.programs().len(), 2);
 
     let mut instance = engine.instantiate(programs["scene"]);
-    // One curve, and a circle and a sweep for each of the two pipes.
-    assert_eq!(engine.evaluate([&mut instance]), 5);
+    // One curve, and a circle, a sweep and a mesh for each of the pipes.
+    assert_eq!(engine.evaluate([&mut instance]), 7);
     let thin = engine.read::<Vec3>(&instance, "thin").unwrap();
     let thick = engine.read::<Vec3>(&instance, "thick").unwrap();
     assert_eq!(thin.len(), thick.len());
@@ -295,15 +305,15 @@ fn graphs_can_not_use_themselves() {
 fn editing_keeps_the_graph_consistent() {
     let (mut graph, nodes) = tube();
     assert_eq!(
-        graph.connect(nodes.sweep, "positions", nodes.curve, "points"),
+        graph.connect(nodes.mesh, "positions", nodes.curve, "points"),
         Err(EditError::Cycle)
     );
     assert_eq!(
-        graph.connect(nodes.sweep, "positions", nodes.sweep, "spine"),
+        graph.connect(nodes.sweep, "surface", nodes.sweep, "spine"),
         Err(EditError::Cycle)
     );
     assert_eq!(
-        graph.add_output("positions", nodes.sweep, "normals"),
+        graph.add_output("positions", nodes.mesh, "normals"),
         Err(EditError::DuplicateOutput("positions".into()))
     );
 
@@ -311,6 +321,8 @@ fn editing_keeps_the_graph_consistent() {
     graph.remove_node(nodes.circle).unwrap();
     assert!(!graph.node(nodes.sweep).unwrap().inputs.contains_key("profile"));
     graph.remove_node(nodes.sweep).unwrap();
+    assert!(!graph.node(nodes.mesh).unwrap().inputs.contains_key("surface"));
+    graph.remove_node(nodes.mesh).unwrap();
     assert!(graph.outputs().is_empty());
     assert_eq!(graph.display, None);
 
@@ -344,7 +356,7 @@ fn broken_graphs_say_where_they_are_broken() {
     assert!(matches!(kind, LowerErrorKind::Build(BuildError::Type { .. })));
 
     let mut broken = graph.clone();
-    broken.connect(nodes.sweep, "positions", nodes.sweep, "profile").unwrap_err();
+    broken.connect(nodes.sweep, "surface", nodes.sweep, "profile").unwrap_err();
     let positions = broken.add("curve.sample");
     broken.connect(nodes.curve, "segments", positions, "segments").unwrap();
     broken.connect(positions, "positions", nodes.sweep, "profile").unwrap();
@@ -354,7 +366,7 @@ fn broken_graphs_say_where_they_are_broken() {
 
     // Values have to be whole elements of the right kind of number.
     let mut broken = graph.clone();
-    broken.set(nodes.sweep, "sides", 6.0f32).unwrap();
+    broken.set(nodes.mesh, "sides", 6.0f32).unwrap();
     assert_eq!(
         error(&broken).2,
         LowerErrorKind::Value { expected: "u32" }
@@ -385,7 +397,7 @@ fn broken_graphs_say_where_they_are_broken() {
     ));
 
     let mut broken = graph.clone();
-    broken.expose(nodes.sweep, "sides", "radius", None).unwrap();
+    broken.expose(nodes.mesh, "sides", "radius", None).unwrap();
     assert_eq!(
         error(&broken).2,
         LowerErrorKind::ExposedTwice("radius".into())

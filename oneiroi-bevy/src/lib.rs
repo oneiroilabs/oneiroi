@@ -222,7 +222,10 @@ fn build_mesh(engine: &Engine, instance: &Instance) -> Option<Mesh> {
 #[cfg(test)]
 mod tests {
     use oneiroi_core::program::ProgramBuilder;
-    use oneiroi_nodes::curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots};
+    use oneiroi_nodes::{
+        curve::{NURBS, nurbs::clamped_uniform_knots},
+        surface::TESSELLATE,
+    };
 
     use super::*;
 
@@ -249,7 +252,7 @@ mod tests {
                 &[Some(segments), Some(radius), Some(rings), Some(sides)],
             )
             .unwrap();
-        for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+        for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
             b.output(port.name, slot);
         }
         oneiroi.add_program(b.finish())
@@ -291,7 +294,7 @@ mod tests {
             stats,
             OneiroiStats {
                 instances: 3,
-                nodes_run: 3,
+                nodes_run: 4,
                 meshes: 1
             }
         );
@@ -315,8 +318,8 @@ mod tests {
         set_radius(&mut app, b, 0.5);
         app.update();
         let stats = app.world().resource::<Oneiroi>().stats();
-        // A new circle is swept, the curve is still the same one.
-        assert_eq!((stats.nodes_run, stats.meshes), (2, 2));
+        // A new circle is swept and meshed, the curve is still the same.
+        assert_eq!((stats.nodes_run, stats.meshes), (3, 2));
         assert_ne!(mesh(&app, a), mesh(&app, b));
 
         // Once nobody shows a mesh anymore it is dropped again.

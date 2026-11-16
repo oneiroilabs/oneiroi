@@ -10,8 +10,9 @@ mod profile;
 mod sweep;
 
 pub use nodes::{EvaluatedFrame, FRAMES, NURBS, SAMPLE, register};
+pub(crate) use profile::fractions;
 pub use profile::{PROFILE, Profile};
-pub use sweep::{SWEEP, register_profile, sweep_point, tube};
+pub use sweep::{SWEEP, SweptPatch, TubePatch, register_profile, tube};
 
 pub trait Curve<Sample> {
     // Required methods

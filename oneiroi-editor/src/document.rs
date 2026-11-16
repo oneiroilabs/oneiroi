@@ -139,7 +139,8 @@ impl Document {
         document
     }
 
-    /// A circle swept along a curve, to have something to look at.
+    /// A circle swept along a curve and turned into a mesh, to have
+    /// something to look at.
     pub fn example() -> Self {
         let mut graph = Graph::new("tube");
         let points: Vec<f32> = (0..8)
@@ -152,19 +153,27 @@ impl Document {
         let curve = graph.add("curve.nurbs");
         let circle = graph.add("curve.circle");
         let sweep = graph.add("curve.sweep");
+        let mesh = graph.add("surface.tessellate");
         let edits = [
             graph.set(curve, "points", Value::F32(points)),
             graph.set(curve, "knots", Value::F32(clamped_uniform_knots(8))),
             graph.set(circle, "radius", 0.25f32),
             graph.connect(curve, "segments", sweep, "spine"),
             graph.connect(circle, "circle", sweep, "profile"),
+            graph.connect(sweep, "surface", mesh, "surface"),
         ];
         debug_assert!(edits.iter().all(Result::is_ok));
 
-        for (node, position) in [(curve, [40., 40.]), (circle, [40., 220.]), (sweep, [340., 110.])] {
+        let positions = [
+            (curve, [40., 40.]),
+            (circle, [40., 220.]),
+            (sweep, [300., 110.]),
+            (mesh, [540., 110.]),
+        ];
+        for (node, position) in positions {
             graph.node_mut(node).unwrap().meta.position = position;
         }
-        graph.display = Some(sweep);
+        graph.display = Some(mesh);
         Self::new(graph)
     }
 
@@ -490,7 +499,7 @@ impl Document {
 mod tests {
     use super::*;
 
-    fn nodes(document: &Document) -> [NodeId; 3] {
+    fn nodes(document: &Document) -> [NodeId; 4] {
         let find = |id: &str| {
             document
                 .graph()
@@ -499,42 +508,47 @@ mod tests {
                 .unwrap()
                 .0
         };
-        [find("curve.nurbs"), find("curve.circle"), find("curve.sweep")]
+        [
+            find("curve.nurbs"),
+            find("curve.circle"),
+            find("curve.sweep"),
+            find("surface.tessellate"),
+        ]
     }
 
     #[test]
     fn the_example_has_a_mesh() {
         let document = Document::example();
         let mesh = document.mesh().unwrap();
-        // 5 segments with 16 rings each, 24 sides and the seam.
-        assert_eq!(mesh.positions.len(), (5 * 16 + 1) * 25);
+        // 5 segments, each a grid of 16 rings and 24 sides.
+        assert_eq!(mesh.positions.len(), 5 * 17 * 25);
         assert!(mesh.normals.is_some() && mesh.radius > 1.0);
         assert!(document.error().is_none());
-        assert!(document.status().contains("3 nodes ran"));
+        assert!(document.status().contains("4 nodes ran"));
     }
 
     #[test]
     fn edits_show_up_in_the_preview() {
         let mut document = Document::example();
-        let [curve, circle, sweep] = nodes(&document);
+        let [curve, circle, sweep, mesh] = nodes(&document);
         let before = document.mesh().unwrap().clone();
 
-        assert!(document.set_input(sweep, "sides", "6"));
+        assert!(document.set_input(mesh, "sides", "6"));
         let after = document.mesh().unwrap().clone();
         assert_ne!(before.generation, after.generation);
-        assert_eq!(after.positions.len(), (5 * 16 + 1) * 7);
-        // Only the sweep had to run again.
+        assert_eq!(after.positions.len(), 5 * 17 * 7);
+        // The surface is what it was, only its mesh had to be made again.
         assert!(document.status().contains("1 nodes ran"));
 
         // Text which is not a value of the input changes nothing.
-        assert!(!document.set_input(sweep, "sides", "six"));
-        assert!(!document.set_input(sweep, "sides", "1.5"));
+        assert!(!document.set_input(mesh, "sides", "six"));
+        assert!(!document.set_input(mesh, "sides", "1.5"));
         assert!(!document.set_input(curve, "points", "1, 2, 3"));
         assert!(!document.set_input(sweep, "profile", "1"));
         assert_eq!(document.mesh().unwrap().generation, after.generation);
 
         assert_eq!(document.input_text(circle, "radius").unwrap(), ("0.25".into(), true));
-        assert_eq!(document.input_text(sweep, "rings").unwrap(), ("16".into(), true));
+        assert_eq!(document.input_text(mesh, "rings").unwrap(), ("16".into(), true));
         assert_eq!(document.input_text(sweep, "spine").unwrap(), ("linked".into(), false));
         assert_eq!(document.input_text(sweep, "profile").unwrap(), ("linked".into(), false));
         document.reset(sweep, "profile");
@@ -547,9 +561,9 @@ mod tests {
     #[test]
     fn edits_do_not_pile_up_programs() {
         let mut document = Document::example();
-        let [_, _, sweep] = nodes(&document);
+        let [_, _, _, mesh] = nodes(&document);
         for sides in 3..20 {
-            assert!(document.set_input(sweep, "sides", &sides.to_string()));
+            assert!(document.set_input(mesh, "sides", &sides.to_string()));
         }
         assert_eq!(document.engine.programs().len(), 1);
     }
@@ -557,15 +571,17 @@ mod tests {
     #[test]
     fn links_are_checked_and_can_be_undone() {
         let mut document = Document::example();
-        let [curve, circle, sweep] = nodes(&document);
+        let [curve, circle, sweep, mesh] = nodes(&document);
 
         // A radius is not a profile and a curve is not a number.
         assert!(!document.connect(curve, "segments", circle, "radius"));
-        assert!(!document.connect(sweep, "positions", sweep, "profile"));
-        // A curve is a profile too.
+        assert!(!document.connect(mesh, "positions", sweep, "profile"));
+        // A curve is a profile too, and only a surface can become a mesh.
         assert!(document.accepts(curve, "segments", sweep, "profile"));
+        assert!(document.accepts(sweep, "surface", mesh, "surface"));
+        assert!(!document.accepts(curve, "segments", mesh, "surface"));
         // A link back would be a cycle.
-        assert!(!document.connect(sweep, "indices", sweep, "rings"));
+        assert!(!document.connect(mesh, "indices", mesh, "rings"));
 
         document.disconnect(circle, "circle", sweep, "profile");
         assert!(document.mesh().is_none());
@@ -579,16 +595,16 @@ mod tests {
     #[test]
     fn any_node_can_be_displayed() {
         let mut document = Document::example();
-        let [curve, _, sweep] = nodes(&document);
+        let [curve, _, _, mesh] = nodes(&document);
 
         document.set_display(Some(curve));
         assert!(document.mesh().is_none());
         assert_eq!(document.status(), "the displayed node has no mesh");
 
-        document.set_display(Some(sweep));
+        document.set_display(Some(mesh));
         assert!(document.mesh().is_some());
 
-        document.remove_nodes(&[sweep]);
+        document.remove_nodes(&[mesh]);
         assert_eq!(document.graph().display, None);
         assert_eq!(document.status(), "no node is displayed");
     }
@@ -596,25 +612,33 @@ mod tests {
     #[test]
     fn nodes_are_shown_as_the_registry_describes_them() {
         let mut document = Document::example();
-        let [_, _, sweep] = nodes(&document);
+        let [_, _, sweep, mesh] = nodes(&document);
 
         let view = document.view(sweep).unwrap();
         assert_eq!(view.title, "Sweep");
-        let inputs: Vec<_> = view.inputs.iter().map(|p| (p.name.as_str(), p.ty.name())).collect();
+        let ports = |ports: &[PortView]| -> Vec<_> {
+            ports.iter().map(|p| (p.name.clone(), p.ty.name())).collect()
+        };
         assert_eq!(
-            inputs,
+            ports(&view.inputs),
             [
-                ("spine", "cubic_nurbs_segment"),
-                ("profile", "profile"),
-                ("rings", "u32"),
-                ("sides", "u32")
+                ("spine".to_string(), "cubic_nurbs_segment"),
+                ("profile".to_string(), "profile")
             ]
         );
-        assert_eq!(view.outputs.len(), 4);
+        assert_eq!(ports(&view.outputs), [("surface".to_string(), "surface")]);
+        assert_eq!(document.view(mesh).unwrap().outputs.len(), 4);
 
         assert_eq!(
             document.palette(),
-            ["curve.circle", "curve.frames", "curve.nurbs", "curve.sample", "curve.sweep"]
+            [
+                "curve.circle",
+                "curve.frames",
+                "curve.nurbs",
+                "curve.sample",
+                "curve.sweep",
+                "surface.tessellate"
+            ]
         );
 
         let added = document.add_node("curve.frames", [10.0, 20.0]);
@@ -635,7 +659,7 @@ mod tests {
 
         // A node nobody knows is still shown with its links.
         let mut graph = document.graph().clone();
-        let [curve, _, _] = nodes(&document);
+        let [curve, _, _, _] = nodes(&document);
         let unknown = graph.add("someone_elses.node");
         graph.connect(curve, "segments", unknown, "curve").unwrap();
         let loaded = Document::new(graph);
