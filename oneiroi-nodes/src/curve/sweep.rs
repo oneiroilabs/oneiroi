@@ -10,6 +10,7 @@ use glam::{Vec2, Vec3};
 use oneiroi_core::{
     node::{GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
     program::{Program, ProgramBuilder},
+    types::PortDefault,
 };
 
 use super::{
@@ -49,8 +50,8 @@ pub static SWEEP: GenericNode = GenericNode {
     inputs: &[
         GenericPort::exact::<CubicNurbsSegmentCache>("spine"),
         GenericPort::implementing("profile", PROFILE),
-        GenericPort::exact::<u32>("rings"),
-        GenericPort::exact::<u32>("sides"),
+        GenericPort::exact::<u32>("rings").with_default(RINGS),
+        GenericPort::exact::<u32>("sides").with_default(SIDES),
     ],
     outputs: &[
         GenericPort::exact::<Vec3>("positions"),
@@ -60,14 +61,17 @@ pub static SWEEP: GenericNode = GenericNode {
     ],
 };
 
+const RINGS: PortDefault = PortDefault::U32(&[16]);
+const SIDES: PortDefault = PortDefault::U32(&[24]);
+
 struct Ports<P>(PhantomData<P>);
 
 impl<P: Profile> Ports<P> {
     const INPUTS: &'static [PortDecl] = &[
         PortDecl::new::<CubicNurbsSegmentCache>("spine"),
         PortDecl::new::<P>("profile"),
-        PortDecl::new::<u32>("rings"),
-        PortDecl::new::<u32>("sides"),
+        PortDecl::new::<u32>("rings").with_default(RINGS),
+        PortDecl::new::<u32>("sides").with_default(SIDES),
     ];
 }
 

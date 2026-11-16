@@ -7,13 +7,15 @@ use std::collections::HashMap;
 
 use crate::{
     store::{Handle, Store},
-    types::{DataType, Trait, TypeInfo},
+    types::{DataType, PortDefault, Trait, TypeInfo},
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct PortDecl {
     pub name: &'static str,
     pub ty: TypeInfo,
+    /// Only meaningful for inputs.
+    pub default: PortDefault,
 }
 
 impl PortDecl {
@@ -21,7 +23,13 @@ impl PortDecl {
         Self {
             name,
             ty: T::INFO,
+            default: PortDefault::Empty,
         }
+    }
+
+    pub const fn with_default(mut self, default: PortDefault) -> Self {
+        self.default = default;
+        self
     }
 }
 
@@ -151,6 +159,8 @@ pub enum PortType {
 pub struct GenericPort {
     pub name: &'static str,
     pub ty: PortType,
+    /// Only meaningful for inputs with an exact type.
+    pub default: PortDefault,
 }
 
 impl GenericPort {
@@ -158,6 +168,7 @@ impl GenericPort {
         Self {
             name,
             ty: PortType::Exact(T::INFO),
+            default: PortDefault::Empty,
         }
     }
 
@@ -165,7 +176,13 @@ impl GenericPort {
         Self {
             name,
             ty: PortType::Trait(tr),
+            default: PortDefault::Empty,
         }
+    }
+
+    pub const fn with_default(mut self, default: PortDefault) -> Self {
+        self.default = default;
+        self
     }
 }
 

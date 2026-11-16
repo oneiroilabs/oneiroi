@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
     node::{Inputs, NodeDef, Outputs, PortDecl, Shape},
-    types::DataType,
+    types::{DataType, PortDefault, Scalar},
 };
 
 use crate::curve::{Curve, Profile};
@@ -32,6 +32,7 @@ impl DataType for Circle {
 
     const NAME: &'static str = "circle";
     const WGSL: &'static str = "Circle";
+    const SCALAR: Scalar = Scalar::F32;
 }
 
 /// Runs counter-clockwise, starting on the x axis.
@@ -68,7 +69,7 @@ impl Profile for Circle {
 pub static CIRCLE: NodeDef = NodeDef {
     id: "curve.circle",
     display_name: "Circle",
-    inputs: &[PortDecl::new::<f32>("radius")],
+    inputs: &[PortDecl::new::<f32>("radius").with_default(PortDefault::F32(&[1.0]))],
     outputs: &[PortDecl::new::<Circle>("circle")],
     shape: Shape::Map,
     cpu: circle,

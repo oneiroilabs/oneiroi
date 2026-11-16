@@ -1,6 +1,13 @@
 use bytemuck::Pod;
 use glam::{Vec2, Vec3};
 
+/// What the 32-bit words of a [`DataType`] are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scalar {
+    F32,
+    U32,
+}
+
 /// Layout information of a [`DataType`] shared by every backend.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
@@ -10,6 +17,8 @@ pub struct TypeInfo {
     pub wgsl: &'static str,
     /// Size of one element in 32-bit words.
     pub words: u32,
+    /// What those words are, which is how a value is written by hand.
+    pub scalar: Scalar,
 }
 
 impl PartialEq for TypeInfo {
@@ -42,6 +51,7 @@ pub trait DataType: Pod {
 
     const NAME: &'static str;
     const WGSL: &'static str;
+    const SCALAR: Scalar;
 
     const INFO: TypeInfo = {
         assert!(
@@ -52,24 +62,45 @@ pub trait DataType: Pod {
             name: Self::NAME,
             wgsl: Self::WGSL,
             words: (size_of::<Self>() / 4) as u32,
+            scalar: Self::SCALAR,
         }
     };
 }
 
 macro_rules! data_type {
-    ($ty:ty, $name:literal, $wgsl:literal) => {
+    ($ty:ty, $name:literal, $wgsl:literal, $scalar:ident) => {
         impl DataType for $ty {
             type ConfigurationOptions = ();
 
             const NAME: &'static str = $name;
             const WGSL: &'static str = $wgsl;
+            const SCALAR: Scalar = Scalar::$scalar;
         }
     };
 }
 
-data_type!(u32, "u32", "u32");
-data_type!(f32, "f32", "f32");
-data_type!(Vec2, "vec2", "vec2<f32>");
-data_type!(Vec3, "vec3", "vec3<f32>");
+data_type!(u32, "u32", "u32", U32);
+data_type!(f32, "f32", "f32", F32);
+data_type!(Vec2, "vec2", "vec2<f32>", F32);
+data_type!(Vec3, "vec3", "vec3<f32>", F32);
 // glam's Vec4 is 16 byte aligned, so the plain array is the storage form.
-data_type!([f32; 4], "vec4", "vec4<f32>");
+data_type!([f32; 4], "vec4", "vec4<f32>", F32);
+
+/// The value an input has while nothing is connected to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PortDefault {
+    /// No elements at all.
+    Empty,
+    F32(&'static [f32]),
+    U32(&'static [u32]),
+}
+
+impl PortDefault {
+    pub fn words(&self) -> &'static [u32] {
+        match self {
+            Self::Empty => &[],
+            Self::F32(values) => bytemuck::cast_slice(values),
+            Self::U32(values) => values,
+        }
+    }
+}

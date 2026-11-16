@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
-use oneiroi_core::types::DataType;
+use oneiroi_core::types::{DataType, Scalar};
 
 use crate::curve::Curve;
 
@@ -45,6 +45,7 @@ impl DataType for CubicNurbsSegmentCache {
 
     const NAME: &'static str = "cubic_nurbs_segment";
     const WGSL: &'static str = "CubicNurbsSegmentCache";
+    const SCALAR: Scalar = Scalar::F32;
 }
 
 /// The two vectors a normal is stored relative to. They only depend on the

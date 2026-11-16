@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
     node::{Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
-    types::DataType,
+    types::{DataType, PortDefault, Scalar},
 };
 
 use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, extract_segments, locate};
@@ -28,6 +28,7 @@ impl DataType for EvaluatedFrame {
 
     const NAME: &'static str = "evaluated_frame";
     const WGSL: &'static str = "EvaluatedFrame";
+    const SCALAR: Scalar = Scalar::F32;
 }
 
 impl From<MovingFrame> for EvaluatedFrame {
@@ -83,7 +84,7 @@ pub static FRAMES: NodeDef = NodeDef {
     display_name: "Curve Frames",
     inputs: &[
         PortDecl::new::<CubicNurbsSegmentCache>("segments"),
-        PortDecl::new::<u32>("samples"),
+        PortDecl::new::<u32>("samples").with_default(PortDefault::U32(&[32])),
     ],
     outputs: &[PortDecl::new::<EvaluatedFrame>("frames")],
     shape: Shape::Expand,

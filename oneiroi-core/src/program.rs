@@ -109,6 +109,12 @@ impl ProgramSet {
         ProgramId(self.programs.len() as u32 - 1)
     }
 
+    /// The program with this [`Program::hash`], if there is one.
+    pub fn find(&self, hash: u64) -> Option<ProgramId> {
+        let index = self.programs.iter().position(|p| p.hash == hash)?;
+        Some(ProgramId(index as u32))
+    }
+
     pub fn get(&self, id: ProgramId) -> &Program {
         &self.programs[id.0 as usize]
     }
@@ -212,12 +218,23 @@ impl ProgramBuilder {
     /// A value every instance can set. This is what an exposed property or
     /// an input socket of the graph lowers to.
     pub fn param<T: DataType>(&mut self, name: impl Into<String>, default: &[T]) -> SlotId {
-        let slot = self.push_slot(T::INFO, SlotSource::Param(self.params.len() as u32));
-        ("param", T::NAME).hash(&mut self.hasher);
+        self.param_words(name, T::INFO, bytemuck::cast_slice(default))
+    }
+
+    /// [`ProgramBuilder::param`] for a type which is only known by its
+    /// [`TypeInfo`]. `default` has to be whole elements of it.
+    pub fn param_words(
+        &mut self,
+        name: impl Into<String>,
+        ty: TypeInfo,
+        default: &[u32],
+    ) -> SlotId {
+        let slot = self.push_slot(ty, SlotSource::Param(self.params.len() as u32));
+        ("param", ty.name, default).hash(&mut self.hasher);
         self.params.push(ParamDecl {
             name: name.into(),
             slot,
-            default: bytemuck::cast_slice(default).into(),
+            default: default.into(),
         });
         slot
     }
@@ -228,7 +245,9 @@ impl ProgramBuilder {
         self.constant_words(T::INFO, bytemuck::cast_slice(value))
     }
 
-    fn constant_words(&mut self, ty: TypeInfo, words: &[u32]) -> SlotId {
+    /// [`ProgramBuilder::constant`] for a type which is only known by its
+    /// [`TypeInfo`]. `words` has to be whole elements of it.
+    pub fn constant_words(&mut self, ty: TypeInfo, words: &[u32]) -> SlotId {
         let key = ContentKey::of_data(&ty, words);
         ("const", key).hash(&mut self.hasher);
         self.push_slot(
@@ -385,6 +404,10 @@ impl ProgramBuilder {
             outputs: outputs.clone().into(),
         });
         outputs
+    }
+
+    pub fn slot_type(&self, slot: SlotId) -> TypeInfo {
+        self.slots[slot.0 as usize].ty
     }
 
     pub fn output(&mut self, name: impl Into<String>, slot: SlotId) {

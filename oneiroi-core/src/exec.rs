@@ -274,6 +274,10 @@ impl<E: Executor> Engine<E> {
         &self.programs
     }
 
+    pub fn programs_mut(&mut self) -> &mut ProgramSet {
+        &mut self.programs
+    }
+
     pub fn add_program(&mut self, program: Program) -> ProgramId {
         self.programs.add(program)
     }
