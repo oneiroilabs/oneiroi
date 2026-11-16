@@ -33,6 +33,7 @@ panic = "abort"
 oneiroi = { path = "./oneiroi" }
 oneiroi-core = { path = "./oneiroi-core" }
 oneiroi-core-macro = { path = "./oneiroi-core-macro" }
+oneiroi-nodes = { path = "./oneiroi-nodes" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 oneiroi-wgpu = { path = "./oneiroi-wgpu" }

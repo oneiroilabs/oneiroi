@@ -3,8 +3,11 @@ use std::{iter, marker::PhantomData};
 
 use glam::Vec3;
 
+mod nodes;
 pub mod nurbs;
 pub mod ops;
+
+pub use nodes::{EvaluatedFrame, FRAMES, NURBS, SAMPLE, register};
 
 pub trait Curve<Sample> {
     // Required methods
