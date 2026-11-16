@@ -4,7 +4,7 @@ members = [
     "oneiroi-godot",
     "oneiroi",
     "oneiroi-cpp",
-    #"oneiroi-bevy",
+    "oneiroi-bevy",
     "oneiroi-wgpu",
     "oneiroi-core",
     "oneiroi-editor",
