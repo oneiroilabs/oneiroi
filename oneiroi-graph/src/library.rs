@@ -69,6 +69,10 @@ impl Library {
     /// A graph whose program is in `programs` already gets that one again.
     /// Lowering after an edit therefore only adds programs for the graphs
     /// which do something else now, and moving a node around adds none.
+    ///
+    /// The programs of before the edit stay in `programs`. Drop them with
+    /// [`ProgramSet::retain`], keeping what this returns and whatever
+    /// else still has instances.
     pub fn lower_into(
         &self,
         registry: &NodeRegistry,

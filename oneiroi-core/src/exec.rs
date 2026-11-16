@@ -669,6 +669,37 @@ mod tests {
     }
 
     #[test]
+    fn unused_programs_can_be_removed() {
+        let mut engine = Engine::default();
+        let inner = engine.add_program(program());
+        let unused = engine.add_program(program());
+
+        let mut b = ProgramBuilder::new("outer");
+        let values = b.param::<f32>("values", &[1.]);
+        let called = b
+            .call(engine.programs(), inner, &[Some(values), None, None])
+            .unwrap();
+        b.output("out", called[0]);
+        let outer = engine.add_program(b.finish());
+
+        // `inner` stays because `outer` calls it.
+        assert_eq!(engine.programs_mut().retain([outer]), 1);
+        assert!(engine.programs().contains(inner) && !engine.programs().contains(unused));
+        assert_eq!(engine.programs().len(), 2);
+
+        let mut instance = engine.instantiate(outer);
+        engine.evaluate([&mut instance]);
+        assert_eq!(engine.read::<f32>(&instance, "out"), Some(&[12.5][..]));
+
+        // Ids are not reused, so an old one never names a new program.
+        let next = engine.add_program(program());
+        assert!(next != unused && engine.programs().find(program().hash).is_some());
+
+        assert_eq!(engine.programs_mut().retain([]), 3);
+        assert!(engine.programs().is_empty());
+    }
+
+    #[test]
     fn types_are_checked() {
         let mut b = ProgramBuilder::new("broken");
         let count = b.constant::<u32>(&[1]);

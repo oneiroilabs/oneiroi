@@ -268,6 +268,11 @@ fn graphs_use_each_other() {
     assert_eq!(edited["pipe"], programs["pipe"]);
     assert_ne!(edited["scene"], programs["scene"]);
     assert_eq!(engine.programs().len(), 3);
+
+    // The scene of before the edit is of no use anymore.
+    assert_eq!(engine.programs_mut().retain(edited.values().copied()), 1);
+    assert!(!engine.programs().contains(programs["scene"]));
+    assert!(engine.programs().contains(edited["pipe"]));
 }
 
 #[test]

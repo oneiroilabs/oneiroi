@@ -397,6 +397,8 @@ impl Document {
             Some(id) => id,
             None => self.engine.add_program(program),
         };
+        // Whatever the graph lowered to before the edit is of no use now.
+        self.engine.programs_mut().retain([id]);
         let mut instance = self.engine.instantiate(id);
         self.nodes_run = self.engine.evaluate([&mut instance]);
         self.instance = Some(instance);
@@ -540,6 +542,16 @@ mod tests {
             document.input_text(sweep, "profile").unwrap(),
             ("needs a link".into(), false)
         );
+    }
+
+    #[test]
+    fn edits_do_not_pile_up_programs() {
+        let mut document = Document::example();
+        let [_, _, sweep] = nodes(&document);
+        for sides in 3..20 {
+            assert!(document.set_input(sweep, "sides", &sides.to_string()));
+        }
+        assert_eq!(document.engine.programs().len(), 1);
     }
 
     #[test]
