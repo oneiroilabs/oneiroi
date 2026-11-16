@@ -135,7 +135,9 @@ pub fn register(registry: &mut NodeRegistry) {
     registry.register(&NURBS);
     registry.register(&FRAMES);
     registry.register(&SAMPLE);
-    registry.register(&super::TUBE);
+    registry.register(&crate::primitive::CIRCLE);
+    super::register_profile::<crate::primitive::Circle>(registry);
+    super::register_profile::<CubicNurbsSegmentCache>(registry);
 }
 
 #[cfg(test)]
@@ -234,7 +236,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        assert_eq!(registry.iter().count(), 4);
+        assert_eq!(registry.iter().count(), 6);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }
