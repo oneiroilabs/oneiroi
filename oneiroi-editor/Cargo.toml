@@ -23,9 +23,15 @@ iced_core = { version = "0.15.0-dev" }
 #    "full",
 #] }
 iced_nodegraph = { version = "0.5.0-dev" }
-oneiroi.workspace = true
 oneiroi-core.workspace = true
 oneiroi-nodes.workspace = true
 oneiroi-wgpu.workspace = true
 glam.workspace = true
 env_logger.workspace = true
+
+# Windows needs no windowing feature, the other platforms have to pick.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+iced = { version = "0.15.0-dev", default-features = false, features = [
+    "x11",
+    "wayland",
+] }
