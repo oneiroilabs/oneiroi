@@ -1,17 +1,20 @@
-//! A row of tubes swept along a NURBS curve.
+//! Profiles swept along a NURBS curve.
 //!
 //! The three tubes in the middle have the same parameters, so they are one
-//! computation and one mesh. The left one changes its radius, which only
-//! meshes the tube again. The right one moves its control points, which
-//! rebuilds its curve as well.
+//! computation and one mesh. The left one changes its radius, which makes
+//! a new circle and sweeps it along the same curve. The one right of them
+//! moves its control points, which rebuilds its curve as well.
+//!
+//! The beam on the far right is the same sweep node with a curve instead
+//! of a circle as its profile.
 
 use bevy::{
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
     prelude::*,
 };
-use oneiroi_bevy::{INDICES, NORMALS, Oneiroi, OneiroiInstance, OneiroiPlugin, POSITIONS, UVS};
-use oneiroi_core::program::{Program, ProgramBuilder};
-use oneiroi_nodes::curve::{NURBS, TUBE, nurbs::clamped_uniform_knots};
+use oneiroi_bevy::{Oneiroi, OneiroiInstance, OneiroiPlugin};
+use oneiroi_core::program::{ProgramBuilder, ProgramId};
+use oneiroi_nodes::curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube};
 
 fn main() {
     App::new()
@@ -36,22 +39,61 @@ fn points(time: f32) -> Vec<[f32; 4]> {
         .collect()
 }
 
-/// The control points and the look of the tube are exposed, the knots of
-/// the curve are not and therefore the same for every instance.
-fn tube() -> Program {
-    let mut b = ProgramBuilder::new("tube");
+/// A tube along a curve. The control points and the look of the tube are
+/// exposed, the knots of the curve are not and therefore the same for
+/// every instance.
+fn tube_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
+    let tube = oneiroi.add_program(tube(oneiroi.registry()));
+
+    let mut b = ProgramBuilder::new("tube along curve");
     let points = b.param("points", &points(0.0));
     let radius = b.param::<f32>("radius", &[0.2]);
-    let rings = b.param::<u32>("rings", &[16]);
-    let sides = b.param::<u32>("sides", &[24]);
     let knots = b.constant(&clamped_uniform_knots(8));
-
-    let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-    let mesh = b.node(&TUBE, &[segments, radius, rings, sides]).unwrap();
-    for (name, slot) in [POSITIONS, NORMALS, UVS, INDICES].iter().zip(mesh) {
-        b.output(*name, slot);
+    let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    // `rings` and `sides` keep the defaults of the tube.
+    let mesh = b
+        .call(oneiroi.programs(), tube, &[Some(spine), Some(radius), None, None])
+        .unwrap();
+    for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+        b.output(port.name, slot);
     }
-    b.finish()
+    oneiroi.add_program(b.finish())
+}
+
+/// The same curve with a square swept along it. The square is a NURBS
+/// curve whose knots repeat, which gives it straight edges and corners.
+fn beam_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
+    let corners = [(0.2, -0.2), (0.2, 0.2), (-0.2, 0.2), (-0.2, -0.2), (0.2, -0.2)];
+    let mut square = vec![[0.2, -0.2, 0.0, 1.0]];
+    for pair in corners.windows(2) {
+        let (from, to) = (Vec2::from(pair[0]), Vec2::from(pair[1]));
+        for step in 1..=3 {
+            let point = from.lerp(to, step as f32 / 3.0);
+            square.push([point.x, point.y, 0.0, 1.0]);
+        }
+    }
+    let mut square_knots = vec![0.0; 4];
+    for knot in [0.25, 0.5, 0.75] {
+        square_knots.extend([knot; 3]);
+    }
+    square_knots.extend([1.0; 4]);
+
+    let mut b = ProgramBuilder::new("beam along curve");
+    let points = b.param("points", &points(0.0));
+    let knots = b.constant(&clamped_uniform_knots(8));
+    let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    let points = b.constant(&square);
+    let knots = b.constant(&square_knots);
+    let profile = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    let rings = b.constant::<u32>(&[16]);
+    let sides = b.constant::<u32>(&[4]);
+    let mesh = b
+        .generic(oneiroi.registry(), &SWEEP, &[spine, profile, rings, sides])
+        .unwrap();
+    for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+        b.output(port.name, slot);
+    }
+    oneiroi.add_program(b.finish())
 }
 
 #[derive(Component)]
@@ -65,14 +107,16 @@ fn setup(
     mut oneiroi: ResMut<Oneiroi>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let program = oneiroi.add_program(tube());
+    let tube = tube_along_curve(&mut oneiroi);
+    let beam = beam_along_curve(&mut oneiroi);
     let material = materials.add(Color::srgb(0.8, 0.7, 0.6));
 
-    for column in 0..5 {
+    for column in 0..6 {
+        let program = if column == 5 { beam } else { tube };
         let mut tube = commands.spawn((
             oneiroi.instantiate(program),
             MeshMaterial3d(material.clone()),
-            Transform::from_xyz((column as f32 - 2.0) * 3.0, 0.0, 0.0),
+            Transform::from_xyz((column as f32 - 2.5) * 3.0, 0.0, 0.0),
         ));
         match column {
             0 => tube.insert(Pulse),
@@ -91,7 +135,7 @@ fn setup(
     commands.spawn((
         Camera3d::default(),
         FreeCamera::default(),
-        Transform::from_xyz(0.0, 3.5, 14.0).looking_at(Vec3::new(0.0, 3.5, 0.0), Vec3::Y),
+        Transform::from_xyz(0.0, 3.5, 16.0).looking_at(Vec3::new(0.0, 3.5, 0.0), Vec3::Y),
     ));
 }
 

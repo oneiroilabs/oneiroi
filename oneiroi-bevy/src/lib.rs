@@ -14,7 +14,8 @@ use bevy::{
 };
 use oneiroi_core::{
     exec::{Engine, Instance, ParamError},
-    program::{Program, ProgramId},
+    node::NodeRegistry,
+    program::{Program, ProgramId, ProgramSet},
     store::ContentKey,
     types::DataType,
 };
@@ -55,6 +56,7 @@ pub struct OneiroiStats {
 #[derive(Resource)]
 pub struct Oneiroi {
     engine: Engine,
+    registry: NodeRegistry,
     meshes: HashMap<MeshKey, Handle<Mesh>>,
     stats: OneiroiStats,
     /// How many 32-bit words of results are kept around before the ones
@@ -64,8 +66,11 @@ pub struct Oneiroi {
 
 impl Default for Oneiroi {
     fn default() -> Self {
+        let mut registry = NodeRegistry::new();
+        oneiroi_nodes::register(&mut registry);
         Self {
             engine: Engine::default(),
+            registry,
             meshes: HashMap::new(),
             stats: OneiroiStats::default(),
             // 256 MiB
@@ -75,6 +80,20 @@ impl Default for Oneiroi {
 }
 
 impl Oneiroi {
+    /// Every node programs can be built from. The ones of `oneiroi-nodes`
+    /// are in there from the start.
+    pub fn registry(&self) -> &NodeRegistry {
+        &self.registry
+    }
+
+    pub fn registry_mut(&mut self) -> &mut NodeRegistry {
+        &mut self.registry
+    }
+
+    pub fn programs(&self) -> &ProgramSet {
+        self.engine.programs()
+    }
+
     pub fn add_program(&mut self, program: Program) -> ProgramId {
         self.engine.add_program(program)
     }
@@ -203,12 +222,15 @@ fn build_mesh(engine: &Engine, instance: &Instance) -> Option<Mesh> {
 #[cfg(test)]
 mod tests {
     use oneiroi_core::program::ProgramBuilder;
-    use oneiroi_nodes::curve::{NURBS, TUBE, nurbs::clamped_uniform_knots};
+    use oneiroi_nodes::curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots};
 
     use super::*;
 
-    fn tube() -> Program {
-        let mut b = ProgramBuilder::new("tube");
+    /// A fixed curve with the tube graph called on it.
+    fn tube(oneiroi: &mut Oneiroi) -> ProgramId {
+        let tube = oneiroi.add_program(oneiroi_nodes::curve::tube(oneiroi.registry()));
+
+        let mut b = ProgramBuilder::new("test");
         let points = b.constant::<[f32; 4]>(&[
             [0., 0., 0., 1.],
             [1., 2., 0., 1.],
@@ -220,11 +242,17 @@ mod tests {
         let rings = b.constant::<u32>(&[4]);
         let sides = b.constant::<u32>(&[6]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let mesh = b.node(&TUBE, &[segments, radius, rings, sides]).unwrap();
-        for (name, slot) in [POSITIONS, NORMALS, UVS, INDICES].iter().zip(mesh) {
-            b.output(*name, slot);
+        let mesh = b
+            .call(
+                oneiroi.programs(),
+                tube,
+                &[Some(segments), Some(radius), Some(rings), Some(sides)],
+            )
+            .unwrap();
+        for (port, slot) in SWEEP.outputs.iter().zip(mesh) {
+            b.output(port.name, slot);
         }
-        b.finish()
+        oneiroi.add_program(b.finish())
     }
 
     fn app() -> (App, [Entity; 3]) {
@@ -233,7 +261,7 @@ mod tests {
             .init_asset::<Mesh>();
 
         let mut oneiroi = app.world_mut().resource_mut::<Oneiroi>();
-        let program = oneiroi.add_program(tube());
+        let program = tube(&mut oneiroi);
         let instances = [(); 3].map(|_| oneiroi.instantiate(program));
         let entities = instances.map(|instance| app.world_mut().spawn(instance).id());
         (app, entities)
@@ -263,7 +291,7 @@ mod tests {
             stats,
             OneiroiStats {
                 instances: 3,
-                nodes_run: 2,
+                nodes_run: 3,
                 meshes: 1
             }
         );
@@ -287,8 +315,8 @@ mod tests {
         set_radius(&mut app, b, 0.5);
         app.update();
         let stats = app.world().resource::<Oneiroi>().stats();
-        // Only the tube is meshed again, the curve is still the same one.
-        assert_eq!((stats.nodes_run, stats.meshes), (1, 2));
+        // A new circle is swept, the curve is still the same one.
+        assert_eq!((stats.nodes_run, stats.meshes), (2, 2));
         assert_ne!(mesh(&app, a), mesh(&app, b));
 
         // Once nobody shows a mesh anymore it is dropped again.
