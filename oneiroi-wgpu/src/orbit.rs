@@ -26,20 +26,32 @@ impl OrbitCamera {
         }
     }
 
-    fn view_matrix(&self) -> Mat4 {
+    pub fn position(&self) -> Vec3 {
         let cos_pitch = self.pitch.cos();
         let sin_pitch = self.pitch.sin();
         let cos_yaw = self.yaw.cos();
         let sin_yaw = self.yaw.sin();
 
-        let camera_pos = self.target
+        self.target
             + glam::Vec3::new(
                 self.radius * cos_pitch * sin_yaw,
                 self.radius * sin_pitch,
                 self.radius * cos_pitch * cos_yaw,
-            );
+            )
+    }
 
-        Mat4::look_at_lh(camera_pos, self.target, Vec3::Y)
+    pub fn target(&self) -> Vec3 {
+        self.target
+    }
+
+    /// Looks at `target` from `radius` away, keeping the direction.
+    pub fn frame(&mut self, target: Vec3, radius: f32) {
+        self.target = target;
+        self.radius = radius;
+    }
+
+    fn view_matrix(&self) -> Mat4 {
+        Mat4::look_at_lh(self.position(), self.target, Vec3::Y)
     }
 
     pub fn view_projection(&self, aspect_ratio: f32) -> Mat4 {

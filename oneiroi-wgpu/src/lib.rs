@@ -10,7 +10,10 @@ use winit::{event_loop::OwnedDisplayHandle, window::Window};
 
 use crate::orbit::OrbitCamera;
 
+pub mod mesh;
 pub mod orbit;
+
+pub use mesh::{MeshData, MeshPreview};
 
 pub const DEBUG: bool = true;
 
