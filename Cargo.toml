@@ -52,10 +52,9 @@ petgraph = { version = "0.8", features = ["serde-1"] }
 
 
 [patch.crates-io]
-iced = { path = "../iced/" }                                   #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_core = { path = "../iced/core" }                          #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_runtime = { path = "../iced/runtime" }                    #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_widget = { path = "../iced/widget" }                      #git = "https://github.com/kistz/iced.git",branch = "patch-features" }
-iced_nodegraph = { path = "../iced_nodegraph/iced_nodegraph" }
-iced_wgpu = { path = "../iced/wgpu" }
-iced_test = { path = "../iced/test" }
+iced = { git = "https://github.com/kistz/iced.git", rev = "e6b1fe17b2edae1aa165334dcad9a984a9b0957e" }
+iced_core = { git = "https://github.com/kistz/iced.git", rev = "e6b1fe17b2edae1aa165334dcad9a984a9b0957e" }
+iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "e6b1fe17b2edae1aa165334dcad9a984a9b0957e" }
+iced_widget = { git = "https://github.com/kistz/iced.git", rev = "e6b1fe17b2edae1aa165334dcad9a984a9b0957e" }
+iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "e6b1fe17b2edae1aa165334dcad9a984a9b0957e" }
+iced_nodegraph = { git = "https://github.com/kistz/iced_nodegraph.git", rev = "cd38035737f16de6d394517c3d4440bf3368c1fc" }
