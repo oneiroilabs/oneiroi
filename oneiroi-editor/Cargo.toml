@@ -25,6 +25,8 @@ iced_core = { version = "0.15.0-dev" }
 iced_nodegraph = { version = "0.5.0-dev" }
 oneiroi-core.workspace = true
 oneiroi-nodes.workspace = true
+oneiroi-graph.workspace = true
+bytemuck.workspace = true
 oneiroi-wgpu.workspace = true
 glam.workspace = true
 env_logger.workspace = true

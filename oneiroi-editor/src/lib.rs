@@ -1,5 +1,7 @@
 use iced::window;
 
+pub mod document;
+pub mod preview;
 pub mod viewport;
 
 pub mod node_test;
