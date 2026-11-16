@@ -135,6 +135,7 @@ pub fn register(registry: &mut NodeRegistry) {
     registry.register(&NURBS);
     registry.register(&FRAMES);
     registry.register(&SAMPLE);
+    registry.register(&super::TUBE);
 }
 
 #[cfg(test)]
@@ -233,7 +234,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        assert_eq!(registry.iter().count(), 3);
+        assert_eq!(registry.iter().count(), 4);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

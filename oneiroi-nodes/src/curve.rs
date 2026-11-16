@@ -6,8 +6,10 @@ use glam::Vec3;
 mod nodes;
 pub mod nurbs;
 pub mod ops;
+mod tube;
 
 pub use nodes::{EvaluatedFrame, FRAMES, NURBS, SAMPLE, register};
+pub use tube::{TUBE, tube_point};
 
 pub trait Curve<Sample> {
     // Required methods
