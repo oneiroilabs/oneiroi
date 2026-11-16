@@ -6,7 +6,7 @@ use oneiroi_core::{
     exec::{CpuExecutor, Executor, Work},
     node::{Caps, GpuKernel, Inputs, NodeDef},
     shader::{self, ShaderError, WORKGROUP_SIZE},
-    store::{Handle, Store},
+    store::{ContentKey, Handle, Store},
 };
 use wgpu::util::DeviceExt;
 
@@ -15,6 +15,8 @@ use wgpu::util::DeviceExt;
 pub struct GpuStats {
     pub gpu: usize,
     pub cpu: usize,
+    /// How many values were brought back from the GPU.
+    pub downloads: usize,
 }
 
 struct Pipeline {
@@ -28,9 +30,12 @@ struct Pipeline {
 ///
 /// The pages of the store are mirrored into buffers on the device, and
 /// only what was written since the last time is uploaded. A kernel reads
-/// its inputs straight out of those buffers. Its output is read back into
-/// the store right away, which is what lets nodes on the CPU continue
-/// with it.
+/// its inputs straight out of those buffers and its output is copied into
+/// them, at the place the store reserved for it.
+///
+/// A result stays on the device. It is only brought back when a node on
+/// the CPU reads it or somebody asks for it, see
+/// [`Engine::fetch`](oneiroi_core::exec::Engine::fetch).
 pub struct GpuExecutor {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -166,7 +171,9 @@ impl GpuExecutor {
                 self.pages.push(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Oneiroi Page"),
                     size: page.len() as u64 * 4,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 }));
             }
@@ -197,6 +204,10 @@ impl GpuExecutor {
         };
         let kernel = pipeline.kernel;
         let output = item.node.outputs[0].ty;
+        // Asking for the length may look at some inputs, which then have
+        // to be here.
+        let reads: Vec<_> = kernel.reads.iter().map(|index| item.inputs[*index]).collect();
+        self.download(store, &reads);
         let elements = (kernel.len)(&Inputs::new(store, item.node, &self.handles));
         if elements == 0 {
             store.insert(item.outputs[0], &[]);
@@ -213,6 +224,7 @@ impl GpuExecutor {
             return false;
         }
 
+        let target = store.reserve(item.outputs[0], (elements * output.words as usize) as u32);
         self.upload(store);
 
         let mut args: Vec<[u32; 4]> = self
@@ -234,13 +246,6 @@ impl GpuExecutor {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Oneiroi Readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
         let inputs = self.handles.len();
         let mut entries: Vec<_> = self
             .handles
@@ -280,19 +285,9 @@ impl GpuExecutor {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(groups as u32, 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&result, 0, &readback, 0, size);
+        let page = &self.pages[target.page as usize];
+        encoder.copy_buffer_to_buffer(&result, 0, page, target.offset as u64 * 4, size);
         self.queue.submit([encoder.finish()]);
-
-        readback.map_async(wgpu::MapMode::Read, .., |result| {
-            result.expect("the readback buffer is only used here")
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("the device is alive while its executor is");
-        let words = readback
-            .get_mapped_range(..)
-            .expect("the buffer was mapped right above");
-        store.insert(item.outputs[0], bytemuck::cast_slice(&words));
         true
     }
 }
@@ -303,9 +298,57 @@ impl Executor for GpuExecutor {
             if self.run(store, item) {
                 self.stats.gpu += 1;
             } else {
+                // A node on the CPU reads all of its inputs.
+                self.download(store, &item.inputs);
                 self.cpu.execute(store, std::slice::from_ref(item));
                 self.stats.cpu += 1;
             }
+        }
+    }
+
+    fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
+        let remote: Vec<_> = keys
+            .iter()
+            .filter(|key| !store.is_resident(**key))
+            .filter_map(|key| Some((*key, store.get(*key)?)))
+            .collect();
+        let size: u64 = remote.iter().map(|(_, handle)| handle.len as u64 * 4).sum();
+        if size == 0 {
+            return;
+        }
+
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Oneiroi Readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut offset = 0;
+        for (_, handle) in &remote {
+            let bytes = handle.len as u64 * 4;
+            let page = &self.pages[handle.page as usize];
+            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, &readback, offset, bytes);
+            offset += bytes;
+        }
+        self.queue.submit([encoder.finish()]);
+
+        readback.map_async(wgpu::MapMode::Read, .., |result| {
+            result.expect("the readback buffer is only used here")
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device is alive while its executor is");
+        let bytes = readback
+            .get_mapped_range(..)
+            .expect("the buffer was mapped right above");
+        let words: &[u32] = bytemuck::cast_slice(&bytes);
+
+        let mut offset = 0;
+        for (key, handle) in &remote {
+            store.fill(*key, &words[offset..offset + handle.len as usize]);
+            offset += handle.len as usize;
+            self.stats.downloads += 1;
         }
     }
 }

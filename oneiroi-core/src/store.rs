@@ -82,8 +82,9 @@ struct Page {
     words: Vec<u32>,
     /// Free `(offset, len)` runs, sorted by offset and never adjacent.
     free: Vec<(u32, u32)>,
-    /// The words written since somebody last asked, as `start..end`.
-    dirty: Option<(u32, u32)>,
+    /// The runs of words written since somebody last asked, as
+    /// `(start, end)`, sorted and never touching each other.
+    dirty: Vec<(u32, u32)>,
 }
 
 impl Page {
@@ -91,7 +92,7 @@ impl Page {
         Self {
             words: vec![0; words as usize],
             free: vec![(0, words)],
-            dirty: None,
+            dirty: Vec::new(),
         }
     }
 
@@ -104,6 +105,20 @@ impl Page {
             self.free[index] = (offset + len, free - len);
         }
         Some(offset)
+    }
+
+    fn mark_dirty(&mut self, start: u32, end: u32) {
+        let (mut start, mut end) = (start, end);
+        self.dirty.retain(|&(from, to)| {
+            let apart = to < start || end < from;
+            if !apart {
+                start = start.min(from);
+                end = end.max(to);
+            }
+            apart
+        });
+        let index = self.dirty.partition_point(|&(from, _)| from < start);
+        self.dirty.insert(index, (start, end));
     }
 
     fn free(&mut self, offset: u32, len: u32) {
@@ -123,6 +138,9 @@ impl Page {
 struct Entry {
     handle: Handle,
     last_used: u64,
+    /// Whether the words in the page are the value. If not, only the
+    /// backend which computed it has them so far.
+    resident: bool,
 }
 
 pub struct Store {
@@ -171,32 +189,71 @@ impl Store {
         Some(entry.handle)
     }
 
+    /// Whether the value of `key` can be read from the store right now.
+    /// A value a backend keeps to itself has to be downloaded first.
+    pub fn is_resident(&self, key: ContentKey) -> bool {
+        self.entries.get(&key).is_some_and(|entry| entry.resident)
+    }
+
     /// Stores `words` under `key`. An existing entry is kept as it is,
     /// since equal keys mean equal content.
     pub fn insert(&mut self, key: ContentKey, words: &[u32]) -> Handle {
+        if let Some(entry) = self.entries.get(&key) {
+            let (handle, resident) = (entry.handle, entry.resident);
+            if !resident {
+                self.fill(key, words);
+            }
+            self.touch(key);
+            return handle;
+        }
+
+        let handle = self.reserve(key, words.len() as u32);
+        let page = &mut self.pages[handle.page as usize];
+        page.words[handle.offset as usize..][..words.len()].copy_from_slice(words);
+        if !words.is_empty() {
+            page.mark_dirty(handle.offset, handle.offset + handle.len);
+        }
+        self.entries.get_mut(&key).unwrap().resident = true;
+        handle
+    }
+
+    /// Makes room for a value of `len` words which a backend computes and
+    /// keeps on its side. The store knows where the value belongs, but not
+    /// what it is until it gets [filled in](Store::fill).
+    pub fn reserve(&mut self, key: ContentKey, len: u32) -> Handle {
         if let Some(handle) = self.touch(key) {
             return handle;
         }
 
-        let handle = self.alloc(words.len() as u32);
-        let page = &mut self.pages[handle.page as usize];
-        page.words[handle.offset as usize..][..words.len()].copy_from_slice(words);
-        if !words.is_empty() {
-            let (start, end) = (handle.offset, handle.offset + handle.len);
-            page.dirty = Some(match page.dirty {
-                Some((from, to)) => (from.min(start), to.max(end)),
-                None => (start, end),
-            });
-        }
-        self.used_words += words.len() as u64;
+        let handle = self.alloc(len);
+        self.used_words += len as u64;
         self.entries.insert(
             key,
             Entry {
                 handle,
                 last_used: self.frame,
+                // Nothing is as good on one side as on the other.
+                resident: len == 0,
             },
         );
         handle
+    }
+
+    /// Writes the value of a reserved entry which was brought over from
+    /// the backend. Returns whether there was such an entry.
+    pub fn fill(&mut self, key: ContentKey, words: &[u32]) -> bool {
+        let Some(entry) = self.entries.get_mut(&key) else {
+            return false;
+        };
+        if entry.handle.len as usize != words.len() {
+            return false;
+        }
+        entry.resident = true;
+        let handle = entry.handle;
+        // The backend has these words already, so they are not dirty.
+        self.pages[handle.page as usize].words[handle.offset as usize..][..words.len()]
+            .copy_from_slice(words);
+        true
     }
 
     fn alloc(&mut self, len: u32) -> Handle {
@@ -229,8 +286,10 @@ impl Store {
         bytemuck::cast_slice(self.words(handle))
     }
 
+    /// The value of `key`, if it is here and not only on the backend.
     pub fn read<T: DataType>(&self, key: ContentKey) -> Option<&[T]> {
-        self.get(key).map(|handle| self.slice(handle))
+        let entry = self.entries.get(&key).filter(|entry| entry.resident)?;
+        Some(self.slice(entry.handle))
     }
 
     /// Frees the least recently used entries until at most `budget_words`
@@ -285,9 +344,10 @@ impl Store {
         self.pages
             .iter_mut()
             .enumerate()
-            .filter_map(|(index, page)| {
-                let (start, end) = page.dirty.take()?;
-                Some((index as u32, start..end))
+            .flat_map(|(index, page)| {
+                std::mem::take(&mut page.dirty)
+                    .into_iter()
+                    .map(move |(start, end)| (index as u32, start..end))
             })
             .collect()
     }
@@ -376,6 +436,44 @@ mod tests {
         store.insert(key(1), &[1; 2]);
         store.insert(key(4), &[4; 10]);
         assert_eq!(store.take_dirty(), [(1, 0..10)]);
+    }
+
+    #[test]
+    fn values_can_live_on_the_backend_only() {
+        let mut store = Store::with_page_words(16);
+        store.insert(key(1), &[1; 2]);
+        let remote = store.reserve(key(2), 3);
+        store.insert(key(3), &[3; 2]);
+
+        // It has its place, but nothing to read and nothing to upload:
+        // the words around it must not overwrite what the backend put there.
+        assert_eq!((remote.offset, remote.len), (2, 3));
+        assert!(store.contains(key(2)) && !store.is_resident(key(2)));
+        assert_eq!(store.read::<u32>(key(2)), None);
+        assert_eq!(store.take_dirty(), [(0, 0..2), (0, 5..7)]);
+
+        assert!(store.fill(key(2), &[2; 3]));
+        assert_eq!(store.read::<u32>(key(2)), Some(&[2; 3][..]));
+        assert_eq!(store.take_dirty(), []);
+
+        // Only what was reserved can be filled, and only all of it.
+        assert!(!store.fill(key(9), &[0]));
+        assert!(!store.fill(key(1), &[0; 5]));
+        // An empty value is the same everywhere.
+        store.reserve(key(4), 0);
+        assert!(store.is_resident(key(4)));
+    }
+
+    #[test]
+    fn neighbouring_writes_are_reported_as_one() {
+        let mut page = Page::new(32);
+        page.mark_dirty(10, 12);
+        page.mark_dirty(0, 2);
+        page.mark_dirty(20, 22);
+        page.mark_dirty(2, 10);
+        assert_eq!(page.dirty, vec![(0, 12), (20, 22)]);
+        page.mark_dirty(11, 21);
+        assert_eq!(page.dirty, vec![(0, 22)]);
     }
 
     #[test]

@@ -104,6 +104,7 @@ pub static FRAMES: NodeDef = NodeDef {
         entry: "curve_frames",
         requires: Caps::NONE,
         len: frames_len,
+        reads: &[1],
     }],
 };
 
@@ -112,7 +113,7 @@ fn frames_samples(inputs: &Inputs<'_>) -> usize {
 }
 
 fn frames_len(inputs: &Inputs<'_>) -> usize {
-    inputs.get::<CubicNurbsSegmentCache>(0).len() * frames_samples(inputs)
+    inputs.len(0) * frames_samples(inputs)
 }
 
 fn frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {

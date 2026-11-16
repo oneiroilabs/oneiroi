@@ -277,7 +277,8 @@ mod tests {
             wgsl,
             entry: "grow",
             requires: Caps::NONE,
-            len: |inputs| inputs.get::<Particle>(0).len(),
+            len: |inputs| inputs.len(0),
+            reads: &[],
         };
         (node, kernel)
     }

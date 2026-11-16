@@ -63,6 +63,12 @@ impl<'a> Inputs<'a> {
         }
     }
 
+    /// How many elements an input has. Unlike [`Inputs::get`] this never
+    /// looks at the values.
+    pub fn len(&self, index: usize) -> usize {
+        (self.handles[index].len / self.ports[index].ty.words) as usize
+    }
+
     pub fn get<T: DataType>(&self, index: usize) -> &'a [T] {
         debug_assert_eq!(self.ports[index].ty, T::INFO, "{}", self.ports[index].name);
         self.store.slice(self.handles[index])
@@ -134,6 +140,9 @@ pub struct GpuKernel {
     /// How many elements the output will have. This is asked before the
     /// kernel runs, to make room for them.
     pub len: fn(&Inputs<'_>) -> usize,
+    /// The inputs `len` reads the values of. Of every other input it may
+    /// only ask how long it is, since its values can be on the GPU only.
+    pub reads: &'static [usize],
 }
 
 pub struct NodeDef {

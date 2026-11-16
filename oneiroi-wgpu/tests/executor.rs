@@ -47,7 +47,7 @@ fn program<E: Executor>(engine: &mut Engine<E>, count: usize) -> ProgramId {
 
 fn frames<E: Executor>(engine: &mut Engine<E>, instance: &mut Instance) -> Vec<f32> {
     engine.evaluate([&mut *instance]);
-    let frames = engine.read::<EvaluatedFrame>(instance, "frames").unwrap();
+    let frames = engine.fetch::<EvaluatedFrame>(instance, "frames").unwrap();
     bytemuck::cast_slice(frames).to_vec()
 }
 
@@ -98,16 +98,16 @@ fn only_nodes_with_a_kernel_run_on_the_gpu() {
 
     // The curve is built on the CPU, its frames are computed on the GPU.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, downloads: 1 });
 
     // What is in the store already is not computed again, wherever it
     // came from.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, downloads: 1 });
 
     gpu.set_param(&mut instance, "samples", &[3u32]).unwrap();
     assert_eq!(frames(&mut gpu, &mut instance).len(), 6 * 3 * 16);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, downloads: 2 });
 }
 
 #[test]
@@ -142,4 +142,157 @@ fn edge_cases_match_the_cpu() {
     let a = frames(&mut gpu, &mut on_gpu);
     assert!(a.iter().all(|value| value.is_finite()));
     assert_close(&a, &frames(&mut cpu, &mut on_cpu));
+}
+
+mod staying_on_the_gpu {
+    use glam::Vec3;
+    use oneiroi_core::node::{Caps, GpuKernel, Inputs, NodeDef, Outputs, PortDecl, Shape};
+    use oneiroi_nodes::curve::nurbs::MovingFrame;
+
+    use super::*;
+
+    fn positions(inputs: &Inputs<'_>, outputs: &mut Outputs) {
+        let positions: Vec<_> = inputs
+            .get::<EvaluatedFrame>(0)
+            .iter()
+            .map(|frame| MovingFrame::from(*frame).position)
+            .collect();
+        outputs.set(0, &positions);
+    }
+
+    const INPUTS: &[PortDecl] = &[PortDecl::new::<EvaluatedFrame>("frames")];
+    const OUTPUTS: &[PortDecl] = &[PortDecl::new::<Vec3>("positions")];
+
+    /// Reads what another kernel computed.
+    static ON_GPU: NodeDef = NodeDef {
+        id: "test.positions",
+        display_name: "Positions",
+        inputs: INPUTS,
+        outputs: OUTPUTS,
+        shape: Shape::Map,
+        cpu: positions,
+        gpu: &[GpuKernel {
+            wgsl: "fn positions(index: u32) -> vec3<f32> { return in_frames(index).position; }",
+            entry: "positions",
+            requires: Caps::NONE,
+            len: |inputs| inputs.len(0),
+            reads: &[],
+        }],
+    };
+
+    /// The same node without a kernel.
+    static ON_CPU: NodeDef = NodeDef {
+        id: "test.positions_cpu",
+        display_name: "Positions",
+        inputs: INPUTS,
+        outputs: OUTPUTS,
+        shape: Shape::Map,
+        cpu: positions,
+        gpu: &[],
+    };
+
+    fn chain<E: Executor>(engine: &mut Engine<E>, last: &'static NodeDef) -> ProgramId {
+        let mut b = ProgramBuilder::new("positions");
+        let points = b.param("points", &points(9));
+        let knots = b.constant(&clamped_uniform_knots(9));
+        let samples = b.constant::<u32>(&[8]);
+        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let positions = b.node(last, &[frames]).unwrap()[0];
+        b.output("frames", frames);
+        b.output("positions", positions);
+        engine.add_program(b.finish())
+    }
+
+    fn reference(points: Option<&[[f32; 4]]>) -> (Vec<Vec3>, Vec<f32>) {
+        let mut cpu = Engine::default();
+        let program = chain(&mut cpu, &ON_CPU);
+        let mut instance = cpu.instantiate(program);
+        if let Some(points) = points {
+            cpu.set_param(&mut instance, "points", points).unwrap();
+        }
+        cpu.evaluate([&mut instance]);
+        let frames = cpu.read::<EvaluatedFrame>(&instance, "frames").unwrap();
+        (
+            cpu.read::<Vec3>(&instance, "positions").unwrap().to_vec(),
+            bytemuck::cast_slice(frames).to_vec(),
+        )
+    }
+
+    fn close(gpu: &[Vec3], cpu: &[Vec3]) {
+        assert_eq!(gpu.len(), cpu.len());
+        assert!(gpu.iter().zip(cpu).all(|(a, b)| a.distance(*b) < 1e-4));
+    }
+
+    #[test]
+    fn a_kernel_reads_what_another_one_left_on_the_gpu() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        let program = chain(&mut gpu, &ON_GPU);
+        let mut instance = gpu.instantiate(program);
+        gpu.evaluate([&mut instance]);
+
+        // Two kernels ran and nothing came back.
+        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, downloads: 0 });
+        assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
+        assert!(gpu.read::<Vec3>(&instance, "positions").is_none());
+
+        // Only what is asked for is brought back.
+        let positions = gpu.fetch::<Vec3>(&instance, "positions").unwrap().to_vec();
+        close(&positions, &reference(None).0);
+        assert_eq!(gpu.executor().stats().downloads, 1);
+        assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
+
+        // Once it is here it stays here.
+        gpu.fetch::<Vec3>(&instance, "positions").unwrap();
+        assert_eq!(gpu.executor().stats().downloads, 1);
+        assert!(gpu.read::<Vec3>(&instance, "positions").is_some());
+    }
+
+    #[test]
+    fn a_node_on_the_cpu_gets_what_it_reads() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        let program = chain(&mut gpu, &ON_CPU);
+        let mut instance = gpu.instantiate(program);
+        gpu.evaluate([&mut instance]);
+
+        // The frames were brought back for the node which has no kernel.
+        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 2, downloads: 1 });
+        close(
+            gpu.read::<Vec3>(&instance, "positions").unwrap(),
+            &reference(None).0,
+        );
+    }
+
+    #[test]
+    fn the_cpu_can_write_next_to_what_the_gpu_holds() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        let program = chain(&mut gpu, &ON_GPU);
+        let mut first = gpu.instantiate(program);
+        gpu.evaluate([&mut first]);
+
+        // More curves are built on the CPU and uploaded into the pages
+        // which hold the frames of the first one.
+        for count in 0..6 {
+            let moved: Vec<_> = points(9)
+                .into_iter()
+                .map(|[x, y, z, w]| [x + count as f32, y, z, w])
+                .collect();
+            let mut other = gpu.instantiate(program);
+            gpu.set_param(&mut other, "points", &moved).unwrap();
+            gpu.evaluate([&mut other]);
+            close(
+                gpu.fetch::<Vec3>(&other, "positions").unwrap(),
+                &reference(Some(&moved)).0,
+            );
+        }
+
+        let frames = gpu.fetch::<EvaluatedFrame>(&first, "frames").unwrap();
+        assert_close(bytemuck::cast_slice(frames), &reference(None).1);
+    }
 }

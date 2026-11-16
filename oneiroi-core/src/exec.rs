@@ -27,6 +27,11 @@ pub struct Work {
 /// store, under the key the work names.
 pub trait Executor {
     fn execute(&mut self, store: &mut Store, work: &[Work]);
+
+    /// Brings the values of `keys` which only the backend has so far into
+    /// the store, so they can be read. A backend which keeps nothing to
+    /// itself has nothing to do.
+    fn download(&mut self, _store: &mut Store, _keys: &[ContentKey]) {}
 }
 
 /// Runs every node through its CPU kernel, one after the other.
@@ -379,9 +384,21 @@ impl<E: Executor> Engine<E> {
     }
 
     /// An output of an evaluated instance. `None` if there is no such
-    /// output, or it is not in the store (anymore).
+    /// output, it is not in the store (anymore), or only the backend has
+    /// it. Use [`Engine::fetch`] to get it in the last case too.
     pub fn read<T: DataType>(&self, instance: &Instance, name: &str) -> Option<&[T]> {
         self.store.read(self.output_key(instance, name)?)
+    }
+
+    /// Like [`Engine::read`], but downloads the output first if only the
+    /// backend has it. That can take a while, so do it for what the CPU
+    /// really needs to see and not for everything.
+    pub fn fetch<T: DataType>(&mut self, instance: &Instance, name: &str) -> Option<&[T]> {
+        let key = self.output_key(instance, name)?;
+        if self.store.contains(key) && !self.store.is_resident(key) {
+            self.executor.download(&mut self.store, &[key]);
+        }
+        self.store.read(key)
     }
 
     /// Ends the frame: results nobody asked for lately are dropped until
