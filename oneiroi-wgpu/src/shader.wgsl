@@ -5,6 +5,7 @@ struct CubicNurbsSegmentCache {
     cumulative_length: f32,
 
     rmf_start_normal: vec2<f32>,
+    rmf_end_normal: vec2<f32>,
 }
 
 @group(0) @binding(0)

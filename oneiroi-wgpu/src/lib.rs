@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
-use oneiroi_core::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
+use oneiroi_nodes::curve::nurbs::{CubicNurbs, CubicNurbsSegmentCache};
 use wgpu::{
     BindGroup, BindGroupLayout, Buffer, ComputePipeline, MeshState, RenderPipeline, TextureFormat,
     util::DeviceExt,
@@ -906,7 +906,7 @@ impl State {
             knot_vec[i] = interior_t;
         }
 
-        let curve = oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
+        let curve = oneiroi_nodes::curve::nurbs::CubicNurbs::new(control_points, knot_vec);
 
         let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
 

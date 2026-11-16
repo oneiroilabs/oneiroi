@@ -9,7 +9,7 @@ use iced::{
     },
     window::Id,
 };
-use oneiroi_core::curve::nurbs::CubicNurbs;
+use oneiroi_nodes::curve::nurbs::CubicNurbs;
 use oneiroi_wgpu::{
     PipelineState, RmfVisualizerUniforms, SdfUniforms, State, TubeUniforms, orbit::OrbitCamera,
 };
@@ -76,7 +76,7 @@ impl OneiroiScene {
                 knot_vec[i] = interior_t;
             }
 
-            oneiroi_core::curve::nurbs::CubicNurbs::new(control_points, knot_vec)
+            oneiroi_nodes::curve::nurbs::CubicNurbs::new(control_points, knot_vec)
         };
 
         let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
