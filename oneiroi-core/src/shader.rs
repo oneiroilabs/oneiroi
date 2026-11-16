@@ -9,7 +9,7 @@ use std::fmt::{self, Write};
 
 use crate::{
     node::{GpuKernel, NodeDef},
-    types::{FieldType, Layout, TypeInfo},
+    types::{Field, FieldType, Layout, TypeInfo},
 };
 
 /// How many elements one workgroup of a generated compute shader covers.
@@ -80,7 +80,30 @@ fn read(ty: FieldType, page: &str, base: &str, offset: u32) -> String {
                 .collect();
             format!("mat4x4<f32>({})", columns.join(", "))
         }
+        FieldType::Struct { wgsl, fields } => read_struct(wgsl, fields, page, base, offset),
         FieldType::Pad(_) => unreachable!("padding is never read"),
+    }
+}
+
+/// The expression which builds a struct out of its fields.
+fn read_struct(wgsl: &str, fields: &[Field], page: &str, base: &str, start: u32) -> String {
+    let mut offset = start;
+    let mut parts = Vec::new();
+    for field in fields {
+        if field.ty.wgsl().is_some() {
+            parts.push(read(field.ty, page, base, offset));
+        }
+        offset += field.ty.words();
+    }
+    format!("{wgsl}({})", parts.join(", "))
+}
+
+fn write_struct(out: &mut String, fields: &[Field], value: &str, page: &str, base: &str, start: u32) {
+    let mut offset = start;
+    for field in fields {
+        let value = format!("{value}.{}", field.name);
+        write(out, field.ty, &value, page, base, offset);
+        offset += field.ty.words();
     }
 }
 
@@ -108,50 +131,49 @@ fn write(out: &mut String, ty: FieldType, value: &str, page: &str, base: &str, o
                 word(index, "0u".into());
             }
         }
+        FieldType::Struct { fields, .. } => write_struct(out, fields, value, page, base, offset),
     }
 }
 
 /// The expression which reads a whole element of `ty`.
-fn read_element(ty: &TypeInfo, page: &str, base: &str) -> String {
+pub(crate) fn read_element(ty: &TypeInfo, page: &str, base: &str) -> String {
     match ty.layout {
         Layout::Value(field) => read(field, page, base, 0),
-        Layout::Struct(fields) => {
-            let mut offset = 0;
-            let mut parts = Vec::new();
-            for field in fields {
-                if field.ty.wgsl().is_some() {
-                    parts.push(read(field.ty, page, base, offset));
-                }
-                offset += field.ty.words();
-            }
-            format!("{}({})", ty.wgsl, parts.join(", "))
-        }
+        Layout::Struct(fields) => read_struct(ty.wgsl, fields, page, base, 0),
     }
 }
 
 fn write_element(out: &mut String, ty: &TypeInfo, value: &str, page: &str, base: &str) {
     match ty.layout {
         Layout::Value(field) => write(out, field, value, page, base, 0),
-        Layout::Struct(fields) => {
-            let mut offset = 0;
-            for field in fields {
-                let value = format!("{value}.{}", field.name);
-                write(out, field.ty, &value, page, base, offset);
-                offset += field.ty.words();
-            }
-        }
+        Layout::Struct(fields) => write_struct(out, fields, value, page, base, 0),
     }
 }
 
-fn declare(out: &mut String, ty: &TypeInfo) {
-    if let Layout::Struct(fields) = ty.layout {
-        let _ = writeln!(out, "struct {} {{", ty.wgsl);
-        for field in fields {
-            if let Some(wgsl) = field.ty.wgsl() {
-                let _ = writeln!(out, "    {}: {wgsl},", field.name);
-            }
+fn declare_struct(out: &mut String, declared: &mut Vec<&'static str>, wgsl: &'static str, fields: &'static [Field]) {
+    if declared.contains(&wgsl) {
+        return;
+    }
+    declared.push(wgsl);
+    // A struct has to come after the ones it is made of.
+    for field in fields {
+        if let FieldType::Struct { wgsl, fields } = field.ty {
+            declare_struct(out, declared, wgsl, fields);
         }
-        let _ = writeln!(out, "}}\n");
+    }
+    let _ = writeln!(out, "struct {wgsl} {{");
+    for field in fields {
+        if let Some(ty) = field.ty.wgsl() {
+            let _ = writeln!(out, "    {}: {ty},", field.name);
+        }
+    }
+    let _ = writeln!(out, "}}\n");
+}
+
+/// Declares the struct of `ty` and the ones inside of it, each only once.
+pub(crate) fn declare(out: &mut String, declared: &mut Vec<&'static str>, ty: &TypeInfo) {
+    if let Layout::Struct(fields) = ty.layout {
+        declare_struct(out, declared, ty.wgsl, fields);
     }
 }
 
@@ -169,12 +191,9 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
     let out = &mut wgsl;
 
     let _ = writeln!(out, "// Generated for `{}`.\n", node.id);
-    let mut declared: Vec<&str> = Vec::new();
+    let mut declared = Vec::new();
     for ty in node.inputs.iter().map(|port| &port.ty).chain([&output.ty]) {
-        if !declared.contains(&ty.wgsl) {
-            declared.push(ty.wgsl);
-            declare(out, ty);
-        }
+        declare(out, &mut declared, ty);
     }
 
     let call_words = inputs * 2 + 2;
@@ -254,7 +273,7 @@ mod tests {
     use super::*;
     use crate::{
         node::{Caps, PortDecl, Shape},
-        types::{DataType, Field, Scalar},
+        types::{DataType, Scalar},
     };
 
     #[repr(C)]
@@ -332,6 +351,61 @@ mod tests {
         assert!(shader.contains("index * 21u"));
         assert!(shader.contains("out_page[base + 3u] = 0u;"));
         assert!(shader.contains("out_page[base + 20u] = value.id;"));
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Pair {
+        first: Particle,
+        weight: f32,
+        second: Particle,
+    }
+
+    impl DataType for Pair {
+        type ConfigurationOptions = ();
+
+        const NAME: &'static str = "pair";
+        const WGSL: &'static str = "Pair";
+        const SCALAR: Scalar = Scalar::F32;
+        const LAYOUT: Layout = Layout::Struct(&[
+            Field::nested("first", Particle::INFO),
+            Field::nested("weight", f32::INFO),
+            Field::nested("second", Particle::INFO),
+        ]);
+    }
+
+    #[test]
+    fn structs_can_be_made_of_structs() {
+        const INPUTS: &[PortDecl] = &[PortDecl::new::<Pair>("pairs")];
+        const OUTPUTS: &[PortDecl] = &[PortDecl::new::<Pair>("pairs")];
+        let node = NodeDef {
+            id: "test.swap",
+            display_name: "Swap",
+            inputs: INPUTS,
+            outputs: OUTPUTS,
+            shape: Shape::Map,
+            cpu: |_, _| {},
+            gpu: &[],
+        };
+        let kernel = GpuKernel {
+            wgsl: "fn swap(index: u32) -> Pair {
+                let pair = in_pairs(index);
+                return Pair(pair.second, pair.weight, pair.first);
+            }",
+            entry: "swap",
+            requires: Caps::NONE,
+            len: |inputs| inputs.len(0),
+            reads: &[],
+        };
+        let shader = compute(&node, &kernel).unwrap().wgsl;
+
+        // The inner struct is declared once and before the outer one.
+        assert_eq!(shader.matches("struct Particle {").count(), 1);
+        assert!(shader.find("struct Particle {") < shader.find("struct Pair {"));
+        // 21 + 1 + 21 words, with the second particle behind the weight.
+        assert!(shader.contains("index * 43u"));
+        assert!(shader.contains("out_page[base + 42u] = value.second.id;"));
+        assert!(shader.contains("out_page[base + 21u] = bitcast<u32>(value.weight);"));
     }
 
     #[test]

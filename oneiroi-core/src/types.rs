@@ -20,6 +20,11 @@ pub enum FieldType {
     Mat4,
     /// Words which are stored but mean nothing.
     Pad(u32),
+    /// Another struct, with its fields right in place.
+    Struct {
+        wgsl: &'static str,
+        fields: &'static [Field],
+    },
 }
 
 impl FieldType {
@@ -31,6 +36,7 @@ impl FieldType {
             Self::Vec4 => 4,
             Self::Mat4 => 16,
             Self::Pad(words) => *words,
+            Self::Struct { fields, .. } => Layout::Struct(fields).words(),
         }
     }
 
@@ -43,6 +49,7 @@ impl FieldType {
             Self::Vec3 => "vec3<f32>",
             Self::Vec4 => "vec4<f32>",
             Self::Mat4 => "mat4x4<f32>",
+            Self::Struct { wgsl, .. } => wgsl,
             Self::Pad(_) => return None,
         })
     }
@@ -61,6 +68,20 @@ impl Field {
 
     pub const fn pad(words: u32) -> Self {
         Self::new("", FieldType::Pad(words))
+    }
+
+    /// A field which is a whole other data type.
+    pub const fn nested(name: &'static str, ty: TypeInfo) -> Self {
+        match ty.layout {
+            Layout::Value(field) => Self::new(name, field),
+            Layout::Struct(fields) => Self::new(
+                name,
+                FieldType::Struct {
+                    wgsl: ty.wgsl,
+                    fields,
+                },
+            ),
+        }
     }
 }
 
