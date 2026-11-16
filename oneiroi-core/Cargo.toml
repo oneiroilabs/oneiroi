@@ -11,8 +11,5 @@ edition.workspace = true
 [dependencies]
 glam.workspace = true
 bytemuck.workspace = true
-wgpu = "29.0.3"
-encase.workspace = true
-fixedbitset.workspace = true
 mlua.workspace = true
 serde.workspace = true
