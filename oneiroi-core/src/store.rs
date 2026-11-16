@@ -82,6 +82,8 @@ struct Page {
     words: Vec<u32>,
     /// Free `(offset, len)` runs, sorted by offset and never adjacent.
     free: Vec<(u32, u32)>,
+    /// The words written since somebody last asked, as `start..end`.
+    dirty: Option<(u32, u32)>,
 }
 
 impl Page {
@@ -89,6 +91,7 @@ impl Page {
         Self {
             words: vec![0; words as usize],
             free: vec![(0, words)],
+            dirty: None,
         }
     }
 
@@ -176,8 +179,15 @@ impl Store {
         }
 
         let handle = self.alloc(words.len() as u32);
-        self.pages[handle.page as usize].words[handle.offset as usize..][..words.len()]
-            .copy_from_slice(words);
+        let page = &mut self.pages[handle.page as usize];
+        page.words[handle.offset as usize..][..words.len()].copy_from_slice(words);
+        if !words.is_empty() {
+            let (start, end) = (handle.offset, handle.offset + handle.len);
+            page.dirty = Some(match page.dirty {
+                Some((from, to)) => (from.min(start), to.max(end)),
+                None => (start, end),
+            });
+        }
         self.used_words += words.len() as u64;
         self.entries.insert(
             key,
@@ -268,6 +278,20 @@ impl Store {
         self.entries.is_empty()
     }
 
+    /// The part of every page which was written since the last call, as
+    /// `(page, start..end)` in words. A backend that mirrors the pages
+    /// uploads exactly this.
+    pub fn take_dirty(&mut self) -> Vec<(u32, std::ops::Range<u32>)> {
+        self.pages
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, page)| {
+                let (start, end) = page.dirty.take()?;
+                Some((index as u32, start..end))
+            })
+            .collect()
+    }
+
     /// The raw pages, in the order a GPU backend binds them.
     pub fn pages(&self) -> impl ExactSizeIterator<Item = &[u32]> {
         self.pages.iter().map(|page| page.words.as_slice())
@@ -337,6 +361,21 @@ mod tests {
         let reused = store.insert(key(3), &[3; 4]);
         assert_eq!(reused.page, 0);
         assert_eq!(store.pages().len(), 1);
+    }
+
+    #[test]
+    fn writes_are_reported_once() {
+        let mut store = Store::with_page_words(8);
+        store.insert(key(1), &[1; 2]);
+        store.insert(key(2), &[2; 3]);
+        store.insert(key(3), &[]);
+        assert_eq!(store.take_dirty(), [(0, 0..5)]);
+        assert_eq!(store.take_dirty(), []);
+
+        // Storing what is there already writes nothing.
+        store.insert(key(1), &[1; 2]);
+        store.insert(key(4), &[4; 10]);
+        assert_eq!(store.take_dirty(), [(1, 0..10)]);
     }
 
     #[test]

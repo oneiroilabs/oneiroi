@@ -5867,6 +5867,7 @@ dependencies = [
  "bytemuck",
  "glam 0.32.1",
  "mlua",
+ "naga",
  "serde",
 ]
 

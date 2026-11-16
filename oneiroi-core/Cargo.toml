@@ -13,3 +13,4 @@ glam.workspace = true
 bytemuck.workspace = true
 mlua.workspace = true
 serde.workspace = true
+naga = { version = "30", features = ["wgsl-in"] }

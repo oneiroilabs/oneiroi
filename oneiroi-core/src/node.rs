@@ -55,6 +55,14 @@ pub struct Inputs<'a> {
 }
 
 impl<'a> Inputs<'a> {
+    pub fn new(store: &'a Store, node: &NodeDef, handles: &'a [Handle]) -> Self {
+        Self {
+            store,
+            ports: node.inputs,
+            handles,
+        }
+    }
+
     pub fn get<T: DataType>(&self, index: usize) -> &'a [T] {
         debug_assert_eq!(self.ports[index].ty, T::INFO, "{}", self.ports[index].name);
         self.store.slice(self.handles[index])
@@ -111,12 +119,21 @@ impl Caps {
     }
 }
 
-/// A premade shader function implementing a node.
+/// A premade shader function implementing a node with a single output.
+///
+/// `entry` names a function `fn entry(index: u32) -> Output` inside `wgsl`
+/// which computes one element of the output. It reads its inputs through
+/// functions which are generated around it, two per input port `name`:
+/// `in_name(index: u32) -> Type` and `in_name_len() -> u32`. See
+/// [`shader::compute`](crate::shader::compute).
 #[derive(Debug, Clone, Copy)]
 pub struct GpuKernel {
     pub wgsl: &'static str,
     pub entry: &'static str,
     pub requires: Caps,
+    /// How many elements the output will have. This is asked before the
+    /// kernel runs, to make room for them.
+    pub len: fn(&Inputs<'_>) -> usize,
 }
 
 pub struct NodeDef {

@@ -3,8 +3,8 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
-    node::{Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
-    types::{DataType, PortDefault, Scalar},
+    node::{Caps, GpuKernel, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
+    types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
 use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, extract_segments, locate};
@@ -29,6 +29,16 @@ impl DataType for EvaluatedFrame {
     const NAME: &'static str = "evaluated_frame";
     const WGSL: &'static str = "EvaluatedFrame";
     const SCALAR: Scalar = Scalar::F32;
+    const LAYOUT: Layout = Layout::Struct(&[
+        Field::new("position", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("tangent", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("normal", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("binormal", FieldType::Vec3),
+        Field::pad(1),
+    ]);
 }
 
 impl From<MovingFrame> for EvaluatedFrame {
@@ -89,14 +99,27 @@ pub static FRAMES: NodeDef = NodeDef {
     outputs: &[PortDecl::new::<EvaluatedFrame>("frames")],
     shape: Shape::Expand,
     cpu: frames,
-    gpu: &[],
+    gpu: &[GpuKernel {
+        wgsl: include_str!("frames.wgsl"),
+        entry: "curve_frames",
+        requires: Caps::NONE,
+        len: frames_len,
+    }],
 };
+
+fn frames_samples(inputs: &Inputs<'_>) -> usize {
+    inputs.value::<u32>(1).max(2) as usize
+}
+
+fn frames_len(inputs: &Inputs<'_>) -> usize {
+    inputs.get::<CubicNurbsSegmentCache>(0).len() * frames_samples(inputs)
+}
 
 fn frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let segments = inputs.get::<CubicNurbsSegmentCache>(0);
-    let samples = inputs.value::<u32>(1).max(2) as usize;
+    let samples = frames_samples(inputs);
 
-    let frames = outputs.alloc::<EvaluatedFrame>(0, segments.len() * samples);
+    let frames = outputs.alloc::<EvaluatedFrame>(0, frames_len(inputs));
     for (segment, frames) in segments.iter().zip(frames.chunks_exact_mut(samples)) {
         for (sample, frame) in frames.iter_mut().enumerate() {
             *frame = segment.frame(sample as f32 / (samples - 1) as f32).into();
@@ -230,6 +253,20 @@ mod tests {
             Some(&[][..])
         );
         assert_eq!(engine.read::<Vec3>(&instance, "positions"), Some(&[][..]));
+    }
+
+    #[test]
+    fn gpu_kernels_compile() {
+        let mut registry = NodeRegistry::new();
+        crate::register(&mut registry);
+        let mut checked = 0;
+        for node in registry.iter() {
+            for kernel in node.gpu {
+                oneiroi_core::shader::compute(node, kernel).unwrap_or_else(|e| panic!("{e}"));
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 1);
     }
 
     #[test]

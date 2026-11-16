@@ -286,6 +286,10 @@ impl<E: Executor> Engine<E> {
         &self.store
     }
 
+    pub fn executor(&self) -> &E {
+        &self.executor
+    }
+
     /// A new instance with every parameter at its default.
     pub fn instantiate(&self, program: ProgramId) -> Instance {
         let decl = self.programs.get(program);
