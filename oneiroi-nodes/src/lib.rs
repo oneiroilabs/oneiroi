@@ -1,7 +1,6 @@
 use oneiroi_core::node::NodeRegistry;
 
 pub mod curve;
-mod graph;
 pub mod primitive;
 pub mod property;
 
