@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     store::{Handle, Store},
-    types::{DataType, TypeInfo},
+    types::{DataType, Trait, TypeInfo},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -138,10 +138,61 @@ impl std::fmt::Debug for NodeDef {
     }
 }
 
+/// What a port of a [`GenericNode`] accepts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PortType {
+    /// Exactly this data type.
+    Exact(TypeInfo),
+    /// Any data type which implements the trait.
+    Trait(Trait),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GenericPort {
+    pub name: &'static str,
+    pub ty: PortType,
+}
+
+impl GenericPort {
+    pub const fn exact<T: DataType>(name: &'static str) -> Self {
+        Self {
+            name,
+            ty: PortType::Exact(T::INFO),
+        }
+    }
+
+    pub const fn implementing(name: &'static str, tr: Trait) -> Self {
+        Self {
+            name,
+            ty: PortType::Trait(tr),
+        }
+    }
+}
+
+/// A node as its author sees it: some of its ports take a [`Trait`]
+/// instead of one data type.
+///
+/// It has no kernels of its own. Behind it stands one ordinary [`NodeDef`]
+/// per combination of data types it supports, and lowering a graph picks
+/// the one that fits what is connected. Nothing is decided at runtime.
+#[derive(Debug)]
+pub struct GenericNode {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub inputs: &'static [GenericPort],
+    pub outputs: &'static [GenericPort],
+}
+
+struct Generic {
+    node: &'static GenericNode,
+    instances: Vec<&'static NodeDef>,
+}
+
 /// All nodes known to an application, by id.
 #[derive(Default)]
 pub struct NodeRegistry {
     nodes: HashMap<&'static str, &'static NodeDef>,
+    generics: HashMap<&'static str, Generic>,
 }
 
 impl NodeRegistry {
@@ -160,11 +211,90 @@ impl NodeRegistry {
         }
     }
 
+    /// Registers `node` as the version of `generic` for the data types of
+    /// its ports. Those types implement the traits of the ports from now on.
+    ///
+    /// Panics when the ports of the two do not line up.
+    pub fn register_instance(&mut self, generic: &'static GenericNode, node: &'static NodeDef) {
+        let lines_up = |generic: &[GenericPort], node: &[PortDecl]| {
+            generic.len() == node.len()
+                && generic.iter().zip(node).all(|(generic, port)| {
+                    generic.name == port.name
+                        && match generic.ty {
+                            PortType::Exact(ty) => ty == port.ty,
+                            PortType::Trait(_) => true,
+                        }
+                })
+        };
+        assert!(
+            lines_up(generic.inputs, node.inputs) && lines_up(generic.outputs, node.outputs),
+            "`{}` is not a version of `{}`",
+            node.id,
+            generic.id
+        );
+
+        self.register(node);
+        let entry = self.generics.entry(generic.id).or_insert(Generic {
+            node: generic,
+            instances: Vec::new(),
+        });
+        assert!(
+            std::ptr::eq(entry.node, generic),
+            "two generic nodes share the id `{}`",
+            generic.id
+        );
+        if !entry.instances.iter().any(|known| std::ptr::eq(*known, node)) {
+            entry.instances.push(node);
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&'static NodeDef> {
         self.nodes.get(id).copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &'static NodeDef> {
         self.nodes.values().copied()
+    }
+
+    pub fn generic(&self, id: &str) -> Option<&'static GenericNode> {
+        self.generics.get(id).map(|generic| generic.node)
+    }
+
+    pub fn generics(&self) -> impl Iterator<Item = &'static GenericNode> {
+        self.generics.values().map(|generic| generic.node)
+    }
+
+    /// Every registered version of a generic node.
+    pub fn instances(&self, generic: &GenericNode) -> &[&'static NodeDef] {
+        self.generics
+            .get(generic.id)
+            .map_or(&[], |generic| generic.instances.as_slice())
+    }
+
+    /// Every data type that implements `tr`, in no particular order.
+    pub fn implementors(&self, tr: Trait) -> Vec<TypeInfo> {
+        let mut types: Vec<TypeInfo> = Vec::new();
+        for generic in self.generics.values() {
+            for instance in &generic.instances {
+                let implementing = generic
+                    .node
+                    .inputs
+                    .iter()
+                    .zip(instance.inputs)
+                    .chain(generic.node.outputs.iter().zip(instance.outputs))
+                    .filter(|(port, _)| port.ty == PortType::Trait(tr))
+                    .map(|(_, port)| port.ty);
+                for ty in implementing {
+                    if !types.contains(&ty) {
+                        types.push(ty);
+                    }
+                }
+            }
+        }
+        types
+    }
+
+    pub fn implements(&self, ty: &TypeInfo, tr: Trait) -> bool {
+        self.implementors(tr).contains(ty)
     }
 }

@@ -18,6 +18,19 @@ impl PartialEq for TypeInfo {
     }
 }
 
+/// A set of data types which can stand in for each other at a port.
+///
+/// A generic node names a trait instead of a type at such a port. Which
+/// data types implement it is decided by the node versions registered for
+/// them, see [`NodeRegistry::register_instance`].
+///
+/// [`NodeRegistry::register_instance`]: crate::node::NodeRegistry::register_instance
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Trait {
+    /// Unique name.
+    pub name: &'static str,
+}
+
 /// The main way to declare a DataType.
 /// Can afterwards be used as a `Property<T>` and flow between nodes.
 ///

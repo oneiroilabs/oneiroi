@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    node::NodeDef,
+    node::{GenericNode, NodeDef, NodeRegistry, PortType},
     store::ContentKey,
     types::{DataType, TypeInfo},
 };
@@ -135,6 +135,16 @@ pub enum BuildError {
         expected: &'static str,
         found: &'static str,
     },
+    /// A port takes a trait and the connected data type does not implement it.
+    Trait {
+        target: String,
+        port: String,
+        expected: &'static str,
+        found: &'static str,
+    },
+    /// Every port is fine on its own, but there is no version of the
+    /// generic node for these data types together.
+    Unresolved { target: String },
 }
 
 impl fmt::Display for BuildError {
@@ -151,6 +161,18 @@ impl fmt::Display for BuildError {
                 expected,
                 found,
             } => write!(f, "`{target}.{port}` expects `{expected}` but got `{found}`"),
+            Self::Trait {
+                target,
+                port,
+                expected,
+                found,
+            } => write!(
+                f,
+                "`{target}.{port}` expects a `{expected}` but `{found}` is none"
+            ),
+            Self::Unresolved { target } => {
+                write!(f, "`{target}` has no version for these inputs")
+            }
         }
     }
 }
@@ -237,6 +259,51 @@ impl ProgramBuilder {
         ("node", node.id, inputs).hash(&mut self.hasher);
         let types = node.outputs.iter().map(|port| port.ty).collect();
         Ok(self.push_op(OpKind::Node(node), inputs.into(), types))
+    }
+
+    /// Adds the version of `generic` which fits the data types of `inputs`.
+    pub fn generic(
+        &mut self,
+        registry: &NodeRegistry,
+        generic: &GenericNode,
+        inputs: &[SlotId],
+    ) -> Result<Vec<SlotId>, BuildError> {
+        if inputs.len() != generic.inputs.len() {
+            return Err(BuildError::Arity {
+                target: generic.id.into(),
+                expected: generic.inputs.len(),
+                found: inputs.len(),
+            });
+        }
+        for (port, slot) in generic.inputs.iter().zip(inputs) {
+            match port.ty {
+                PortType::Exact(ty) => self.check(generic.id, port.name, ty, *slot)?,
+                PortType::Trait(tr) => {
+                    let found = self.slots[slot.0 as usize].ty;
+                    if !registry.implements(&found, tr) {
+                        return Err(BuildError::Trait {
+                            target: generic.id.into(),
+                            port: port.name.into(),
+                            expected: tr.name,
+                            found: found.name,
+                        });
+                    }
+                }
+            }
+        }
+
+        let fits = |node: &&&'static NodeDef| {
+            node.inputs
+                .iter()
+                .zip(inputs)
+                .all(|(port, slot)| port.ty == self.slots[slot.0 as usize].ty)
+        };
+        match registry.instances(generic).iter().find(fits) {
+            Some(node) => self.node(node, inputs),
+            None => Err(BuildError::Unresolved {
+                target: generic.id.into(),
+            }),
+        }
     }
 
     /// Calls `callee`. An argument which is `None` uses the default of the
