@@ -13,8 +13,12 @@ use wgpu::util::DeviceExt;
 /// How many nodes ran where since the executor was made.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuStats {
+    /// How many nodes ran on the GPU.
     pub gpu: usize,
+    /// How many nodes ran on the CPU.
     pub cpu: usize,
+    /// How many compute passes the nodes on the GPU took together.
+    pub dispatches: usize,
     /// How many values were brought back from the GPU.
     pub downloads: usize,
 }
@@ -23,6 +27,14 @@ struct Pipeline {
     kernel: &'static GpuKernel,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    call_words: usize,
+}
+
+/// One node to run on the GPU, with what is known before it does.
+struct Call<'a> {
+    item: &'a Work,
+    inputs: Vec<Handle>,
+    elements: usize,
 }
 
 /// An [`Executor`] which runs every node that has a kernel for this device
@@ -32,6 +44,10 @@ struct Pipeline {
 /// only what was written since the last time is uploaded. A kernel reads
 /// its inputs straight out of those buffers and its output is copied into
 /// them, at the place the store reserved for it.
+///
+/// Nodes which do not depend on each other run together: all calls of one
+/// node are a single compute pass, as long as each of their inputs lies
+/// in the same page for all of them.
 ///
 /// A result stays on the device. It is only brought back when a node on
 /// the CPU reads it or somebody asks for it, see
@@ -49,7 +65,6 @@ pub struct GpuExecutor {
     pipelines: HashMap<&'static str, Option<Pipeline>>,
     stats: GpuStats,
     errors: Vec<ShaderError>,
-    handles: Vec<Handle>,
 }
 
 impl GpuExecutor {
@@ -75,7 +90,6 @@ impl GpuExecutor {
             pipelines: HashMap::new(),
             stats: GpuStats::default(),
             errors: Vec::new(),
-            handles: Vec::new(),
         }
     }
 
@@ -97,7 +111,7 @@ impl GpuExecutor {
         if !self.pipelines.contains_key(node.id) {
             let pipeline = node.gpu_kernel(self.caps).and_then(|kernel| {
                 match shader::compute(node, kernel) {
-                    Ok(shader) => Some(self.build(node, kernel, &shader.wgsl)),
+                    Ok(shader) => Some(self.build(node, kernel, &shader)),
                     Err(error) => {
                         self.errors.push(error);
                         None
@@ -109,7 +123,12 @@ impl GpuExecutor {
         self.pipelines[node.id].as_ref()
     }
 
-    fn build(&self, node: &NodeDef, kernel: &'static GpuKernel, wgsl: &str) -> Pipeline {
+    fn build(
+        &self,
+        node: &NodeDef,
+        kernel: &'static GpuKernel,
+        shader: &shader::ComputeShader,
+    ) -> Pipeline {
         let buffer = |binding: usize, ty| wgpu::BindGroupLayoutEntry {
             binding: binding as u32,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -125,7 +144,7 @@ impl GpuExecutor {
             .map(|index| buffer(index, wgpu::BufferBindingType::Storage { read_only: true }))
             .collect();
         entries.push(buffer(inputs, wgpu::BufferBindingType::Storage { read_only: false }));
-        entries.push(buffer(inputs + 1, wgpu::BufferBindingType::Uniform));
+        entries.push(buffer(inputs + 1, wgpu::BufferBindingType::Storage { read_only: true }));
 
         let layout = self
             .device
@@ -144,7 +163,7 @@ impl GpuExecutor {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(node.id),
-                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                source: wgpu::ShaderSource::Wgsl(shader.wgsl.as_str().into()),
             });
         let pipeline = self
             .device
@@ -160,6 +179,7 @@ impl GpuExecutor {
             kernel,
             pipeline,
             layout,
+            call_words: shader.call_words,
         }
     }
 
@@ -189,74 +209,129 @@ impl GpuExecutor {
         }
     }
 
-    /// Runs one node as a compute shader. Returns whether it did: an
-    /// output which is too large for the device is left to the CPU.
-    fn run(&mut self, store: &mut Store, item: &Work) -> bool {
-        self.handles.clear();
-        self.handles.extend(item.inputs.iter().map(|key| {
-            store
-                .get(*key)
-                .expect("planned inputs are stored before they are read")
-        }));
-
-        let Some(pipeline) = self.pipeline(item.node) else {
-            return false;
+    /// Runs every call of one node which is in `items`. The ones whose
+    /// output is too large for the device are left to the CPU.
+    fn run_node(&mut self, store: &mut Store, node: &'static NodeDef, items: &[&Work]) {
+        let Some(pipeline) = self.pipeline(node) else {
+            for item in items {
+                self.run_on_cpu(store, item);
+            }
+            return;
         };
         let kernel = pipeline.kernel;
-        let output = item.node.outputs[0].ty;
-        // Asking for the length may look at some inputs, which then have
-        // to be here.
-        let reads: Vec<_> = kernel.reads.iter().map(|index| item.inputs[*index]).collect();
-        self.download(store, &reads);
-        let elements = (kernel.len)(&Inputs::new(store, item.node, &self.handles));
-        if elements == 0 {
-            store.insert(item.outputs[0], &[]);
-            return true;
-        }
-
+        let words = node.outputs[0].ty.words as u64;
         let limits = self.device.limits();
-        let groups = elements.div_ceil(WORKGROUP_SIZE as usize) as u64;
-        let size = elements as u64 * output.words as u64 * 4;
-        if groups > limits.max_compute_workgroups_per_dimension as u64
-            || size > limits.max_storage_buffer_binding_size
-            || size > limits.max_buffer_size
-        {
-            return false;
-        }
+        let max_bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        let max_groups = limits.max_compute_workgroups_per_dimension as u64;
 
-        let target = store.reserve(item.outputs[0], (elements * output.words as usize) as u32);
+        let mut batch: Vec<Call<'_>> = Vec::new();
+        let mut batch_bytes = 0;
+        for item in items {
+            // Asking for the length may look at some inputs, which then
+            // have to be here.
+            let reads: Vec<_> = kernel.reads.iter().map(|index| item.inputs[*index]).collect();
+            self.download(store, &reads);
+
+            let inputs: Vec<_> = item
+                .inputs
+                .iter()
+                .map(|key| {
+                    store
+                        .get(*key)
+                        .expect("planned inputs are stored before they are read")
+                })
+                .collect();
+            let elements = (kernel.len)(&Inputs::new(store, node, &inputs));
+            let bytes = elements as u64 * words * 4;
+            if elements == 0 {
+                store.insert(item.outputs[0], &[]);
+                self.stats.gpu += 1;
+                continue;
+            }
+            if bytes > max_bytes || elements.div_ceil(WORKGROUP_SIZE as usize) as u64 > max_groups {
+                self.run_on_cpu(store, item);
+                continue;
+            }
+
+            // Every input is bound once for the whole batch, so all calls
+            // have to find theirs in the same page.
+            let fits = batch.first().is_none_or(|first| {
+                first
+                    .inputs
+                    .iter()
+                    .zip(&inputs)
+                    .all(|(a, b)| a.len == 0 || b.len == 0 || a.page == b.page)
+            });
+            if !fits || batch_bytes + bytes > max_bytes || batch.len() as u64 == max_groups {
+                self.dispatch(store, node, &batch);
+                batch.clear();
+                batch_bytes = 0;
+            }
+            batch_bytes += bytes;
+            batch.push(Call {
+                item,
+                inputs,
+                elements,
+            });
+        }
+        self.dispatch(store, node, &batch);
+    }
+
+    /// One compute pass for all of `batch`.
+    fn dispatch(&mut self, store: &mut Store, node: &'static NodeDef, batch: &[Call<'_>]) {
+        if batch.is_empty() {
+            return;
+        }
+        let words = node.outputs[0].ty.words as usize;
+        let inputs = node.inputs.len();
+
+        // Make room for the results where they belong, then bring the
+        // device up to date with what the CPU wrote.
+        let targets: Vec<_> = batch
+            .iter()
+            .map(|call| store.reserve(call.item.outputs[0], (call.elements * words) as u32))
+            .collect();
         self.upload(store);
 
-        let mut args: Vec<[u32; 4]> = self
-            .handles
-            .iter()
-            .map(|handle| [handle.offset, handle.len, 0, 0])
-            .collect();
-        args.push([elements as u32, 0, 0, 0]);
-        let args = self
+        let pipeline = self.pipelines[node.id].as_ref().unwrap();
+        let mut calls = Vec::with_capacity(batch.len() * pipeline.call_words);
+        let mut offset = 0;
+        for call in batch {
+            for input in &call.inputs {
+                calls.extend([input.offset, input.len]);
+            }
+            calls.extend([offset, call.elements as u32]);
+            offset += (call.elements * words) as u32;
+        }
+        let calls = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Oneiroi Args"),
-                contents: bytemuck::cast_slice(&args),
-                usage: wgpu::BufferUsages::UNIFORM,
+                label: Some("Oneiroi Calls"),
+                contents: bytemuck::cast_slice(&calls),
+                usage: wgpu::BufferUsages::STORAGE,
             });
         let result = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Oneiroi Output"),
-            size,
+            size: offset as u64 * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let inputs = self.handles.len();
-        let mut entries: Vec<_> = self
-            .handles
-            .iter()
-            .enumerate()
-            .map(|(binding, handle)| wgpu::BindGroupEntry {
-                binding: binding as u32,
-                resource: match handle.len {
-                    0 => self.empty.as_entire_binding(),
-                    _ => self.pages[handle.page as usize].as_entire_binding(),
-                },
+
+        let mut entries: Vec<_> = (0..inputs)
+            .map(|index| {
+                // The page of the first call which has anything there.
+                let page = batch
+                    .iter()
+                    .map(|call| call.inputs[index])
+                    .find(|handle| handle.len > 0)
+                    .map(|handle| handle.page);
+                wgpu::BindGroupEntry {
+                    binding: index as u32,
+                    resource: match page {
+                        Some(page) => self.pages[page as usize].as_entire_binding(),
+                        None => self.empty.as_entire_binding(),
+                    },
+                }
             })
             .collect();
         entries.push(wgpu::BindGroupEntry {
@@ -265,43 +340,83 @@ impl GpuExecutor {
         });
         entries.push(wgpu::BindGroupEntry {
             binding: inputs as u32 + 1,
-            resource: args.as_entire_binding(),
+            resource: calls.as_entire_binding(),
         });
-
-        let pipeline = self.pipelines[item.node.id].as_ref().unwrap();
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(item.node.id),
+            label: Some(node.id),
             layout: &pipeline.layout,
             entries: &entries,
         });
 
+        let most = batch.iter().map(|call| call.elements).max().unwrap_or(0);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(item.node.id),
+                label: Some(node.id),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&pipeline.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(groups as u32, 1, 1);
+            pass.dispatch_workgroups(
+                most.div_ceil(WORKGROUP_SIZE as usize) as u32,
+                batch.len() as u32,
+                1,
+            );
         }
-        let page = &self.pages[target.page as usize];
-        encoder.copy_buffer_to_buffer(&result, 0, page, target.offset as u64 * 4, size);
+        let mut offset = 0;
+        for (call, target) in batch.iter().zip(&targets) {
+            let bytes = (call.elements * words) as u64 * 4;
+            let page = &self.pages[target.page as usize];
+            encoder.copy_buffer_to_buffer(&result, offset, page, target.offset as u64 * 4, bytes);
+            offset += bytes;
+        }
         self.queue.submit([encoder.finish()]);
-        true
+
+        self.stats.gpu += batch.len();
+        self.stats.dispatches += 1;
+    }
+
+    fn run_on_cpu(&mut self, store: &mut Store, item: &Work) {
+        // A node on the CPU reads all of its inputs.
+        self.download(store, &item.inputs);
+        self.cpu.execute(store, std::slice::from_ref(item));
+        self.stats.cpu += 1;
     }
 }
 
 impl Executor for GpuExecutor {
     fn execute(&mut self, store: &mut Store, work: &[Work]) {
+        // Work which reads nothing of this batch is level 0, work which
+        // reads from level 0 is level 1 and so on. Whatever shares a level
+        // can run in any order, and therefore together.
+        let mut produced: HashMap<ContentKey, usize> = HashMap::new();
+        let mut levels: Vec<Vec<&Work>> = Vec::new();
         for item in work {
-            if self.run(store, item) {
-                self.stats.gpu += 1;
-            } else {
-                // A node on the CPU reads all of its inputs.
-                self.download(store, &item.inputs);
-                self.cpu.execute(store, std::slice::from_ref(item));
-                self.stats.cpu += 1;
+            let level = item
+                .inputs
+                .iter()
+                .filter_map(|key| produced.get(key))
+                .max()
+                .map_or(0, |level| level + 1);
+            for output in &item.outputs {
+                produced.insert(*output, level);
+            }
+            if levels.len() <= level {
+                levels.resize_with(level + 1, Vec::new);
+            }
+            levels[level].push(item);
+        }
+
+        for level in levels {
+            let mut nodes: Vec<(&'static NodeDef, Vec<&Work>)> = Vec::new();
+            for item in level {
+                match nodes.iter_mut().find(|(node, _)| std::ptr::eq(*node, item.node)) {
+                    Some((_, items)) => items.push(item),
+                    None => nodes.push((item.node, vec![item])),
+                }
+            }
+            for (node, items) in nodes {
+                self.run_node(store, node, &items);
             }
         }
     }

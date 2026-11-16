@@ -15,21 +15,26 @@ use crate::{
 /// How many elements one workgroup of a generated compute shader covers.
 pub const WORKGROUP_SIZE: u32 = 64;
 
-/// A compute shader which fills the output of one node.
+/// A compute shader which fills the output of one node, for any number
+/// of calls of that node at once.
 ///
 /// Its entry point is `main` and everything is bound in group 0. For a
 /// node with `n` inputs:
 ///
-/// - bindings `0..n`: the page each input lives in, read-only `array<u32>`
-/// - binding `n`: where the output goes, read-write `array<u32>`
-/// - binding `n + 1`: a uniform `array<vec4<u32>, n + 1>`. Entry `i` holds
-///   the offset and the length of input `i` in words, the last one holds
-///   the number of output elements.
+/// - bindings `0..n`: the page input `i` of every call lives in,
+///   read-only `array<u32>`
+/// - binding `n`: where the outputs go, read-write `array<u32>`
+/// - binding `n + 1`: the calls, read-only `array<u32>`. A call is
+///   [`call_words`](ComputeShader::call_words) long: the offset and the
+///   length in words of each input, then the offset in words of its output
+///   and how many elements that has.
 ///
-/// Dispatch `ceil(elements / WORKGROUP_SIZE)` workgroups along x.
+/// Dispatch `(ceil(elements / WORKGROUP_SIZE), calls, 1)` workgroups,
+/// with the elements of the call which has the most.
 #[derive(Debug, Clone)]
 pub struct ComputeShader {
     pub wgsl: String,
+    pub call_words: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,7 +177,7 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         }
     }
 
-    let _ = writeln!(out, "struct Args {{\n    v: array<vec4<u32>, {}>,\n}}\n", inputs + 1);
+    let call_words = inputs * 2 + 2;
     for index in 0..inputs {
         let _ = writeln!(
             out,
@@ -183,18 +188,25 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         out,
         "@group(0) @binding({inputs}) var<storage, read_write> out_page: array<u32>;"
     );
-    let _ = writeln!(out, "@group(0) @binding({}) var<uniform> args: Args;\n", inputs + 1);
+    let _ = writeln!(
+        out,
+        "@group(0) @binding({}) var<storage, read> calls: array<u32>;\n",
+        inputs + 1
+    );
+    let _ = writeln!(out, "// Where the call this invocation works on starts in `calls`.");
+    let _ = writeln!(out, "var<private> call: u32;\n");
 
     for (index, port) in node.inputs.iter().enumerate() {
         let (name, ty, words) = (port.name, port.ty.wgsl, port.ty.words);
+        let (offset, len) = (index * 2, index * 2 + 1);
         let _ = writeln!(
             out,
-            "fn in_{name}_len() -> u32 {{\n    return args.v[{index}].y / {words}u;\n}}\n"
+            "fn in_{name}_len() -> u32 {{\n    return calls[call + {len}u] / {words}u;\n}}\n"
         );
         let element = read_element(&port.ty, &format!("page_{index}"), "base");
         let _ = writeln!(
             out,
-            "fn in_{name}(index: u32) -> {ty} {{\n    let base = args.v[{index}].x + index * {words}u;\n    return {element};\n}}\n"
+            "fn in_{name}(index: u32) -> {ty} {{\n    let base = calls[call + {offset}u] + index * {words}u;\n    return {element};\n}}\n"
         );
     }
 
@@ -204,14 +216,24 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         out,
         "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main(@builtin(global_invocation_id) id: vec3<u32>) {{"
     );
-    let _ = writeln!(out, "    if (id.x >= args.v[{inputs}].x) {{\n        return;\n    }}");
+    let _ = writeln!(out, "    call = id.y * {call_words}u;");
+    let _ = writeln!(
+        out,
+        "    if (id.x >= calls[call + {}u]) {{\n        return;\n    }}",
+        inputs * 2 + 1
+    );
     let _ = writeln!(out, "    let value = {}(id.x);", kernel.entry);
-    let _ = writeln!(out, "    let base = id.x * {}u;", output.ty.words);
+    let _ = writeln!(
+        out,
+        "    let base = calls[call + {}u] + id.x * {}u;",
+        inputs * 2,
+        output.ty.words
+    );
     write_element(out, &output.ty, "value", "out_page", "base");
     let _ = writeln!(out, "}}");
 
     validate(node.id, &wgsl)?;
-    Ok(ComputeShader { wgsl })
+    Ok(ComputeShader { wgsl, call_words })
 }
 
 fn validate(node: &'static str, wgsl: &str) -> Result<(), ShaderError> {
@@ -299,11 +321,12 @@ mod tests {
         // The type is declared once, without its padding.
         assert_eq!(shader.matches("struct Particle {").count(), 1);
         assert!(!shader.contains("_padding"));
-        // Both inputs can be read and the uniform has a slot for each
-        // of them and one for the output.
+        // Both inputs can be read.
         assert!(shader.contains("fn in_particles(index: u32) -> Particle"));
         assert!(shader.contains("fn in_scale(index: u32) -> f32"));
-        assert!(shader.contains("array<vec4<u32>, 3>"));
+        // A call names where both inputs are and where the output goes.
+        assert_eq!(compute(&node, &kernel).unwrap().call_words, 6);
+        assert!(shader.contains("call = id.y * 6u;"));
         // 21 words per particle: the padding is skipped when reading and
         // zeroed when writing.
         assert!(shader.contains("index * 21u"));

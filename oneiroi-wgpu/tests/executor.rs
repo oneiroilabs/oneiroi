@@ -98,16 +98,50 @@ fn only_nodes_with_a_kernel_run_on_the_gpu() {
 
     // The curve is built on the CPU, its frames are computed on the GPU.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, downloads: 1 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, dispatches: 1, downloads: 1 });
 
     // What is in the store already is not computed again, wherever it
     // came from.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, downloads: 1 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, dispatches: 1, downloads: 1 });
 
     gpu.set_param(&mut instance, "samples", &[3u32]).unwrap();
     assert_eq!(frames(&mut gpu, &mut instance).len(), 6 * 3 * 16);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, downloads: 2 });
+    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, dispatches: 2, downloads: 2 });
+}
+
+#[test]
+fn calls_of_one_node_share_a_pass() {
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let mut cpu = Engine::default();
+
+    // Curves of different lengths and with different numbers of samples.
+    let mut on_gpu = Vec::new();
+    let mut on_cpu = Vec::new();
+    for (count, samples) in [(4, 2u32), (9, 70), (30, 8), (6, 33), (12, 8)] {
+        let (gpu_program, cpu_program) = (program(&mut gpu, count), program(&mut cpu, count));
+        let (mut a, mut b) = (gpu.instantiate(gpu_program), cpu.instantiate(cpu_program));
+        gpu.set_param(&mut a, "samples", &[samples]).unwrap();
+        cpu.set_param(&mut b, "samples", &[samples]).unwrap();
+        on_gpu.push(a);
+        on_cpu.push(b);
+    }
+
+    // Five curves on the CPU, then all of their frames in a single pass.
+    assert_eq!(gpu.evaluate(&mut on_gpu), 10);
+    assert_eq!(
+        gpu.executor().stats(),
+        GpuStats { gpu: 5, cpu: 5, dispatches: 1, downloads: 0 }
+    );
+
+    cpu.evaluate(&mut on_cpu);
+    for (a, b) in on_gpu.iter().zip(&on_cpu) {
+        let a = gpu.fetch::<EvaluatedFrame>(a, "frames").unwrap();
+        let b = cpu.read::<EvaluatedFrame>(b, "frames").unwrap();
+        assert_close(bytemuck::cast_slice(a), bytemuck::cast_slice(b));
+    }
 }
 
 #[test]
@@ -234,7 +268,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // Two kernels ran and nothing came back.
-        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, downloads: 0 });
+        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, dispatches: 2, downloads: 0 });
         assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
         assert!(gpu.read::<Vec3>(&instance, "positions").is_none());
 
@@ -260,7 +294,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // The frames were brought back for the node which has no kernel.
-        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 2, downloads: 1 });
+        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 2, dispatches: 1, downloads: 1 });
         close(
             gpu.read::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
