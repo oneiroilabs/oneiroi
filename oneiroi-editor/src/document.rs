@@ -739,9 +739,22 @@ mod tests {
     #[test]
     fn any_node_can_be_displayed() {
         let mut document = Document::example();
-        let [curve, _, sweep, mesh] = nodes(&document);
+        let [curve, circle, sweep, mesh] = nodes(&document);
 
+        // A curve and a circle are shown as the lines they are.
         document.set_display(Some(curve));
+        assert_eq!(
+            document.status(),
+            "`cubic_nurbs_segment` drawn as it is, 0 nodes ran"
+        );
+        document.set_display(Some(circle));
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(document.session().lock().unwrap().bounds().unwrap().1 > 0.2);
+
+        // Frames are neither a line nor a surface nor a mesh.
+        let frames = document.add_node("curve.frames", [0.0, 0.0]);
+        document.connect(curve, "segments", frames, "segments");
+        document.set_display(Some(frames));
         assert_eq!(document.shown(), Shown::Nothing);
         assert_eq!(document.status(), "the displayed node has nothing to show");
 

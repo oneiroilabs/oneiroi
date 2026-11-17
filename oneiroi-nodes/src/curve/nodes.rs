@@ -3,7 +3,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
-    node::{Caps, GpuKernel, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
+    node::{
+        Caps, Drawable, GpuKernel, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape, Topology,
+    },
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
@@ -156,7 +158,31 @@ fn sample(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     }
 }
 
+/// A sphere around the segments in `words`, found by looking at a few
+/// points of each of them.
+fn curve_bounds(words: &[u32]) -> Option<([f32; 3], f32)> {
+    const STEPS: usize = 8;
+
+    let segments: &[CubicNurbsSegmentCache] = bytemuck::try_cast_slice(words).ok()?;
+    let points = segments.iter().flat_map(|segment| {
+        (0..=STEPS).map(move |step| segment.evaluate(step as f32 / STEPS as f32).0)
+    });
+    let (min, max) = points.fold((Vec3::MAX, Vec3::MIN), |(min, max), point| {
+        (min.min(point), max.max(point))
+    });
+    (min.x <= max.x).then(|| (((min + max) * 0.5).to_array(), (max - min).length() * 0.5))
+}
+
 pub fn register(registry: &mut NodeRegistry) {
+    // A curve can be looked at as it is: a line through its segments.
+    registry.register_drawable(Drawable {
+        ty: CubicNurbsSegmentCache::INFO,
+        topology: Topology::Line,
+        wgsl: concat!(include_str!("curve.wgsl"), include_str!("curve_line.wgsl")),
+        bounds: curve_bounds,
+    });
+    registry.register_drawable(crate::primitive::CIRCLE_LINE);
+
     registry.register(&NURBS);
     registry.register(&FRAMES);
     registry.register(&SAMPLE);
@@ -269,11 +295,17 @@ mod tests {
         }
         assert_eq!(checked, 1);
 
-        // And so does everything which says it can be drawn as it is.
+        // And so does everything which says it can be drawn as it is: the
+        // two kinds of surface, the curve and the circle.
         for ty in registry.implementors(crate::surface::SURFACE) {
-            let drawable = registry.drawable(&ty).expect("every surface can be drawn");
-            oneiroi_core::shader::draw(drawable).unwrap_or_else(|e| panic!("{e}"));
+            assert!(registry.drawable(&ty).is_some(), "every surface can be drawn");
         }
+        let mut drawn = 0;
+        for drawable in registry.drawables() {
+            oneiroi_core::shader::draw(drawable).unwrap_or_else(|e| panic!("{e}"));
+            drawn += 1;
+        }
+        assert_eq!(drawn, 4);
     }
 
     #[test]

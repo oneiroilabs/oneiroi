@@ -86,6 +86,8 @@ fn program(registry: &NodeRegistry, circle: bool) -> oneiroi_core::program::Prog
         .generic(registry, &TESSELLATE, &[surface, rings, sides])
         .unwrap();
     b.output("surface", surface);
+    b.output("spine", spine);
+    b.output("profile", profile);
     for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
         b.output(port.name, slot);
     }
@@ -224,9 +226,15 @@ impl Scene {
 
     /// The surface drawn straight from its patches.
     fn drawn(&mut self, stage: &mut DrawStage, view: DrawView) -> Vec<[u8; 4]> {
-        let key = self.engine.output_key(&self.instance, "surface").unwrap();
+        self.output(stage, "surface", view)
+    }
+
+    /// Any output which can be drawn as it is.
+    fn output(&mut self, stage: &mut DrawStage, name: &str, view: DrawView) -> Vec<[u8; 4]> {
+        let key = self.engine.output_key(&self.instance, name).unwrap();
         let program = self.engine.programs().get(self.instance.program());
-        let ty = program.slot(program.outputs[0].slot).ty;
+        let output = &program.outputs[program.output_index(name).unwrap()];
+        let ty = program.slot(output.slot).ty;
         let drawable = *self.registry.drawable(&ty).unwrap();
 
         let (store, executor) = self.engine.parts_mut();
@@ -302,6 +310,36 @@ fn detail_is_decided_when_drawing() {
         stage.render(encoder, target, None)
     });
     assert_eq!(covered(&nothing), 0);
+}
+
+#[test]
+fn curves_and_profiles_are_drawn_as_lines() {
+    let Some(mut scene) = scene(true) else {
+        return;
+    };
+    let mut stage = DrawStage::new(&scene.device, FORMAT);
+    let tube = scene.drawn(&mut stage, scene.view(12, 10));
+
+    // The curve runs through the middle of the tube around it.
+    let curve = scene.output(&mut stage, "spine", scene.view(32, 1));
+    let on_curve = covered(&curve);
+    assert!(on_curve > 40 && on_curve * 3 < covered(&tube), "{on_curve}");
+    let inside = curve
+        .iter()
+        .zip(&tube)
+        .filter(|(line, tube)| **line != BACKGROUND && **tube != BACKGROUND)
+        .count();
+    assert!(inside * 10 > on_curve * 9, "{inside} of {on_curve}");
+
+    // The circle is a small closed line around the origin.
+    scene.camera.frame(Vec3::ZERO, 1.5);
+    let circle = scene.output(&mut stage, "profile", scene.view(48, 1));
+    let on_circle = covered(&circle);
+    assert!(on_circle > 60, "{on_circle}");
+    let middle = (SIZE * SIZE / 2 + SIZE / 2) as usize;
+    assert_eq!(circle[middle], BACKGROUND);
+
+    assert!(stage.errors().is_empty(), "{:?}", stage.errors());
 }
 
 #[test]

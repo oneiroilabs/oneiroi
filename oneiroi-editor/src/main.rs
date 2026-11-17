@@ -8,7 +8,7 @@ use iced_nodegraph::{
     ColorQuad, Keymap, NodeGraph, NodeStyle, PinDirection, PinRef, default_can_connect,
     default_node_style, edge, node, node_header, pin,
 };
-use oneiroi_editor::document::{Document, PinType, Shown};
+use oneiroi_editor::document::{Document, PinType};
 use oneiroi_editor::preview::Preview;
 use oneiroi_graph::{Input, NodeId};
 
@@ -154,11 +154,10 @@ impl Editor {
                 self.selected = vec![node];
             }
             Message::Display(node) => {
-                // Aim the camera again when something shows up where
-                // nothing was, and leave it alone otherwise.
-                let empty = self.document.shown() == Shown::Nothing;
-                self.document.set_display(Some(node.into()));
-                if empty {
+                // Another node is another thing to look at, which can be
+                // anywhere and of any size. Edits leave the camera alone.
+                if self.document.graph().display != Some(node.into()) {
+                    self.document.set_display(Some(node.into()));
                     self.frame += 1;
                 }
             }

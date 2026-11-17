@@ -11,9 +11,13 @@ use iced::{
     Event, Rectangle, mouse,
     widget::shader::{self, Action, Pipeline, Primitive},
 };
+use oneiroi_core::node::Topology;
 use oneiroi_wgpu::{DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera};
 
 use crate::document::{Session, Shown};
+
+/// How many steps every piece of a line is drawn with.
+const LINE_STEPS: u32 = 64;
 
 /// Shows what a [`Session`] shows. Drag with the middle mouse button to
 /// orbit, scroll to zoom.
@@ -222,7 +226,7 @@ impl Primitive for Shot {
         );
         let size = viewport.physical_size();
         let size = (size.width, size.height);
-        let view = DrawView {
+        let mut view = DrawView {
             view_projection: camera.view_projection(bounds.width / bounds.height.max(1.0)),
             light: camera.position() - camera.target(),
             color: Vec3::new(0.8, 0.7, 0.6),
@@ -239,6 +243,11 @@ impl Primitive for Shot {
                     return;
                 };
                 gpu.sync(store);
+                if drawable.topology == Topology::Line {
+                    // A line has nothing but its steps to look round with.
+                    view.rings = LINE_STEPS;
+                    view.color = Vec3::new(1.0, 0.75, 0.3);
+                }
                 if let Some(handle) = store.get(key)
                     && let Some(page) = gpu.page(handle.page)
                 {

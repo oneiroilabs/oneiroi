@@ -3,7 +3,7 @@ use std::f32::consts::TAU;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
-    node::{Inputs, NodeDef, Outputs, PortDecl, Shape},
+    node::{Drawable, Inputs, NodeDef, Outputs, PortDecl, Shape, Topology},
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
@@ -74,6 +74,19 @@ impl Profile for Circle {
             .collect()
     }
 }
+
+/// A circle can be looked at as it is: a line around the origin of the
+/// plane it lies in.
+pub const CIRCLE_LINE: Drawable = Drawable {
+    ty: Circle::INFO,
+    topology: Topology::Line,
+    wgsl: include_str!("circle.wgsl"),
+    bounds: |words| {
+        let circles: &[Circle] = bytemuck::try_cast_slice(words).ok()?;
+        let radius = circles.iter().map(|circle| circle.radius.abs()).reduce(f32::max)?;
+        Some(([0.0; 3], radius))
+    },
+};
 
 pub static CIRCLE: NodeDef = NodeDef {
     id: "curve.circle",

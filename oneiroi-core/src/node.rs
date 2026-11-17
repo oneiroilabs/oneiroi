@@ -326,6 +326,11 @@ impl NodeRegistry {
         self.drawables.insert(drawable.ty.name, drawable);
     }
 
+    /// Every data type which can be drawn as it is.
+    pub fn drawables(&self) -> impl Iterator<Item = &Drawable> {
+        self.drawables.values()
+    }
+
     /// How values of `ty` can be drawn, if they can.
     pub fn drawable(&self, ty: &TypeInfo) -> Option<&Drawable> {
         self.drawables.get(ty.name).filter(|drawable| drawable.ty == *ty)
