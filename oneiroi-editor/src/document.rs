@@ -126,6 +126,8 @@ pub struct Session {
     pub framed: Option<(u64, OrbitCamera)>,
     /// How many nodes ran for what is shown since it was last planned.
     ran: usize,
+    /// How many of those ran on the GPU.
+    ran_on_gpu: usize,
     /// What the preview draws surfaces with, once it drew one.
     pub drawn_with: Option<&'static str>,
     /// How many triangles the preview drew the last time they were counted.
@@ -146,6 +148,7 @@ impl Session {
             generation: 0,
             framed: None,
             ran: 0,
+            ran_on_gpu: 0,
             drawn_with: None,
             triangles: None,
             settling: 0,
@@ -179,8 +182,13 @@ impl Session {
         if self.engine.pending() == 0 {
             return 0;
         }
+        let on_gpu = |engine: &Engine<DeferredExecutor>| {
+            engine.executor().gpu().map_or(0, |gpu| gpu.stats().gpu)
+        };
+        let before = on_gpu(&self.engine);
         let ran = self.engine.flush();
         self.ran += ran;
+        self.ran_on_gpu += on_gpu(&self.engine) - before;
         self.overflows = self.engine.overflows().to_vec();
         if ran > 0 {
             self.engine.end_frame(BUDGET_WORDS);
@@ -723,6 +731,7 @@ impl Document {
         session.engine.discard();
         session.engine.plan([&mut instance]);
         session.ran = 0;
+        session.ran_on_gpu = 0;
         session.overflows.clear();
 
         // What can be shown of the outputs: a value which can be drawn as
@@ -770,10 +779,25 @@ impl Document {
     pub fn status(&self) -> String {
         // What is planned runs here if the preview did not get to it yet,
         // so what is said is what happened.
-        let (ran, overflows, drawn_with) = {
+        let (ran, on_gpu, overflows, drawn_with) = {
             let mut session = self.session.lock().unwrap();
             session.run();
-            (session.ran, session.overflows.clone(), session.drawn_with)
+            let on_gpu = session.ran_on_gpu;
+            (session.ran, on_gpu, session.overflows.clone(), session.drawn_with)
+        };
+        // Without binding arrays the device can not run the graph at all.
+        let cpu_only = {
+            let session = self.session.lock().unwrap();
+            let gpu = session.engine.executor().gpu();
+            gpu.is_some_and(|gpu| !gpu.is_supported())
+        };
+        let ran = match cpu_only {
+            true => format!("{ran} (all on the CPU, the device has no binding arrays)"),
+            false => ran.to_string(),
+        };
+        let ran = match on_gpu {
+            0 => ran,
+            on_gpu => format!("{ran} ({on_gpu} on the GPU)"),
         };
         if let Some(overflow) = overflows.first() {
             return format!(

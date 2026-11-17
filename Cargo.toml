@@ -52,9 +52,9 @@ petgraph = { version = "0.8", features = ["serde-1"] }
 
 
 [patch.crates-io]
-iced = { git = "https://github.com/kistz/iced.git", rev = "4e7f377182a29e978a958ae3badd897958b4b4c3" }
-iced_core = { git = "https://github.com/kistz/iced.git", rev = "4e7f377182a29e978a958ae3badd897958b4b4c3" }
-iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "4e7f377182a29e978a958ae3badd897958b4b4c3" }
-iced_widget = { git = "https://github.com/kistz/iced.git", rev = "4e7f377182a29e978a958ae3badd897958b4b4c3" }
-iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "4e7f377182a29e978a958ae3badd897958b4b4c3" }
+iced = { git = "https://github.com/kistz/iced.git", rev = "b0f87a7a7e407bfcf82711ca537c612e37ae14b3" }
+iced_core = { git = "https://github.com/kistz/iced.git", rev = "b0f87a7a7e407bfcf82711ca537c612e37ae14b3" }
+iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "b0f87a7a7e407bfcf82711ca537c612e37ae14b3" }
+iced_widget = { git = "https://github.com/kistz/iced.git", rev = "b0f87a7a7e407bfcf82711ca537c612e37ae14b3" }
+iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "b0f87a7a7e407bfcf82711ca537c612e37ae14b3" }
 iced_nodegraph = { git = "https://github.com/kistz/iced_nodegraph.git", rev = "cd38035737f16de6d394517c3d4440bf3368c1fc" }

@@ -336,7 +336,7 @@ impl Primitive for Shot {
                         normals: mesh.normals.as_deref(),
                         indices: &mesh.indices,
                     });
-                    pipeline.mesh.set_mesh(device, mesh);
+                    pipeline.mesh.set_mesh(device, queue, mesh);
                 }
                 pipeline
                     .mesh
