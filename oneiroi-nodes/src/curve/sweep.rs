@@ -169,11 +169,21 @@ impl<P: Profile> Ports<P> {
             GpuOutput {
                 entry: "sweep_offset",
                 len: |inputs| inputs.group_count(0) + 1,
-                words: None,
+                // From where the curves of the spine start, which the CPU
+                // has unless the spine came of a kernel which did not say.
+                words: Some(|inputs| {
+                    let mut offsets = vec![0];
+                    for curve in inputs.groups(0) {
+                        let patches = P::patches(curve.len(), inputs.len(1)) as u32;
+                        offsets.push(offsets.last().unwrap() + patches);
+                    }
+                    offsets
+                }),
             },
         ],
         requires: Caps::NONE,
-        reads: &[],
+        // Where the curves of the spine start.
+        reads: &[2],
         accepts: None,
         examples: P::SWEEP_EXAMPLES,
     }];
