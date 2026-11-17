@@ -26,15 +26,33 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// How close the mesh of a surface is to it.
 const TOLERANCE: f32 = 0.005;
 
-/// A device, with mesh shaders if the adapter has them.
+/// A device, with mesh shaders if the adapter has them. `WGPU_BACKEND`
+/// picks the backend and `WGPU_VALIDATION=1` turns on its validation, the
+/// same as in the editor.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::from_env().unwrap_or(descriptor.backends);
+    descriptor.flags = descriptor.flags.with_env();
+    let instance = wgpu::Instance::new(descriptor);
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()));
     let Ok(adapter) = adapter else {
         eprintln!("no graphics adapter, nothing was checked");
         return None;
     };
+    let info = adapter.get_info();
+    let mesh_shaders = adapter.features().contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER);
+    eprintln!(
+        "{} on {:?}, driver {} {}, {}",
+        info.name,
+        info.backend,
+        info.driver,
+        info.driver_info,
+        match mesh_shaders {
+            true => "with mesh shaders",
+            false => "without mesh shaders",
+        }
+    );
     let wanted = wgpu::Features::EXPERIMENTAL_MESH_SHADER | oneiroi_wgpu::FEATURES;
     let descriptor = wgpu::DeviceDescriptor {
         required_features: adapter.features() & wanted,
@@ -43,7 +61,11 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
         ..Default::default()
     };
-    pollster::block_on(adapter.request_device(&descriptor)).ok()
+    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).ok()?;
+    device.set_device_lost_callback(|reason, message| {
+        eprintln!("the GPU device was lost ({reason:?}): {message}");
+    });
+    Some((device, queue))
 }
 
 fn registry() -> NodeRegistry {
