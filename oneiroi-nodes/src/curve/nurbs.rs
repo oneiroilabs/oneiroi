@@ -14,6 +14,9 @@ const GAUSS_WEIGHTS: [f32; 5] = [
     0.236_926_89,
 ];
 
+/// At most this many Newton steps find where a segment is how long.
+pub const NEWTON_STEPS: u32 = 8;
+
 /// How many double reflection steps carry the frame across one segment.
 /// This is one less than the 32 lanes the GPU evaluates per segment, so
 /// both walk over the same samples.
@@ -201,8 +204,9 @@ impl CubicNurbsSegmentCache {
         }
 
         let mut u = (distance / self.length).clamp(0.0, 1.0);
-        // Because our start u should be extremely accurate two steps are plenty.
-        for _ in 0..2 {
+        // The start is a guess which assumes the segment is as fast
+        // everywhere. Where it is not, a few steps are needed.
+        for _ in 0..NEWTON_STEPS {
             let speed = self.evaluate(u).1.length();
             if speed < 1e-5 {
                 break;

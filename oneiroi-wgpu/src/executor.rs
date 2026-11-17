@@ -459,11 +459,12 @@ impl GpuExecutor {
                         .expect("planned inputs are stored before they are read")
                 })
                 .collect();
-            let elements: Vec<usize> = kernel
-                .outputs
-                .iter()
-                .map(|output| (output.len)(&Inputs::new(store, node, &inputs)))
-                .collect();
+            let view = Inputs::new(store, node, &inputs);
+            if kernel.accepts.is_some_and(|accepts| !accepts(&view)) {
+                self.run_on_cpu(store, item);
+                continue;
+            }
+            let elements: Vec<usize> = kernel.outputs.iter().map(|output| (output.len)(&view)).collect();
             let fits = elements.iter().zip(&words).all(|(elements, words)| {
                 *elements as u64 * words * 4 <= max_bytes
                     && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups

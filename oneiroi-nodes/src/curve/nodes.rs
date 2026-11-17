@@ -10,7 +10,7 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments, locate};
+use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments};
 
 /// A [`MovingFrame`] in the layout of the WGSL struct with the same name.
 #[repr(C)]
@@ -106,68 +106,139 @@ fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     outputs.set_groups(0, &offsets);
 }
 
-/// `samples` frames per segment, the first and last one at its ends.
-pub static FRAMES: NodeDef = NodeDef {
-    id: "curve.frames",
-    display_name: "Curve Frames",
-    version: 1,
+/// Frames along every curve, a group of them per curve. Where they are
+/// is told by the first of these which is given:
+///
+/// - `t`: at these fractions of the length of the curve,
+/// - `spacing`: every `spacing` along the curve, starting at its start,
+/// - `count`: as many as `count`, from the start to the end, with the same
+///   distance between them.
+///
+/// Every place is measured along the curve, so the frames do not bunch up
+/// where its control points do.
+pub static SAMPLE_CURVE: NodeDef = NodeDef {
+    id: "curve.sample",
+    display_name: "Sample Curve",
+    version: 2,
     inputs: &[
-        PortDecl::new::<CubicNurbsSegmentCache>("segments"),
-        PortDecl::new::<u32>("samples").with_default(PortDefault::U32(&[32])).one(),
+        PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(),
+        PortDecl::new::<u32>("count").with_default(PortDefault::U32(&[32])).one(),
+        PortDecl::new::<f32>("spacing").with_default(PortDefault::F32(&[0.0])).one(),
+        PortDecl::new::<f32>("t"),
     ],
-    outputs: &[PortDecl::new::<EvaluatedFrame>("frames")],
-    cpu: frames,
+    outputs: &[PortDecl::new::<EvaluatedFrame>("frames").grouped()],
+    cpu: sample_curve,
     gpu: &[GpuKernel {
-        wgsl: concat!(include_str!("curve.wgsl"), include_str!("frames.wgsl")),
-        outputs: &[GpuOutput {
-            entry: "curve_frames",
-            len: frames_len,
-        }],
+        wgsl: concat!(include_str!("curve.wgsl"), include_str!("sample.wgsl")),
+        outputs: &[
+            GpuOutput {
+                entry: "sample_curve_frames",
+                len: |inputs| inputs.groups(0).len() * per_curve(inputs),
+            },
+            GpuOutput {
+                entry: "sample_curve_offsets",
+                len: |inputs| inputs.groups(0).len() + 1,
+            },
+        ],
         requires: Caps::NONE,
-        reads: &[1],
+        // The count, the spacing and the offsets of the curves.
+        reads: &[1, 2, 4],
+        // How many frames come of a spacing depends on how long the curves
+        // are, which only the CPU knows before they are made.
+        accepts: Some(|inputs| {
+            inputs.value::<f32>(2) <= 0.0 && inputs.groups(0).iter().all(|curve| !curve.is_empty())
+        }),
         examples: &[
-            || frames_example(9, 8),
-            || frames_example(4, 2),
-            || frames_example(4, 1),
-            || frames_example(0, 5),
+            || sample_example(&[9], 8, 0.0, &[]),
+            || sample_example(&[9, 5], 5, 0.0, &[]),
+            || sample_example(&[6, 4], 3, 0.0, &[0.0, 0.25, 1.0, 1.5, -1.0]),
+            || sample_example(&[4], 1, 0.0, &[]),
+            || sample_example(&[5], 0, 0.0, &[]),
+            || sample_example(&[7], 4, 0.5, &[]),
+            || sample_example(&[0], 4, 0.0, &[]),
         ],
     }],
 };
 
-/// A curve of `points` which bends in every direction, sampled `samples`
-/// times per segment.
-fn frames_example(points: usize, samples: u32) -> Vec<Vec<u32>> {
-    let points: Vec<_> = (0..points)
-        .map(|i| {
-            let t = i as f32;
-            Vec4::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0 + t * 0.1)
-        })
-        .collect();
-    let segments = match points.len() {
-        0 => Vec::new(),
-        len => extract_segments(&points, &clamped_uniform_knots(len)),
-    };
-    vec![bytemuck::cast_slice(&segments).to_vec(), vec![samples]]
-}
-
-fn frames_samples(inputs: &Inputs<'_>) -> usize {
-    inputs.value::<u32>(1).max(2) as usize
-}
-
-fn frames_len(inputs: &Inputs<'_>) -> usize {
-    inputs.len(0) * frames_samples(inputs)
-}
-
-fn frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let segments = inputs.get::<CubicNurbsSegmentCache>(0);
-    let samples = frames_samples(inputs);
-
-    let frames = outputs.alloc::<EvaluatedFrame>(0, frames_len(inputs));
-    for (segment, frames) in segments.iter().zip(frames.chunks_exact_mut(samples)) {
-        for (sample, frame) in frames.iter_mut().enumerate() {
-            *frame = segment.frame(sample as f32 / (samples - 1) as f32).into();
+/// Curves of as many `points` each, which bend in every direction, and the
+/// other inputs of [`SAMPLE_CURVE`] as words.
+fn sample_example(points: &[usize], count: u32, spacing: f32, t: &[f32]) -> Vec<Vec<u32>> {
+    let mut segments = Vec::new();
+    let mut offsets = vec![0];
+    for (curve, points) in points.iter().enumerate() {
+        let points: Vec<_> = (0..*points)
+            .map(|i| {
+                let t = i as f32 + curve as f32 * 0.3;
+                Vec4::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0 + t * 0.1)
+            })
+            .collect();
+        if points.len() >= 4 {
+            segments.extend(extract_segments(&points, &clamped_uniform_knots(points.len())));
         }
+        offsets.push(segments.len() as u32);
     }
+    vec![
+        bytemuck::cast_slice(&segments).to_vec(),
+        vec![count],
+        vec![spacing.to_bits()],
+        bytemuck::cast_slice(t).to_vec(),
+        offsets,
+    ]
+}
+
+/// How many frames every curve gets unless they are spaced.
+fn per_curve(inputs: &Inputs<'_>) -> usize {
+    match inputs.len(3) {
+        0 => inputs.value::<u32>(1) as usize,
+        given => given,
+    }
+}
+
+/// No more frames than these on a single curve, however small the spacing.
+const MAX_SPACED: usize = 1 << 16;
+
+fn sample_curve(inputs: &Inputs<'_>, outputs: &mut Outputs) {
+    let segments = inputs.get::<CubicNurbsSegmentCache>(0);
+    let spacing = inputs.value::<f32>(2);
+    let ts = inputs.get::<f32>(3);
+    let per = per_curve(inputs);
+
+    let mut frames = Vec::new();
+    let mut offsets = vec![0];
+    for curve in inputs.groups(0) {
+        let curve = &segments[curve];
+        if let (Some(first), Some(last)) = (curve.first(), curve.last()) {
+            let start = first.cumulative_length() - first.length();
+            let length = last.cumulative_length() - start;
+            let at = |distance: f32| -> EvaluatedFrame { frame_at(curve, distance).into() };
+            if !ts.is_empty() {
+                frames.extend(ts.iter().map(|t| at(t.clamp(0.0, 1.0) * length + start)));
+            } else if spacing > 0.0 {
+                let count = ((length / spacing) as usize + 1).min(MAX_SPACED);
+                frames.extend((0..count).map(|i| at(i as f32 * spacing + start)));
+            } else {
+                let fraction = |i: usize| match per {
+                    0 | 1 => 0.0,
+                    _ => i as f32 / (per - 1) as f32,
+                };
+                frames.extend((0..per).map(|i| at(fraction(i) * length + start)));
+            }
+        }
+        offsets.push(frames.len() as u32);
+    }
+    outputs.set(0, &frames);
+    outputs.set_groups(0, &offsets);
+}
+
+/// The frame `distance` along the segments of a curve, measured as their
+/// lengths are: from the start of the whole curve.
+fn frame_at(curve: &[CubicNurbsSegmentCache], distance: f32) -> MovingFrame {
+    let index = curve
+        .partition_point(|segment| distance >= segment.cumulative_length())
+        .min(curve.len() - 1);
+    let segment = &curve[index];
+    let local = distance - (segment.cumulative_length() - segment.length());
+    segment.frame(segment.u_at_distance(local))
 }
 
 /// The curve moved by an offset.
@@ -192,34 +263,6 @@ fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
         .map(|segment| segment.translated(offset))
         .collect();
     outputs.set(0, &moved);
-}
-
-/// The position on the curve for every `t` in `0..=1`.
-pub static SAMPLE: NodeDef = NodeDef {
-    id: "curve.sample",
-    display_name: "Sample Curve",
-    inputs: &[
-        PortDecl::new::<CubicNurbsSegmentCache>("segments"),
-        PortDecl::new::<f32>("t"),
-    ],
-    version: 1,
-    outputs: &[PortDecl::new::<Vec3>("positions")],
-    cpu: sample,
-    gpu: &[],
-};
-
-fn sample(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let segments = inputs.get::<CubicNurbsSegmentCache>(0);
-    let ts = inputs.get::<f32>(1);
-    if segments.is_empty() {
-        return;
-    }
-
-    let positions = outputs.alloc::<Vec3>(0, ts.len());
-    for (position, t) in positions.iter_mut().zip(ts) {
-        let (index, u) = locate(segments.len(), *t);
-        *position = segments[index].evaluate(u).0;
-    }
 }
 
 /// A sphere around the segments in `words`, found by looking at a few
@@ -248,8 +291,7 @@ pub fn register(registry: &mut NodeRegistry) {
     registry.register_drawable(crate::primitive::CIRCLE_LINE);
 
     registry.register(&NURBS);
-    registry.register(&FRAMES);
-    registry.register(&SAMPLE);
+    registry.register(&SAMPLE_CURVE);
     registry.register(&TRANSLATE);
     registry.register(&crate::primitive::CIRCLE);
     super::register_profile::<crate::primitive::Circle>(registry);
@@ -274,20 +316,34 @@ mod tests {
         ]
     }
 
-    /// The control points are exposed, the knots are fixed.
+    /// The control points are exposed, the knots are fixed. Frames by
+    /// count and at a few places.
     fn program() -> oneiroi_core::program::Program {
         let mut b = ProgramBuilder::new("tube spine");
         let points = b.param("points", &points());
-        let samples = b.param_one_of::<u32>("samples", 8);
+        let count = b.param_one_of::<u32>("count", 8);
         let knots = b.constant(&clamped_uniform_knots(6));
+        let no_spacing = b.constant::<f32>(&[0.0]);
+        let no_ts = b.constant::<f32>(&[]);
         let ts = b.constant::<f32>(&[0.0, 0.5, 1.0]);
 
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
-        let positions = b.node(&SAMPLE, &[segments, ts]).unwrap()[0];
+        let frames = b.node(&SAMPLE_CURVE, &[segments, count, no_spacing, no_ts]).unwrap()[0];
+        let at = b.node(&SAMPLE_CURVE, &[segments, count, no_spacing, ts]).unwrap()[0];
         b.output("frames", frames);
-        b.output("positions", positions);
+        b.output("at", at);
         b.finish()
+    }
+
+    fn curve() -> CubicNurbs {
+        CubicNurbs::new(
+            points().into_iter().map(Vec4::from_array).collect(),
+            clamped_uniform_knots(6),
+        )
+    }
+
+    fn close(a: MovingFrame, b: MovingFrame) -> bool {
+        a.position.distance(b.position) < 1e-4 && a.tangent.distance(b.tangent) < 1e-4
     }
 
     #[test]
@@ -296,21 +352,52 @@ mod tests {
         let id = engine.add_program(program());
         let mut instance = engine.instantiate(id);
         assert_eq!(engine.evaluate([&mut instance]), 3);
+        let curve = curve();
 
-        let curve = CubicNurbs::new(
-            points().into_iter().map(Vec4::from_array).collect(),
-            clamped_uniform_knots(6),
-        );
-
-        let positions = engine.read::<Vec3>(&instance, "positions").unwrap();
-        assert_eq!(
-            positions,
-            [curve.evaluate(0.0), curve.evaluate(0.5), curve.evaluate(1.0)]
-        );
+        // Places are measured along the curve, the same as the curve does.
+        let at = engine.read::<EvaluatedFrame>(&instance, "at").unwrap();
+        let length = curve.length();
+        for (frame, t) in at.iter().zip([0.0, 0.5, 1.0]) {
+            let expected = curve.frame(curve.t_at_distance(t * length));
+            assert!(close((*frame).into(), expected), "{t}");
+        }
 
         let frames = engine.read::<EvaluatedFrame>(&instance, "frames").unwrap();
-        assert_eq!(frames.len(), curve.segments().len() * 8);
-        assert_eq!(frames[8], curve.segments()[1].frame(0.0).into());
+        let expected = curve.sample_equidistant(8);
+        assert_eq!(frames.len(), 8);
+        for (frame, expected) in frames.iter().zip(expected) {
+            assert!(close((*frame).into(), expected));
+        }
+    }
+
+    #[test]
+    fn frames_can_be_spaced() {
+        let mut b = ProgramBuilder::new("spaced");
+        let points = b.param("points", &points());
+        let knots = b.constant(&clamped_uniform_knots(6));
+        let count = b.constant::<u32>(&[8]);
+        let spacing = b.param_one_of::<f32>("spacing", 0.5);
+        let no_ts = b.constant::<f32>(&[]);
+        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let frames = b.node(&SAMPLE_CURVE, &[segments, count, spacing, no_ts]).unwrap()[0];
+        b.output("frames", frames);
+
+        let mut engine = Engine::default();
+        let id = engine.add_program(b.finish());
+        let mut instance = engine.instantiate(id);
+        engine.evaluate([&mut instance]);
+
+        let length = curve().length();
+        let frames = engine.read::<EvaluatedFrame>(&instance, "frames").unwrap();
+        assert_eq!(frames.len(), (length / 0.5) as usize + 1);
+        assert_eq!(engine.groups(&instance, "frames"), Some(&[0, frames.len() as u32][..]));
+        // Neighbours are about as far apart as asked, a bit less where the
+        // curve bends between them.
+        for pair in frames.windows(2) {
+            let (a, b) = (MovingFrame::from(pair[0]), MovingFrame::from(pair[1]));
+            let distance = a.position.distance(b.position);
+            assert!(distance <= 0.5 + 1e-3 && distance > 0.4, "{distance}");
+        }
     }
 
     #[test]
@@ -319,10 +406,10 @@ mod tests {
         let id = engine.add_program(program());
         let mut a = engine.instantiate(id);
         let mut b = engine.instantiate(id);
-        engine.set_param(&mut b, "samples", &[16u32]).unwrap();
+        engine.set_param(&mut b, "count", &[16u32]).unwrap();
 
-        // Both share the segments and the sampled positions.
-        assert_eq!(engine.evaluate([&mut a, &mut b]), 3 + 1);
+        // Both share the segments, b samples them anew.
+        assert_eq!(engine.evaluate([&mut a, &mut b]), 3 + 2);
 
         let mut moved = points();
         moved[2][1] = 4.0;
@@ -344,7 +431,8 @@ mod tests {
             engine.read::<EvaluatedFrame>(&instance, "frames"),
             Some(&[][..])
         );
-        assert_eq!(engine.read::<Vec3>(&instance, "positions"), Some(&[][..]));
+        assert_eq!(engine.read::<EvaluatedFrame>(&instance, "at"), Some(&[][..]));
+        assert_eq!(engine.groups(&instance, "frames"), Some(&[0, 0][..]));
     }
 
     #[test]
@@ -390,9 +478,9 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 6 nodes of curves, a tessellation for each of the 2 surfaces
+        // 5 nodes of curves, a tessellation for each of the 2 surfaces
         // and a sweep for each of the 2 profiles, and 2 values.
-        assert_eq!(registry.iter().count(), 11);
+        assert_eq!(registry.iter().count(), 10);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

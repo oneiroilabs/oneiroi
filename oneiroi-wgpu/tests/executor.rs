@@ -7,7 +7,8 @@ use oneiroi_core::{
     exec::{Engine, Executor, Instance},
     program::{ProgramBuilder, ProgramId},
 };
-use oneiroi_nodes::curve::{EvaluatedFrame, FRAMES, NURBS, nurbs::clamped_uniform_knots};
+use oneiroi_core::program::SlotId;
+use oneiroi_nodes::curve::{EvaluatedFrame, NURBS, SAMPLE_CURVE, nurbs::clamped_uniform_knots};
 use oneiroi_wgpu::{GpuExecutor, GpuStats};
 
 /// Nodes on the GPU, nodes on the CPU, compute passes and downloads.
@@ -46,6 +47,13 @@ fn points(count: usize) -> Vec<[f32; 4]> {
         .collect()
 }
 
+/// `count` frames along every curve of `segments`.
+fn sample(b: &mut ProgramBuilder, segments: SlotId, count: SlotId) -> SlotId {
+    let spacing = b.constant::<f32>(&[0.0]);
+    let t = b.constant::<f32>(&[]);
+    b.node(&SAMPLE_CURVE, &[segments, count, spacing, t]).unwrap()[0]
+}
+
 /// The frames of a curve through `count` points.
 fn program<E: Executor>(engine: &mut Engine<E>, count: usize) -> ProgramId {
     let mut b = ProgramBuilder::new("frames");
@@ -53,7 +61,7 @@ fn program<E: Executor>(engine: &mut Engine<E>, count: usize) -> ProgramId {
     let knots = b.constant(&clamped_uniform_knots(count));
     let samples = b.param_one_of::<u32>("samples", 8);
     let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-    let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+    let frames = sample(&mut b, segments, samples);
     b.output("frames", frames);
     engine.add_program(b.finish())
 }
@@ -88,8 +96,8 @@ fn both_backends_compute_the_same_frames() {
 
         let a = frames(&mut gpu, &mut on_gpu);
         let b = frames(&mut cpu, &mut on_cpu);
-        // 16 floats per frame, 8 frames per segment.
-        assert_eq!(a.len(), (count - 3) * 8 * 16);
+        // 16 floats per frame, 8 frames.
+        assert_eq!(a.len(), 8 * 16);
         assert_close(&a, &b);
 
         // More samples than one workgroup covers.
@@ -109,18 +117,19 @@ fn only_nodes_with_a_kernel_run_on_the_gpu() {
     let program = program(&mut gpu, 9);
     let mut instance = gpu.instantiate(program);
 
-    // The curve is built on the CPU, its frames are computed on the GPU.
+    // The curve is built on the CPU, its frames are computed on the GPU:
+    // a pass for them and one for where the frames of each curve start.
     frames(&mut gpu, &mut instance);
-    assert_eq!(counts(gpu.executor().stats()), (1, 1, 1, 1));
+    assert_eq!(counts(gpu.executor().stats()), (1, 1, 2, 1));
 
     // What is in the store already is not computed again, wherever it
     // came from.
     frames(&mut gpu, &mut instance);
-    assert_eq!(counts(gpu.executor().stats()), (1, 1, 1, 1));
+    assert_eq!(counts(gpu.executor().stats()), (1, 1, 2, 1));
 
     gpu.set_param(&mut instance, "samples", &[3u32]).unwrap();
-    assert_eq!(frames(&mut gpu, &mut instance).len(), 6 * 3 * 16);
-    assert_eq!(counts(gpu.executor().stats()), (2, 1, 2, 2));
+    assert_eq!(frames(&mut gpu, &mut instance).len(), 3 * 16);
+    assert_eq!(counts(gpu.executor().stats()), (2, 1, 4, 2));
 }
 
 #[test]
@@ -142,9 +151,10 @@ fn calls_of_one_node_share_a_pass() {
         on_cpu.push(b);
     }
 
-    // Five curves on the CPU, then all of their frames in a single pass.
+    // Five curves on the CPU, then all of their frames in a single pass,
+    // and one for where they start.
     assert_eq!(gpu.evaluate(&mut on_gpu), 10);
-    assert_eq!(counts(gpu.executor().stats()), (5, 5, 1, 0));
+    assert_eq!(counts(gpu.executor().stats()), (5, 5, 2, 0));
 
     cpu.evaluate(&mut on_cpu);
     for (a, b) in on_gpu.iter().zip(&on_cpu) {
@@ -189,16 +199,16 @@ fn edge_cases_match_the_cpu() {
     let mut on_gpu = gpu.instantiate(gpu_program);
     let mut on_cpu = cpu.instantiate(cpu_program);
 
-    // Fewer than two samples per segment are two, and so is none at all.
-    for samples in [&[0u32][..], &[1], &[]] {
-        gpu.set_param(&mut on_gpu, "samples", samples).unwrap();
-        cpu.set_param(&mut on_cpu, "samples", samples).unwrap();
+    // A single frame is at the start, none at all is nothing.
+    for (samples, expected) in [(0u32, 0), (1, 1), (2, 2)] {
+        gpu.set_param(&mut on_gpu, "samples", &[samples]).unwrap();
+        cpu.set_param(&mut on_cpu, "samples", &[samples]).unwrap();
         let a = frames(&mut gpu, &mut on_gpu);
-        assert_eq!(a.len(), 6 * 2 * 16);
+        assert_eq!(a.len(), expected * 16);
         assert_close(&a, &frames(&mut cpu, &mut on_cpu));
     }
 
-    // Three points are no curve, so there is nothing to run a shader for.
+    // Three points are no curve, so there is nothing to sample.
     gpu.set_param(&mut on_gpu, "points", &points(3)).unwrap();
     assert!(frames(&mut gpu, &mut on_gpu).is_empty());
 
@@ -248,6 +258,7 @@ mod staying_on_the_gpu {
             }],
             requires: Caps::NONE,
             reads: &[],
+            accepts: None,
             examples: &[],
         }],
     };
@@ -269,7 +280,7 @@ mod staying_on_the_gpu {
         let knots = b.constant(&clamped_uniform_knots(9));
         let samples = b.constant::<u32>(&[8]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let frames = sample(&mut b, segments, samples);
         let positions = b.node(last, &[frames]).unwrap()[0];
         b.output("frames", frames);
         b.output("positions", positions);
@@ -305,8 +316,9 @@ mod staying_on_the_gpu {
         let mut instance = gpu.instantiate(program);
         gpu.evaluate([&mut instance]);
 
-        // Two kernels ran and nothing came back.
-        assert_eq!(counts(gpu.executor().stats()), (2, 1, 2, 0));
+        // Two kernels ran and nothing came back. The frames take a pass
+        // for themselves and one for where those of each curve start.
+        assert_eq!(counts(gpu.executor().stats()), (2, 1, 3, 0));
         assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
         assert!(gpu.read::<Vec3>(&instance, "positions").is_none());
 
@@ -332,7 +344,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // The frames were brought back for the node which has no kernel.
-        assert_eq!(counts(gpu.executor().stats()), (1, 2, 1, 1));
+        assert_eq!(counts(gpu.executor().stats()), (1, 2, 2, 1));
         close(
             gpu.read::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
@@ -344,7 +356,7 @@ mod staying_on_the_gpu {
         let Some(mut gpu) = gpu() else {
             return;
         };
-        // The position of each frame, one frame at a time.
+        // The positions of the frames, one curve at a time.
         let mut b = ProgramBuilder::new("one position");
         let frame = b.param::<EvaluatedFrame>("frame", &[]);
         let position = b.node(&ON_GPU, &[frame]).unwrap()[0];
@@ -356,7 +368,7 @@ mod staying_on_the_gpu {
         let knots = b.constant(&clamped_uniform_knots(9));
         let samples = b.constant::<u32>(&[8]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let frames = sample(&mut b, segments, samples);
         let positions = b
             .for_each(gpu.programs(), one, &[Some(frames)], 0, 1000)
             .unwrap();
@@ -365,13 +377,15 @@ mod staying_on_the_gpu {
         let mut instance = gpu.instantiate(id);
         gpu.evaluate([&mut instance]);
 
-        // The frames never came over: each one was read where it is.
-        assert_eq!(gpu.executor().stats().downloads, 0);
+        // The frames never came over: those of each curve were read where
+        // they are. Only where each curve starts did, to know how often to
+        // run.
+        assert_eq!(gpu.executor().stats().downloads, 1);
         close(
             gpu.fetch::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
         );
-        assert_eq!(gpu.executor().stats().downloads, 1);
+        assert_eq!(gpu.executor().stats().downloads, 2);
     }
 
     #[test]
@@ -410,12 +424,12 @@ mod for_each {
 
     use super::*;
 
-    /// 16 frames of every segment of a curve.
+    /// 16 frames along a curve.
     fn one_curve<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
         let mut b = ProgramBuilder::new("one curve");
         let segments = b.param::<CubicNurbsSegmentCache>("segments", &[]);
         let samples = b.constant::<u32>(&[16]);
-        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let frames = sample(&mut b, segments, samples);
         b.output("frames", frames);
         engine.add_program(b.finish())
     }
@@ -434,7 +448,7 @@ mod for_each {
         let each = b
             .for_each(engine.programs(), one, &[Some(segments)], 0, 100)
             .unwrap();
-        let whole = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let whole = sample(&mut b, segments, samples);
         b.output("each", each[0]);
         b.output("whole", whole);
         engine.add_program(b.finish())
@@ -459,11 +473,11 @@ mod for_each {
         cpu.evaluate([&mut b]);
 
         let each = frames(&mut gpu, &a, "each");
-        assert_eq!(each.len(), (6 + 4) * 16 * 16);
+        assert_eq!(each.len(), 2 * 16 * 16);
         assert_close(&each, &frames(&mut cpu, &b, "each"));
         // Curve by curve is the same as all at once, and the curves stay
         // apart.
-        assert_eq!(gpu.groups(&a, "each"), Some(&[0, 6 * 16, 10 * 16][..]));
+        assert_eq!(gpu.groups(&a, "each"), Some(&[0, 16, 32][..]));
         assert_close(&each, &frames(&mut gpu, &a, "whole"));
 
         // The curves on the CPU, then the frames of both curves in a single
@@ -471,8 +485,8 @@ mod for_each {
         // back.
         let stats = gpu.executor().stats();
         assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 3, 2), "{stats:?}");
-        // The frames of the curves, putting them together, and the frames
-        // of both at once.
-        assert_eq!(stats.dispatches, 3, "{stats:?}");
+        // The frames of the curves and where they start, putting them
+        // together, and the frames of both at once and where they start.
+        assert_eq!(stats.dispatches, 5, "{stats:?}");
     }
 }

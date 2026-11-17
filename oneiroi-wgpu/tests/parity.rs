@@ -103,6 +103,7 @@ fn every_kernel_computes_what_the_cpu_computes() {
         assert!(!kernel.examples.is_empty(), "the kernel of `{}` has no examples", node.id);
 
         let mut cpu = Engine::default();
+        let before = gpu.executor().stats().gpu;
         let (on_gpu, on_cpu) = (program(&mut gpu, node), program(&mut cpu, node));
         for example in kernel.examples {
             let example = example();
@@ -110,10 +111,8 @@ fn every_kernel_computes_what_the_cpu_computes() {
             set(&gpu, &mut a, node, &example);
             set(&cpu, &mut b, node, &example);
 
-            let before = gpu.executor().stats().gpu;
             gpu.evaluate([&mut a]);
             cpu.evaluate([&mut b]);
-            assert!(gpu.executor().stats().gpu > before, "`{}` did not run on the GPU", node.id);
 
             for port in node.outputs {
                 let words = gpu.fetch::<u32>(&a, port.name).unwrap().to_vec();
@@ -124,6 +123,8 @@ fn every_kernel_computes_what_the_cpu_computes() {
             }
             checked += 1;
         }
+        // Some examples may be left to the CPU, but not all of them.
+        assert!(gpu.executor().stats().gpu > before, "`{}` never ran on the GPU", node.id);
     }
     assert!(checked > 0);
 }

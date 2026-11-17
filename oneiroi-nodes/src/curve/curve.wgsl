@@ -120,3 +120,44 @@ fn curve_frame(segment: CubicNurbsSegmentCache, u: f32) -> CurveFrame {
 
     return CurveFrame(position, tangent, normal, binormal);
 }
+
+fn curve_speed(segment: CubicNurbsSegmentCache, u: f32) -> f32 {
+    return length(curve_point(segment, u).velocity);
+}
+
+// The length of the segment between 0 and `u`, by a Gauss-Legendre rule of
+// five points. In the same order as on the CPU, to get the same sum.
+fn curve_length_until(segment: CubicNurbsSegmentCache, u: f32) -> f32 {
+    if (u <= 0.0) {
+        return 0.0;
+    }
+    let half = 0.5 * u;
+    var integral = 0.0;
+    integral += 0.5688889 * curve_speed(segment, half * (0.0 + 1.0));
+    integral += 0.47862867 * curve_speed(segment, half * (-0.5384693 + 1.0));
+    integral += 0.47862867 * curve_speed(segment, half * (0.5384693 + 1.0));
+    integral += 0.23692689 * curve_speed(segment, half * (-0.90617985 + 1.0));
+    integral += 0.23692689 * curve_speed(segment, half * (0.90617985 + 1.0));
+    return integral * 0.5 * u;
+}
+
+// The `u` at which the segment is `distance` long, by at most eight Newton
+// steps, as many as `NEWTON_STEPS`.
+fn curve_u_at_distance(segment: CubicNurbsSegmentCache, distance: f32) -> f32 {
+    if (segment.length <= 0.0) {
+        return 0.0;
+    }
+    var u = clamp(distance / segment.length, 0.0, 1.0);
+    for (var step = 0u; step < 8u; step++) {
+        let speed = curve_speed(segment, u);
+        if (speed < 1e-5) {
+            break;
+        }
+        let delta = (curve_length_until(segment, u) - distance) / speed;
+        u = clamp(u - delta, 0.0, 1.0);
+        if (abs(delta) < 1e-5) {
+            break;
+        }
+    }
+    return u;
+}

@@ -232,9 +232,14 @@ pub struct GpuKernel {
     /// output which makes its own groups: the offsets of those, as `u32`.
     pub outputs: &'static [GpuOutput],
     pub requires: Caps,
-    /// The inputs `len` reads the values of. Of every other input it may
-    /// only ask how long it is, since its values can be on the GPU only.
+    /// The inputs `len` and `accepts` read the values of, by their index
+    /// among all inputs, the offsets behind the declared ones included. Of
+    /// every other input they may only ask how long it is, since its
+    /// values can be on the GPU only.
     pub reads: &'static [usize],
+    /// Whether the kernel can compute the outputs for these inputs. The
+    /// node runs on the CPU where it can not. Without it, it always can.
+    pub accepts: Option<fn(&Inputs<'_>) -> bool>,
     /// Inputs to run both kernels with, which every test of a backend
     /// compares the results of. As words, for every input and then the
     /// offsets of every grouped one.

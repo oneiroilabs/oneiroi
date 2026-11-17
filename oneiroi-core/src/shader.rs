@@ -1094,6 +1094,7 @@ mod tests {
             }],
             requires: Caps::NONE,
             reads: &[],
+            accepts: None,
             examples: &[],
         };
         (node, kernel)
@@ -1173,6 +1174,7 @@ mod tests {
             }],
             requires: Caps::NONE,
             reads: &[],
+            accepts: None,
             examples: &[],
         };
         let shader = compute(&node, &kernel).unwrap().wgsl;
@@ -1255,6 +1257,7 @@ mod tests {
             ],
             requires: Caps::NONE,
             reads: &[],
+            accepts: None,
             examples: &[],
         };
         let shader = compute(&node, &kernel).unwrap();

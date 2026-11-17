@@ -1074,7 +1074,7 @@ mod tests {
         assert!(document.session().lock().unwrap().bounds().unwrap().1 > 0.2);
 
         // Frames are neither a line nor a surface nor a mesh.
-        let frames = document.add_node("curve.frames", [0.0, 0.0]);
+        let frames = document.add_node("curve.sample", [0.0, 0.0]);
         document.connect(curve, "segments", frames, "segments");
         document.set_display(Some(frames));
         assert_eq!(document.shown(), Shown::Nothing);
@@ -1115,7 +1115,6 @@ mod tests {
             labels,
             [
                 "curve.circle",
-                "curve.frames",
                 "curve.nurbs",
                 "curve.sample",
                 "curve.sweep",
@@ -1126,7 +1125,7 @@ mod tests {
             ]
         );
 
-        let added = document.add_node("curve.frames", [10.0, 20.0]);
+        let added = document.add_node("curve.sample", [10.0, 20.0]);
         assert_eq!(document.graph().node(added).unwrap().meta.position, [10.0, 20.0]);
         document.move_nodes(&[added], [5.0, -5.0]);
         assert_eq!(document.graph().node(added).unwrap().meta.position, [15.0, 15.0]);

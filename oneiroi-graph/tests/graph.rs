@@ -483,9 +483,9 @@ fn broken_graphs_say_where_they_are_broken() {
 
     let mut broken = graph.clone();
     broken.connect(nodes.sweep, "surface", nodes.sweep, "profile").unwrap_err();
-    let positions = broken.add("curve.sample");
-    broken.connect(nodes.curve, "segments", positions, "segments").unwrap();
-    broken.connect(positions, "positions", nodes.sweep, "profile").unwrap();
+    let frames = broken.add("curve.sample");
+    broken.connect(nodes.curve, "segments", frames, "segments").unwrap();
+    broken.connect(frames, "frames", nodes.sweep, "profile").unwrap();
     let (node, port, kind) = error(&broken);
     assert_eq!((node, port.as_deref()), (Some(nodes.sweep), Some("profile")));
     assert!(matches!(kind, LowerErrorKind::Build(BuildError::Trait { .. })));
