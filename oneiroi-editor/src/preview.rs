@@ -310,6 +310,11 @@ impl Primitive for Shot {
                     pipeline.drawing = Drawing::Value;
                 }
 
+                session.drawn_with = Some(match pipeline.stage.uses_mesh_shaders() {
+                    true => "mesh shaders",
+                    false => "vertex shaders",
+                });
+
                 // What was counted arrives a few frames later, and the
                 // budget adjusts the detail a little every time.
                 session.triangles = pipeline.stage.triangles(device, 0);

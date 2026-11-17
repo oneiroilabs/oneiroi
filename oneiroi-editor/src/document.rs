@@ -11,7 +11,7 @@ use std::{
 use glam::Vec3;
 use oneiroi_core::{
     exec::{Engine, Instance, Overflow},
-    node::{Drawable, NodeRegistry, PortType},
+    node::{Drawable, NodeRegistry, PortType, Topology},
     store::ContentKey,
     types::{DataType, Scalar, Trait, TypeInfo},
 };
@@ -126,6 +126,8 @@ pub struct Session {
     pub framed: Option<(u64, OrbitCamera)>,
     /// How many nodes ran for what is shown since it was last planned.
     ran: usize,
+    /// What the preview draws surfaces with, once it drew one.
+    pub drawn_with: Option<&'static str>,
     /// How many triangles the preview drew the last time they were counted.
     pub triangles: Option<u32>,
     /// How many more frames the preview wants, to find the detail of its
@@ -144,6 +146,7 @@ impl Session {
             generation: 0,
             framed: None,
             ran: 0,
+            drawn_with: None,
             triangles: None,
             settling: 0,
             overflows: Vec::new(),
@@ -767,10 +770,10 @@ impl Document {
     pub fn status(&self) -> String {
         // What is planned runs here if the preview did not get to it yet,
         // so what is said is what happened.
-        let (ran, overflows) = {
+        let (ran, overflows, drawn_with) = {
             let mut session = self.session.lock().unwrap();
             session.run();
-            (session.ran, session.overflows.clone())
+            (session.ran, session.overflows.clone(), session.drawn_with)
         };
         if let Some(overflow) = overflows.first() {
             return format!(
@@ -791,10 +794,13 @@ impl Document {
             return error.to_string();
         }
         match (self.shown(), self.graph().display) {
-            (Shown::Drawn { drawable, .. }, _) => format!(
-                "`{}` drawn as it is, {} nodes ran",
-                drawable.ty.name, ran
-            ),
+            (Shown::Drawn { drawable, .. }, _) => {
+                let with = match (drawable.topology, drawn_with) {
+                    (Topology::Surface, Some(with)) => format!(" with {with}"),
+                    _ => String::new(),
+                };
+                format!("`{}` drawn as it is{with}, {ran} nodes ran", drawable.ty.name)
+            }
             (Shown::Mesh { .. }, _) => format!("a mesh, {ran} nodes ran"),
             (Shown::Nothing, Some(_)) => "the displayed node has nothing to show".into(),
             (Shown::Nothing, None) => "no node is displayed".into(),
