@@ -133,11 +133,11 @@ pub static SAMPLE_CURVE: NodeDef = NodeDef {
         outputs: &[
             GpuOutput {
                 entry: "sample_curve_frames",
-                len: |inputs| inputs.groups(0).len() * per_curve(inputs),
+                len: |inputs| inputs.group_count(0) * per_curve(inputs),
             },
             GpuOutput {
                 entry: "sample_curve_offsets",
-                len: |inputs| inputs.groups(0).len() + 1,
+                len: |inputs| inputs.group_count(0) + 1,
             },
         ],
         requires: Caps::NONE,
@@ -160,23 +160,39 @@ pub static SAMPLE_CURVE: NodeDef = NodeDef {
     }],
 };
 
-/// Curves of as many `points` each, which bend in every direction, and the
-/// other inputs of [`SAMPLE_CURVE`] as words.
-fn sample_example(points: &[usize], count: u32, spacing: f32, t: &[f32]) -> Vec<Vec<u32>> {
-    let mut segments = Vec::new();
+/// Control points of curves with as many `points` each, which bend in
+/// every direction, and the offsets where each curve starts.
+pub(crate) fn example_points(points: &[usize]) -> (Vec<Vec4>, Vec<u32>) {
+    let mut all = Vec::new();
     let mut offsets = vec![0];
     for (curve, points) in points.iter().enumerate() {
-        let points: Vec<_> = (0..*points)
-            .map(|i| {
-                let t = i as f32 + curve as f32 * 0.3;
-                Vec4::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0 + t * 0.1)
-            })
-            .collect();
-        if points.len() >= 4 {
-            segments.extend(extract_segments(&points, &clamped_uniform_knots(points.len())));
-        }
+        all.extend((0..*points).map(|i| {
+            let t = i as f32 + curve as f32 * 0.3;
+            Vec4::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0 + t * 0.1)
+        }));
+        offsets.push(all.len() as u32);
+    }
+    (all, offsets)
+}
+
+/// The segments of [`example_points`], and the offsets where the
+/// segments of each curve start.
+pub(crate) fn example_curves(points: &[usize]) -> (Vec<CubicNurbsSegmentCache>, Vec<u32>) {
+    let (all, point_offsets) = example_points(points);
+    let mut segments = Vec::new();
+    let mut offsets = vec![0];
+    for curve in point_offsets.windows(2) {
+        let points = &all[curve[0] as usize..curve[1] as usize];
+        segments.extend(extract_segments(points, &clamped_uniform_knots(points.len())));
         offsets.push(segments.len() as u32);
     }
+    (segments, offsets)
+}
+
+/// The inputs of [`SAMPLE_CURVE`] as words, along curves of as many
+/// `points` each.
+fn sample_example(points: &[usize], count: u32, spacing: f32, t: &[f32]) -> Vec<Vec<u32>> {
+    let (segments, offsets) = example_curves(points);
     vec![
         bytemuck::cast_slice(&segments).to_vec(),
         vec![count],
@@ -252,8 +268,47 @@ pub static TRANSLATE: NodeDef = NodeDef {
     ],
     outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped_like(0)],
     cpu: translate,
-    gpu: &[],
+    gpu: &[GpuKernel {
+        wgsl: "
+fn translate(index: u32) -> CubicNurbsSegmentCache {
+    var segment = in_segments(index);
+    if (in_offset_len() == 0u) {
+        return segment;
+    }
+    // The columns are homogeneous, so the offset scales with the weight.
+    let offset = in_offset(0u);
+    let m = segment.monomial_basis;
+    segment.monomial_basis = mat4x4<f32>(
+        m[0] + vec4<f32>(offset * m[0].w, 0.0),
+        m[1] + vec4<f32>(offset * m[1].w, 0.0),
+        m[2] + vec4<f32>(offset * m[2].w, 0.0),
+        m[3] + vec4<f32>(offset * m[3].w, 0.0),
+    );
+    return segment;
+}",
+        outputs: &[GpuOutput {
+            entry: "translate",
+            len: |inputs| inputs.len(0),
+        }],
+        requires: Caps::NONE,
+        reads: &[],
+        accepts: None,
+        examples: &[
+            || translate_example(&[9, 5], [1.0, -2.0, 0.5]),
+            || translate_example(&[6], [0.0; 3]),
+            || translate_example(&[], [3.0, 0.0, 0.0]),
+        ],
+    }],
 };
+
+fn translate_example(points: &[usize], offset: [f32; 3]) -> Vec<Vec<u32>> {
+    let (segments, offsets) = example_curves(points);
+    vec![
+        bytemuck::cast_slice(&segments).to_vec(),
+        bytemuck::cast_slice(&offset).to_vec(),
+        offsets,
+    ]
+}
 
 fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let offset = inputs.value::<Vec3>(1);
@@ -446,7 +501,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 1);
+        assert_eq!(checked, 5);
 
         // And so does everything which says it can be drawn as it is: the
         // two kinds of surface, the curve and the circle.

@@ -146,6 +146,19 @@ impl<'a> Inputs<'a> {
             None => vec![0..len],
         }
     }
+
+    /// How many groups an input has, without looking at its offsets: they
+    /// may be on the GPU only. The same as the length of
+    /// [`Inputs::groups`].
+    pub fn group_count(&self, index: usize) -> usize {
+        let Some(hidden) = hidden_input(self.ports, index) else {
+            return 1;
+        };
+        match self.handles[hidden].len as usize {
+            0 => 1,
+            offsets => offsets - 1,
+        }
+    }
 }
 
 /// Where the offsets of grouped input `index` are handed over: behind all

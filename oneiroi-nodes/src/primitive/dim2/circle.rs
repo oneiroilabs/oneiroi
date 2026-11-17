@@ -3,11 +3,11 @@ use std::f32::consts::TAU;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
-    node::{Drawable, Inputs, NodeDef, Outputs, PortDecl, Topology},
+    node::{Caps, Drawable, GpuKernel, GpuOutput, Inputs, NodeDef, Outputs, PortDecl, Topology},
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use crate::curve::{Curve, Profile, TubePatch, fractions, nurbs::CubicNurbsSegmentCache};
+use crate::curve::{Curve, Profile, TubePatch, fractions, nurbs::CubicNurbsSegmentCache, sweep_example};
 
 /// A circle around the origin. It is its radius and nothing else, every
 /// point on it is computed when it is asked for.
@@ -72,6 +72,36 @@ impl Profile for Circle {
         }
     }
 
+    fn patches(segments: usize, profile: usize) -> usize {
+        match profile {
+            0 => 0,
+            _ => segments,
+        }
+    }
+
+    const SWEEP_WGSL: &'static str = concat!(include_str!("../../curve/fractions.wgsl"), "
+fn sweep_patch(index: u32) -> TubePatch {
+    let curve = in_spine_group_of(index);
+    let circle = in_profile(min(curve, in_profile_len() - 1u));
+    let along = curve_fractions(in_spine(index), in_spine(in_spine_end(curve) - 1u));
+    return TubePatch(in_spine(index), circle.radius, along);
+}
+
+fn sweep_offset(group: u32) -> u32 {
+    if (in_profile_len() == 0u) {
+        return 0u;
+    }
+    return spine_offset(group);
+}
+");
+
+    const SWEEP_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>] = &[
+        || sweep_example(&[6, 5, 7], &[Circle::new(0.25), Circle::new(0.5)]),
+        || sweep_example(&[9], &[Circle::new(1.0)]),
+        || sweep_example::<Circle>(&[6], &[]),
+        || sweep_example(&[], &[Circle::new(1.0)]),
+    ];
+
     fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<TubePatch> {
         let Some(circle) = profile.first() else {
             return Vec::new();
@@ -104,7 +134,20 @@ pub static CIRCLE: NodeDef = NodeDef {
     outputs: &[PortDecl::new::<Circle>("circle")],
     version: 1,
     cpu: circle,
-    gpu: &[],
+    gpu: &[GpuKernel {
+        wgsl: "fn circle(index: u32) -> Circle { return Circle(in_radius(index)); }",
+        outputs: &[GpuOutput {
+            entry: "circle",
+            len: |inputs| inputs.len(0),
+        }],
+        requires: Caps::NONE,
+        reads: &[],
+        accepts: None,
+        examples: &[
+            || vec![bytemuck::cast_slice(&[0.25f32, 1.0, -2.0, 0.0]).to_vec()],
+            || vec![Vec::new()],
+        ],
+    }],
 };
 
 fn circle(inputs: &Inputs<'_>, outputs: &mut Outputs) {

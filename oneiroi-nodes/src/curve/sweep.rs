@@ -5,7 +5,7 @@ use std::{f32::consts::TAU, marker::PhantomData};
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use oneiroi_core::{
-    node::{GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
+    node::{Caps, GenericNode, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     program::{Program, ProgramBuilder},
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
@@ -158,6 +158,23 @@ impl<P: Profile> Ports<P> {
         PortDecl::new::<P>("profile"),
     ];
     const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<P::Patch>("surface").grouped()];
+    const GPU: &'static [GpuKernel] = &[GpuKernel {
+        wgsl: P::SWEEP_WGSL,
+        outputs: &[
+            GpuOutput {
+                entry: "sweep_patch",
+                len: |inputs| P::patches(inputs.len(0), inputs.len(1)),
+            },
+            GpuOutput {
+                entry: "sweep_offset",
+                len: |inputs| inputs.group_count(0) + 1,
+            },
+        ],
+        requires: Caps::NONE,
+        reads: &[],
+        accepts: None,
+        examples: P::SWEEP_EXAMPLES,
+    }];
 }
 
 /// Makes `P` usable wherever a profile is asked for, by registering the
@@ -171,7 +188,7 @@ pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
         outputs: Ports::<P>::OUTPUTS,
         version: 1,
         cpu: sweep::<P>,
-        gpu: &[],
+        gpu: Ports::<P>::GPU,
     });
     registry.register_instance(&SWEEP, node);
     register_surface::<P::Patch>(registry);
