@@ -40,7 +40,7 @@ oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 oneiroi-wgpu = { path = "./oneiroi-wgpu" }
 
-wgpu = { version = "30", features = ["trace"] }
+wgpu = { version = "30.0.2", features = ["trace"] }
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
 encase = { version = "0.12" }
@@ -52,9 +52,9 @@ petgraph = { version = "0.8", features = ["serde-1"] }
 
 
 [patch.crates-io]
-iced = { git = "https://github.com/kistz/iced.git", rev = "e9282525695f64b56a987fdd70e45688d268ce3c" }
-iced_core = { git = "https://github.com/kistz/iced.git", rev = "e9282525695f64b56a987fdd70e45688d268ce3c" }
-iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "e9282525695f64b56a987fdd70e45688d268ce3c" }
-iced_widget = { git = "https://github.com/kistz/iced.git", rev = "e9282525695f64b56a987fdd70e45688d268ce3c" }
-iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "e9282525695f64b56a987fdd70e45688d268ce3c" }
+iced = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
+iced_core = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
+iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
+iced_widget = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
+iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
 iced_nodegraph = { git = "https://github.com/kistz/iced_nodegraph.git", rev = "cd38035737f16de6d394517c3d4440bf3368c1fc" }
