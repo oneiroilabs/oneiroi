@@ -434,6 +434,40 @@ impl Executor for GpuExecutor {
         }
     }
 
+    /// Copies the parts together on the device. Nothing is brought over.
+    fn gather(&mut self, store: &mut Store, parts: &[ContentKey], output: ContentKey) {
+        let handles: Vec<_> = parts.iter().filter_map(|part| store.get(*part)).collect();
+        let len: u32 = handles.iter().map(|handle| handle.len).sum();
+        if len == 0 {
+            store.insert(output, &[]);
+            return;
+        }
+        let target = store.reserve(output, len);
+        // Parts the CPU made are only in the store so far.
+        self.upload(store);
+
+        // A buffer can not be copied into itself, and the parts may well be
+        // in the page the result goes to. So they meet somewhere else.
+        let size = len as u64 * 4;
+        let scratch = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Oneiroi Gather"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut offset = 0;
+        for handle in handles.iter().filter(|handle| handle.len > 0) {
+            let bytes = handle.len as u64 * 4;
+            let page = &self.pages[handle.page as usize];
+            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, &scratch, offset, bytes);
+            offset += bytes;
+        }
+        let page = &self.pages[target.page as usize];
+        encoder.copy_buffer_to_buffer(&scratch, 0, page, target.offset as u64 * 4, size);
+        self.queue.submit([encoder.finish()]);
+    }
+
     fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
         let remote: Vec<_> = keys
             .iter()
@@ -518,6 +552,13 @@ impl Executor for DeferredExecutor {
     fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
         if let Some(gpu) = &mut self.gpu {
             gpu.download(store, keys);
+        }
+    }
+
+    fn gather(&mut self, store: &mut Store, parts: &[ContentKey], output: ContentKey) {
+        match &mut self.gpu {
+            Some(gpu) => gpu.gather(store, parts, output),
+            None => self.cpu.gather(store, parts, output),
         }
     }
 }

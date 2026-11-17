@@ -302,6 +302,41 @@ mod staying_on_the_gpu {
     }
 
     #[test]
+    fn elements_can_be_taken_of_what_only_the_gpu_has() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        // The position of each frame, one frame at a time.
+        let mut b = ProgramBuilder::new("one position");
+        let frame = b.param::<EvaluatedFrame>("frame", &[]);
+        let position = b.node(&ON_GPU, &[frame]).unwrap()[0];
+        b.output("positions", position);
+        let one = gpu.add_program(b.finish());
+
+        let mut b = ProgramBuilder::new("each position");
+        let points = b.param("points", &points(9));
+        let knots = b.constant(&clamped_uniform_knots(9));
+        let samples = b.constant::<u32>(&[8]);
+        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        let positions = b
+            .for_each(gpu.programs(), one, &[Some(frames)], 0, 1000)
+            .unwrap();
+        b.output("positions", positions[0]);
+        let id = gpu.add_program(b.finish());
+        let mut instance = gpu.instantiate(id);
+        gpu.evaluate([&mut instance]);
+
+        // The frames never came over: each one was read where it is.
+        assert_eq!(gpu.executor().stats().downloads, 0);
+        close(
+            gpu.fetch::<Vec3>(&instance, "positions").unwrap(),
+            &reference(None).0,
+        );
+        assert_eq!(gpu.executor().stats().downloads, 1);
+    }
+
+    #[test]
     fn the_cpu_can_write_next_to_what_the_gpu_holds() {
         let Some(mut gpu) = gpu() else {
             return;
@@ -328,5 +363,69 @@ mod staying_on_the_gpu {
 
         let frames = gpu.fetch::<EvaluatedFrame>(&first, "frames").unwrap();
         assert_close(bytemuck::cast_slice(frames), &reference(None).1);
+    }
+}
+
+mod for_each {
+    use oneiroi_nodes::curve::nurbs::CubicNurbsSegmentCache;
+
+    use super::*;
+
+    /// 16 frames of a single segment.
+    fn one_segment<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
+        let mut b = ProgramBuilder::new("one segment");
+        let segment = b.param::<CubicNurbsSegmentCache>("segment", &[]);
+        let samples = b.constant::<u32>(&[16]);
+        let frames = b.node(&FRAMES, &[segment, samples]).unwrap()[0];
+        b.output("frames", frames);
+        engine.add_program(b.finish())
+    }
+
+    /// The frames of a curve, made one segment at a time and gathered, and
+    /// the same frames made at once.
+    fn program<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
+        let one = one_segment(engine);
+        let mut b = ProgramBuilder::new("each segment");
+        let points = b.param("points", &points(9));
+        let knots = b.constant(&clamped_uniform_knots(9));
+        let samples = b.constant::<u32>(&[16]);
+        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let each = b
+            .for_each(engine.programs(), one, &[Some(segments)], 0, 100)
+            .unwrap();
+        let whole = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
+        b.output("each", each[0]);
+        b.output("whole", whole);
+        engine.add_program(b.finish())
+    }
+
+    fn frames<E: Executor>(engine: &mut Engine<E>, instance: &Instance, name: &str) -> Vec<f32> {
+        let frames = engine.fetch::<EvaluatedFrame>(instance, name).unwrap();
+        bytemuck::cast_slice(frames).to_vec()
+    }
+
+    #[test]
+    fn calls_for_each_element_run_on_the_gpu_too() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        let mut cpu = Engine::default();
+        let (on_gpu, on_cpu) = (program(&mut gpu), program(&mut cpu));
+        let (mut a, mut b) = (gpu.instantiate(on_gpu), cpu.instantiate(on_cpu));
+        gpu.evaluate([&mut a]);
+        cpu.evaluate([&mut b]);
+
+        let each = frames(&mut gpu, &a, "each");
+        assert_eq!(each.len(), 6 * 16 * 16);
+        assert_close(&each, &frames(&mut cpu, &b, "each"));
+        // Segment by segment is the same as all at once.
+        assert_close(&each, &frames(&mut gpu, &a, "whole"));
+
+        // The curve on the CPU, then the frames of all six segments in a
+        // single pass and gathered on the device. Only what was asked for
+        // came back.
+        let stats = gpu.executor().stats();
+        assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 7, 2), "{stats:?}");
+        assert_eq!(stats.dispatches, 2, "{stats:?}");
     }
 }
