@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use glam::{Mat4, Vec3};
 use oneiroi_core::{
     node::{Drawable, Topology},
-    shader::{self, DrawArgs, ShaderError},
+    shader::{self, DrawArgs, LodArgs, LodMethod, MAX_LOD_LEVEL, ShaderError},
     store::Handle,
 };
 
@@ -22,6 +22,30 @@ pub struct DrawView {
     pub rings: u32,
     /// Steps across every patch of a surface.
     pub sides: u32,
+    /// Lets a surface choose its own steps by how large it appears. `rings`
+    /// and `sides` are then only for what can not do that, like a line.
+    pub auto: Option<AutoDetail>,
+}
+
+/// As much detail as there is to see: every patch of a surface gets steps
+/// of about `pixels` on screen, and more of them as it comes closer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoDetail {
+    /// How long a step should be on screen, in pixels.
+    pub pixels: f32,
+    /// A patch never gets more than `2^max_level` steps along a side.
+    pub max_level: u32,
+    /// The size in pixels of the area which is drawn into.
+    pub viewport: (f32, f32),
+    /// Colours every patch by how fine it is drawn.
+    pub debug: bool,
+}
+
+/// Which of the shaders of a type something is drawn with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Fixed,
+    Lod(LodMethod),
 }
 
 struct Pipeline {
@@ -29,11 +53,16 @@ struct Pipeline {
     layout: wgpu::BindGroupLayout,
 }
 
+enum Draw {
+    Vertices { vertices: u32, instances: u32 },
+    /// One task shader per patch.
+    Tasks { patches: u32 },
+}
+
 struct Prepared {
-    ty: &'static str,
+    key: (&'static str, Kind),
     bind_group: wgpu::BindGroup,
-    vertices: u32,
-    instances: u32,
+    draw: Draw,
 }
 
 /// Draws the elements of a [`Drawable`] type straight out of the page they
@@ -46,10 +75,14 @@ struct Prepared {
 /// depth.
 pub struct DrawStage {
     format: wgpu::TextureFormat,
-    /// By the name of the data type. `None` when its shader is broken.
-    pipelines: HashMap<&'static str, Option<Pipeline>>,
+    /// By the name of the data type and the kind of shader. `None` when
+    /// the shader is broken.
+    pipelines: HashMap<(&'static str, Kind), Option<Pipeline>>,
     errors: Vec<ShaderError>,
     uniform: wgpu::Buffer,
+    lod_uniform: wgpu::Buffer,
+    /// Whether the device can run task and mesh shaders.
+    mesh_shaders: bool,
     depth: wgpu::TextureView,
     prepared: Option<Prepared>,
 }
@@ -62,11 +95,21 @@ impl DrawStage {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let lod_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Oneiroi Lod Args"),
+            size: size_of::<LodArgs>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
             format: surface_format.add_srgb_suffix(),
             pipelines: HashMap::new(),
             errors: Vec::new(),
             uniform,
+            lod_uniform,
+            mesh_shaders: device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER),
             depth: depth_texture(device, (1, 1)),
             prepared: None,
         }
@@ -77,10 +120,29 @@ impl DrawStage {
         &self.errors
     }
 
-    fn build(&self, device: &wgpu::Device, drawable: &Drawable, wgsl: &str) -> Pipeline {
+    /// Whether surfaces which choose their own detail are drawn with task
+    /// and mesh shaders. That is the case when the device has them.
+    pub fn uses_mesh_shaders(&self) -> bool {
+        self.mesh_shaders
+    }
+
+    /// Draws with vertex shaders only, also where there are mesh shaders.
+    pub fn without_mesh_shaders(mut self) -> Self {
+        self.mesh_shaders = false;
+        self
+    }
+
+    fn build(&self, device: &wgpu::Device, drawable: &Drawable, kind: Kind, wgsl: &str) -> Pipeline {
+        let mesh = kind == Kind::Lod(LodMethod::MeshShader);
+        let visibility = match mesh {
+            true => {
+                wgpu::ShaderStages::TASK | wgpu::ShaderStages::MESH | wgpu::ShaderStages::FRAGMENT
+            }
+            false => wgpu::ShaderStages::VERTEX_FRAGMENT,
+        };
         let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            visibility,
             ty: wgpu::BindingType::Buffer {
                 ty,
                 has_dynamic_offset: false,
@@ -104,44 +166,72 @@ impl DrawStage {
             label: Some(drawable.ty.name),
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(drawable.ty.name),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: match drawable.topology {
-                    Topology::Surface => wgpu::PrimitiveTopology::TriangleList,
-                    Topology::Line => wgpu::PrimitiveTopology::LineList,
-                },
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Greater),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
+        let targets = [Some(wgpu::ColorTargetState {
+            format: self.format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let fragment = Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs_main"),
+            targets: &targets,
+            compilation_options: Default::default(),
         });
+        let primitive = wgpu::PrimitiveState {
+            topology: match drawable.topology {
+                Topology::Surface => wgpu::PrimitiveTopology::TriangleList,
+                Topology::Line => wgpu::PrimitiveTopology::LineList,
+            },
+            cull_mode: None,
+            ..Default::default()
+        };
+        let depth_stencil = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        let pipeline = if mesh {
+            device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+                label: Some(drawable.ty.name),
+                layout: Some(&pipeline_layout),
+                task: Some(wgpu::TaskState {
+                    module: &module,
+                    entry_point: Some("ts_main"),
+                    compilation_options: Default::default(),
+                }),
+                mesh: wgpu::MeshState {
+                    module: &module,
+                    entry_point: Some("ms_main"),
+                    compilation_options: Default::default(),
+                },
+                fragment,
+                primitive,
+                depth_stencil,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        } else {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(drawable.ty.name),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment,
+                primitive,
+                depth_stencil,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         Pipeline { pipeline, layout }
     }
 
@@ -171,39 +261,92 @@ impl DrawStage {
             self.depth = depth_texture(device, target_size);
         }
 
-        let name = drawable.ty.name;
-        if !self.pipelines.contains_key(name) {
-            let pipeline = match shader::draw(drawable) {
-                Ok(shader) => Some(self.build(device, drawable, &shader.wgsl)),
+        // A surface picks its own detail if it is asked to, with mesh
+        // shaders where the device has them.
+        let auto = view.auto.filter(|_| drawable.topology == Topology::Surface);
+        let kind = match auto {
+            Some(_) if self.mesh_shaders => Kind::Lod(LodMethod::MeshShader),
+            Some(_) => Kind::Lod(LodMethod::VertexPulling),
+            None => Kind::Fixed,
+        };
+        let key = (drawable.ty.name, kind);
+        if !self.pipelines.contains_key(&key) {
+            let wgsl = match kind {
+                Kind::Fixed => shader::draw(drawable).map(|shader| shader.wgsl),
+                Kind::Lod(method) => shader::draw_lod(drawable, method).map(|shader| shader.wgsl),
+            };
+            let pipeline = match wgsl {
+                Ok(wgsl) => Some(self.build(device, drawable, kind, &wgsl)),
                 Err(error) => {
                     self.errors.push(error);
                     None
                 }
             };
-            self.pipelines.insert(name, pipeline);
+            self.pipelines.insert(key, pipeline);
         }
-        let Some(pipeline) = &self.pipelines[name] else {
+        let Some(pipeline) = &self.pipelines[&key] else {
             return;
         };
 
-        let (rings, sides) = (view.rings.max(1), view.sides.max(1));
         let instances = handle.len / drawable.ty.words;
         if instances == 0 {
             return;
         }
-        let args = DrawArgs {
-            view_projection: view.view_projection.to_cols_array_2d(),
-            light: view.light.extend(0.0).to_array(),
-            color: view.color.extend(1.0).to_array(),
-            offset: handle.offset,
-            rings,
-            sides,
-            _padding: 0,
+        let view_projection = view.view_projection.to_cols_array_2d();
+        let light = view.light.extend(0.0).to_array();
+        let color = view.color.extend(1.0).to_array();
+
+        let (uniform, draw) = match (kind, auto) {
+            (Kind::Lod(method), Some(auto)) => {
+                // Drawing the finest grid for every patch gets expensive
+                // quickly, a mesh shader only makes what is needed.
+                let max_level = auto.max_level.min(match method {
+                    LodMethod::MeshShader => MAX_LOD_LEVEL,
+                    LodMethod::VertexPulling => MAX_LOD_LEVEL - 1,
+                });
+                let args = LodArgs {
+                    view_projection,
+                    light,
+                    color,
+                    viewport: [auto.viewport.0.max(1.0), auto.viewport.1.max(1.0)],
+                    pixels: auto.pixels,
+                    offset: handle.offset,
+                    max_level,
+                    debug: auto.debug as u32,
+                    _padding: [0; 2],
+                };
+                queue.write_buffer(&self.lod_uniform, 0, bytemuck::bytes_of(&args));
+                let draw = match method {
+                    LodMethod::MeshShader => Draw::Tasks { patches: instances },
+                    LodMethod::VertexPulling => Draw::Vertices {
+                        vertices: shader::LodShader::vertices(max_level),
+                        instances,
+                    },
+                };
+                (&self.lod_uniform, draw)
+            }
+            _ => {
+                let (rings, sides) = (view.rings.max(1), view.sides.max(1));
+                let args = DrawArgs {
+                    view_projection,
+                    light,
+                    color,
+                    offset: handle.offset,
+                    rings,
+                    sides,
+                    _padding: 0,
+                };
+                queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&args));
+                let vertices = match drawable.topology {
+                    Topology::Surface => rings * sides * 6,
+                    Topology::Line => rings * 2,
+                };
+                (&self.uniform, Draw::Vertices { vertices, instances })
+            }
         };
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&args));
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(name),
+            label: Some(key.0),
             layout: &pipeline.layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -212,18 +355,14 @@ impl DrawStage {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.uniform.as_entire_binding(),
+                    resource: uniform.as_entire_binding(),
                 },
             ],
         });
         self.prepared = Some(Prepared {
-            ty: name,
+            key,
             bind_group,
-            vertices: match drawable.topology {
-                Topology::Surface => rings * sides * 6,
-                Topology::Line => rings * 2,
-            },
-            instances,
+            draw,
         });
     }
 
@@ -238,7 +377,7 @@ impl DrawStage {
         let Some(prepared) = &self.prepared else {
             return;
         };
-        let Some(Some(pipeline)) = self.pipelines.get(prepared.ty) else {
+        let Some(Some(pipeline)) = self.pipelines.get(&prepared.key) else {
             return;
         };
 
@@ -271,6 +410,9 @@ impl DrawStage {
 
         pass.set_pipeline(&pipeline.pipeline);
         pass.set_bind_group(0, &prepared.bind_group, &[]);
-        pass.draw(0..prepared.vertices, 0..prepared.instances);
+        match prepared.draw {
+            Draw::Vertices { vertices, instances } => pass.draw(0..vertices, 0..instances),
+            Draw::Tasks { patches } => pass.draw_mesh_tasks(patches, 1, 1),
+        }
     }
 }

@@ -300,12 +300,24 @@ mod tests {
         for ty in registry.implementors(crate::surface::SURFACE) {
             assert!(registry.drawable(&ty).is_some(), "every surface can be drawn");
         }
-        let mut drawn = 0;
+        use oneiroi_core::{
+            node::Topology,
+            shader::{LodMethod, draw, draw_lod},
+        };
+        let (mut drawn, mut detailed) = (0, 0);
         for drawable in registry.drawables() {
-            oneiroi_core::shader::draw(drawable).unwrap_or_else(|e| panic!("{e}"));
+            draw(drawable).unwrap_or_else(|e| panic!("{e}"));
             drawn += 1;
+            // A surface can also be drawn as fine as it appears, both ways.
+            for method in [LodMethod::VertexPulling, LodMethod::MeshShader] {
+                match (drawable.topology, draw_lod(drawable, method)) {
+                    (Topology::Surface, Ok(_)) => detailed += 1,
+                    (Topology::Surface, Err(error)) => panic!("{error}"),
+                    (Topology::Line, result) => assert!(result.is_err()),
+                }
+            }
         }
-        assert_eq!(drawn, 4);
+        assert_eq!((drawn, detailed), (4, 4));
     }
 
     #[test]

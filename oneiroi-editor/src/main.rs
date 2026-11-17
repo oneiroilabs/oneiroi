@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, shader, space, text, text_input,
+    button, checkbox, column, container, pick_list, row, scrollable, shader, space, text,
+    text_input,
 };
 use iced::{Center, Color, Element, Fill, Point, Theme, Vector};
 use iced_nodegraph::{
@@ -12,8 +13,9 @@ use oneiroi_editor::document::{Document, PaletteEntry, PinType};
 use oneiroi_editor::preview::Preview;
 use oneiroi_graph::{Input, NodeId};
 
-/// How finely a surface is drawn: steps along and across each patch.
-const DETAIL: (u32, u32) = (16, 24);
+/// How long a step along a surface is on screen, in pixels, from fine to
+/// coarse. The preview picks how many steps every patch needs from that.
+const DETAIL: [f32; 4] = [4.0, 8.0, 16.0, 32.0];
 
 /// Where a graph is saved to and loaded from, next to where the editor runs.
 const FILE: &str = "graph.json";
@@ -49,6 +51,8 @@ enum Message {
     Committed(u32, String),
     Reset(u32, String),
     Frame,
+    Detail(usize),
+    ShowDetail(bool),
     Save,
     Load,
 }
@@ -64,6 +68,9 @@ struct Editor {
     frame: u64,
     /// What the last save, load or edit had to say.
     note: Option<String>,
+    /// Which of [`DETAIL`] the preview uses.
+    detail: usize,
+    show_detail: bool,
 }
 
 /// The pins of a node are named after its ports. An input and an output
@@ -108,6 +115,8 @@ impl Editor {
             edits: HashMap::new(),
             frame: 0,
             note: None,
+            detail: 1,
+            show_detail: false,
         }
     }
 
@@ -197,6 +206,8 @@ impl Editor {
                 self.document.reset(node.into(), &input);
             }
             Message::Frame => self.frame += 1,
+            Message::Detail(detail) => self.detail = detail,
+            Message::ShowDetail(show) => self.show_detail = show,
             Message::Save => {
                 self.note = Some(match std::fs::write(FILE, self.document.to_json()) {
                     Ok(()) => format!("saved to {FILE}"),
@@ -250,10 +261,28 @@ impl Editor {
         let preview = shader(Preview {
             session: self.document.session(),
             frame: self.frame,
-            detail: DETAIL,
+            pixels: DETAIL[self.detail],
+            show_detail: self.show_detail,
         })
         .width(Fill)
         .height(Fill);
+
+        let labels = ["finest", "fine", "coarse", "coarsest"];
+        let mut detail = row![text("Detail").size(12)].spacing(4).align_y(Center);
+        for (index, label) in labels.into_iter().enumerate() {
+            let button = button(text(label).size(11)).padding([1, 6]);
+            detail = detail.push(match index == self.detail {
+                true => button,
+                false => button.on_press(Message::Detail(index)),
+            });
+        }
+        let detail = detail.push(
+            checkbox(self.show_detail)
+                .label("colour by detail")
+                .text_size(11)
+                .on_toggle(Message::ShowDetail),
+        );
+        let preview = column![preview, detail].spacing(4);
 
         // The inspector has to come before the graph: a key typed into one
         // of its fields is then taken by the field, and the graph only

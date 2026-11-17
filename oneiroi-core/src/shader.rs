@@ -386,13 +386,415 @@ pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
     Ok(DrawShader { wgsl })
 }
 
+/// How a [`LodShader`] turns patches into triangles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LodMethod {
+    /// A task shader decides per patch how fine it has to be and whether
+    /// it is in view at all, and mesh shaders make exactly that many
+    /// triangles. Needs a device with mesh shaders.
+    MeshShader,
+    /// Every patch is drawn as the finest grid there is, and the vertex
+    /// shader lets the cells which are not needed collapse to nothing.
+    /// Works everywhere and looks the same, but shades more vertices.
+    VertexPulling,
+}
+
+/// A shader which draws the patches of a surface as fine as they appear
+/// on screen: every edge of a patch gets as many steps as it is long in
+/// pixels, and the steps slide into place when that number changes
+/// instead of popping. Two patches which share an edge agree on its
+/// steps, so there is no gap between them.
+///
+/// Everything is bound in group 0: binding 0 is the page the patches live
+/// in (read-only `array<u32>`), binding 1 a uniform [`LodArgs`].
+///
+/// - [`LodMethod::MeshShader`]: entry points `ts_main`, `ms_main` and
+///   `fs_main`. Draw one task workgroup per patch.
+/// - [`LodMethod::VertexPulling`]: entry points `vs_main` and `fs_main`.
+///   Draw every patch as one instance with [`LodShader::vertices`].
+#[derive(Debug, Clone)]
+pub struct LodShader {
+    pub wgsl: String,
+}
+
+impl LodShader {
+    /// How many vertices [`LodMethod::VertexPulling`] draws per patch.
+    pub const fn vertices(max_level: u32) -> u32 {
+        6 << (2 * max_level)
+    }
+}
+
+/// The finest a patch can get: `2^MAX_LOD_LEVEL` steps along each side.
+pub const MAX_LOD_LEVEL: u32 = 7;
+
+/// The uniform of a [`LodShader`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LodArgs {
+    /// Column-major, as WGSL wants it.
+    pub view_projection: [[f32; 4]; 4],
+    /// Points from what is drawn towards the light.
+    pub light: [f32; 4],
+    pub color: [f32; 4],
+    /// The size in pixels of what is drawn into.
+    pub viewport: [f32; 2],
+    /// How long a step along an edge should be on screen, in pixels.
+    pub pixels: f32,
+    /// The word the first patch starts at in the page.
+    pub offset: u32,
+    /// Patches never get finer than `2^max_level` steps along a side.
+    /// At most [`MAX_LOD_LEVEL`].
+    pub max_level: u32,
+    /// Anything but zero colours every patch by how fine it is drawn,
+    /// from blue for coarse to red for fine.
+    pub debug: u32,
+    pub _padding: [u32; 2],
+}
+
+const LOD_COMMON: &str = "struct LodArgs {
+    view_projection: mat4x4<f32>,
+    light: vec4<f32>,
+    color: vec4<f32>,
+    viewport: vec2<f32>,
+    pixels: f32,
+    offset: u32,
+    max_level: u32,
+    debug: u32,
+}
+
+@group(0) @binding(0) var<storage, read> page: array<u32>;
+@group(0) @binding(1) var<uniform> args: LodArgs;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    // How fine the patch is drawn, from 0 to 1.
+    @location(1) detail: f32,
+}
+
+// How many steps each edge of a patch gets. They are not whole numbers:
+// what is behind the point is how far the next finer steps have slid in.
+struct Lod {
+    // The edges which run along the patch, at v = 0 and at v = 1.
+    along: vec2<f32>,
+    // The edges which run across it, at u = 0 and at u = 1.
+    across: vec2<f32>,
+}
+
+fn lod_pixels(position: vec3<f32>) -> vec2<f32> {
+    let clip = args.view_projection * vec4<f32>(position, 1.0);
+    return (clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5) * args.viewport;
+}
+
+fn lod_level(factor: f32) -> u32 {
+    return u32(ceil(log2(max(factor, 1.0))));
+}
+
+// Where vertex `index` of a grid with 2^grid_level steps lies on an edge
+// which gets `factor` steps. The edge only has the vertices of the level
+// above `factor`, so the others of the grid fall onto those. Every second
+// one of them is on its way from its neighbour to its own place, which it
+// reaches when `factor` reaches the level.
+fn lod_morph(index: u32, grid_level: u32, factor: f32) -> f32 {
+    let level = min(lod_level(factor), grid_level);
+    let shift = grid_level - level;
+    let k = (index + ((1u << shift) >> 1u)) >> shift;
+    let steps = f32(1u << level);
+    var place = f32(k) / steps;
+    if (level > 0u && (k & 1u) == 1u) {
+        let coarser = f32(1u << (level - 1u));
+        let slid = clamp((factor - coarser) / coarser, 0.0, 1.0);
+        place = mix(f32(k - 1u) / steps, place, slid);
+    }
+    return place;
+}
+
+// The inside of a patch is as fine as its finest edge in each direction.
+fn lod_inside(lod: Lod) -> vec2<f32> {
+    return vec2<f32>(max(lod.along.x, lod.along.y), max(lod.across.x, lod.across.y));
+}
+
+// The uv of vertex `index` of a grid with 2^levels steps. The patch may
+// need fewer steps than the grid has, then several vertices of the grid
+// share a place. The vertices which end up on the rim of the patch follow
+// the steps of the edge they are on, which is what the patch next to it
+// does as well.
+fn lod_uv(lod: Lod, levels: vec2<u32>, index: vec2<u32>) -> vec2<f32> {
+    let inside = lod_inside(lod);
+    let needed = min(vec2<u32>(lod_level(inside.x), lod_level(inside.y)), levels);
+    let shift = levels - needed;
+    let k = (index + ((vec2<u32>(1u) << shift) >> vec2<u32>(1u))) >> shift;
+    let last = vec2<u32>(1u) << needed;
+
+    var factor = inside;
+    if (k.y == 0u) {
+        factor.x = lod.along.x;
+    } else if (k.y == last.y) {
+        factor.x = lod.along.y;
+    }
+    if (k.x == 0u) {
+        factor.y = lod.across.x;
+    } else if (k.x == last.x) {
+        factor.y = lod.across.y;
+    }
+    return vec2<f32>(
+        lod_morph(k.x, needed.x, factor.x),
+        lod_morph(k.y, needed.y, factor.y),
+    );
+}
+
+fn lod_detail(lod: Lod) -> f32 {
+    let inside = lod_inside(lod);
+    return log2(max(inside.x, inside.y)) / f32(max(args.max_level, 1u));
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Both sides are lit the same, a preview should never hide a surface
+    // just because it faces the wrong way.
+    let diffuse = abs(dot(normalize(input.normal), normalize(args.light.xyz)));
+    var color = args.color.rgb;
+    if (args.debug != 0u) {
+        color = mix(vec3<f32>(0.0, 0.2, 1.0), vec3<f32>(1.0, 0.2, 0.0), input.detail);
+    }
+    return vec4<f32>(color * (0.2 + 0.8 * diffuse), 1.0);
+}
+";
+
+/// The functions which need to know the type of a patch.
+fn lod_typed(ty: &TypeInfo) -> String {
+    format!(
+        "fn element(index: u32) -> {name} {{
+    let base = args.offset + index * {words}u;
+    return {read};
+}}
+
+// How many steps the edge from `a` to `b` gets: its length on screen in
+// steps of the size which was asked for.
+fn lod_edge(piece: {name}, a: vec2<f32>, b: vec2<f32>) -> f32 {{
+    let first = surface_point(piece, a).position;
+    var last = first;
+    var length = 0.0;
+    var on_screen = 0.0;
+    for (var step = 1u; step <= 4u; step++) {{
+        let next = surface_point(piece, mix(a, b, f32(step) / 4.0)).position;
+        length += distance(last, next);
+        on_screen += distance(lod_pixels(last), lod_pixels(next));
+        last = next;
+    }}
+
+    // An edge which ends where it starts goes around something. With
+    // fewer than four steps there would be nothing left of that.
+    var least = 1.0;
+    if (distance(first, last) < 1e-3 * length) {{
+        least = 4.0;
+    }}
+    let most = f32(1u << args.max_level);
+    return clamp(on_screen / max(args.pixels, 1.0), min(least, most), most);
+}}
+
+fn lod_of(piece: {name}) -> Lod {{
+    return Lod(
+        vec2<f32>(
+            lod_edge(piece, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0)),
+            lod_edge(piece, vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0)),
+        ),
+        vec2<f32>(
+            lod_edge(piece, vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0)),
+            lod_edge(piece, vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0)),
+        ),
+    );
+}}
+
+// Whether nothing of the patch can be on screen: a few points of it are
+// all beyond the same side of what the camera sees, with room to spare
+// for what bulges out between them.
+fn lod_hidden(piece: {name}) -> bool {{
+    var beyond = 63u;
+    for (var i = 0u; i < 3u; i++) {{
+        for (var j = 0u; j < 3u; j++) {{
+            let uv = vec2<f32>(f32(i), f32(j)) * 0.5;
+            let clip = args.view_projection * vec4<f32>(surface_point(piece, uv).position, 1.0);
+            let reach = clip.w * 1.5;
+            var sides = 0u;
+            sides |= u32(clip.x < -reach);
+            sides |= u32(clip.x > reach) << 1u;
+            sides |= u32(clip.y < -reach) << 2u;
+            sides |= u32(clip.y > reach) << 3u;
+            sides |= u32(clip.w < 0.0) << 4u;
+            beyond &= sides;
+        }}
+    }}
+    return beyond != 0u;
+}}
+",
+        name = ty.wgsl,
+        words = ty.words,
+        read = read_element(ty, "page", "base"),
+    )
+}
+
+const LOD_VERTEX: &str = "@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    // The finest grid there is, six vertices per cell. Cells the patch
+    // does not need end up with all of their corners in one place.
+    let cells = 1u << args.max_level;
+    let cell = vertex / 6u;
+    var corners = array<vec2<u32>, 6>(
+        vec2<u32>(0u, 0u), vec2<u32>(0u, 1u), vec2<u32>(1u, 0u),
+        vec2<u32>(0u, 1u), vec2<u32>(1u, 1u), vec2<u32>(1u, 0u),
+    );
+    let index = vec2<u32>(cell / cells, cell % cells) + corners[vertex % 6u];
+
+    let piece = element(instance);
+    let lod = lod_of(piece);
+    let uv = lod_uv(lod, vec2<u32>(args.max_level), index);
+    let point = surface_point(piece, uv);
+    return VertexOutput(
+        args.view_projection * vec4<f32>(point.position, 1.0),
+        point.normal,
+        lod_detail(lod),
+    );
+}
+";
+
+const LOD_MESH: &str = "// A patch is cut into blocks of this many cells along each side, one
+// mesh shader each.
+const BLOCK: u32 = 8u;
+
+struct Payload {
+    piece: u32,
+    // The level of the grid of the whole patch, along and across.
+    levels: vec2<u32>,
+    along: vec2<f32>,
+    across: vec2<f32>,
+}
+
+var<task_payload> payload: Payload;
+
+@task @payload(payload) @workgroup_size(1)
+fn ts_main(@builtin(workgroup_id) group: vec3<u32>) -> @builtin(mesh_task_size) vec3<u32> {
+    let piece = element(group.x);
+    if (lod_hidden(piece)) {
+        return vec3<u32>(0u, 0u, 0u);
+    }
+
+    let lod = lod_of(piece);
+    let inside = lod_inside(lod);
+    payload.piece = group.x;
+    payload.levels = vec2<u32>(lod_level(inside.x), lod_level(inside.y));
+    payload.along = lod.along;
+    payload.across = lod.across;
+
+    let cells = vec2<u32>(1u << payload.levels.x, 1u << payload.levels.y);
+    return vec3<u32>((cells + BLOCK - 1u) / BLOCK, 1u);
+}
+
+struct PrimitiveOutput {
+    @builtin(triangle_indices) indices: vec3<u32>,
+}
+
+struct MeshOutput {
+    @builtin(vertices) vertices: array<VertexOutput, 81>,
+    @builtin(primitives) primitives: array<PrimitiveOutput, 128>,
+    @builtin(vertex_count) vertex_count: u32,
+    @builtin(primitive_count) primitive_count: u32,
+}
+
+var<workgroup> mesh_output: MeshOutput;
+
+@mesh(mesh_output) @payload(payload) @workgroup_size(1)
+fn ms_main(@builtin(workgroup_id) group: vec3<u32>) {
+    let piece = element(payload.piece);
+    let lod = Lod(payload.along, payload.across);
+    let cells = vec2<u32>(1u << payload.levels.x, 1u << payload.levels.y);
+    let first = group.xy * BLOCK;
+    let size = min(cells - first, vec2<u32>(BLOCK));
+    let detail = lod_detail(lod);
+
+    mesh_output.vertex_count = (size.x + 1u) * (size.y + 1u);
+    mesh_output.primitive_count = size.x * size.y * 2u;
+
+    for (var i = 0u; i <= size.x; i++) {
+        for (var j = 0u; j <= size.y; j++) {
+            let uv = lod_uv(lod, payload.levels, first + vec2<u32>(i, j));
+            let point = surface_point(piece, uv);
+            mesh_output.vertices[i * (size.y + 1u) + j] = VertexOutput(
+                args.view_projection * vec4<f32>(point.position, 1.0),
+                point.normal,
+                detail,
+            );
+        }
+    }
+    for (var i = 0u; i < size.x; i++) {
+        for (var j = 0u; j < size.y; j++) {
+            let a = i * (size.y + 1u) + j;
+            let c = a + size.y + 1u;
+            let cell = (i * size.y + j) * 2u;
+            mesh_output.primitives[cell].indices = vec3<u32>(a, a + 1u, c);
+            mesh_output.primitives[cell + 1u].indices = vec3<u32>(a + 1u, c + 1u, c);
+        }
+    }
+}
+";
+
+/// Writes the shader which draws a surface as fine as it appears, and
+/// checks that it compiles. Only surfaces can be drawn like that.
+pub fn draw_lod(drawable: &Drawable, method: LodMethod) -> Result<LodShader, ShaderError> {
+    let ty = &drawable.ty;
+    if drawable.topology != Topology::Surface {
+        return Err(ShaderError::Invalid {
+            node: ty.name,
+            message: "only a surface has detail to choose".into(),
+        });
+    }
+
+    let mut wgsl = String::new();
+    let out = &mut wgsl;
+    if method == LodMethod::MeshShader {
+        let _ = writeln!(out, "enable wgpu_mesh_shader;\n");
+    }
+    let _ = writeln!(out, "// Generated to draw `{}` as fine as it appears.\n", ty.name);
+    declare(out, &mut Vec::new(), ty);
+    let _ = writeln!(
+        out,
+        "struct SurfacePoint {{\n    position: vec3<f32>,\n    normal: vec3<f32>,\n}}\n"
+    );
+    let _ = writeln!(out, "{LOD_COMMON}");
+    let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
+    let _ = writeln!(out, "{}", lod_typed(ty));
+    let _ = write!(
+        out,
+        "{}",
+        match method {
+            LodMethod::MeshShader => LOD_MESH,
+            LodMethod::VertexPulling => LOD_VERTEX,
+        }
+    );
+
+    let capabilities = match method {
+        LodMethod::MeshShader => naga::valid::Capabilities::MESH_SHADER,
+        LodMethod::VertexPulling => naga::valid::Capabilities::empty(),
+    };
+    validate_with(ty.name, &wgsl, capabilities)?;
+    Ok(LodShader { wgsl })
+}
+
 fn validate(node: &'static str, wgsl: &str) -> Result<(), ShaderError> {
+    validate_with(node, wgsl, naga::valid::Capabilities::empty())
+}
+
+fn validate_with(
+    node: &'static str,
+    wgsl: &str,
+    capabilities: naga::valid::Capabilities,
+) -> Result<(), ShaderError> {
     let invalid = |message| ShaderError::Invalid { node, message };
     let module =
         naga::front::wgsl::parse_str(wgsl).map_err(|error| invalid(error.emit_to_string(wgsl)))?;
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
+        capabilities,
     )
     .validate(&module)
     .map_err(|error| invalid(error.emit_to_string(wgsl)))?;

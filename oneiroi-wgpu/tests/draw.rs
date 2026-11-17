@@ -16,7 +16,8 @@ use oneiroi_nodes::{
     surface::TESSELLATE,
 };
 use oneiroi_wgpu::{
-    DeferredExecutor, DrawStage, DrawView, GpuExecutor, MeshData, MeshPreview, orbit::OrbitCamera,
+    AutoDetail, DeferredExecutor, DrawStage, DrawView, GpuExecutor, MeshData, MeshPreview,
+    orbit::OrbitCamera,
 };
 
 const SIZE: u32 = 128;
@@ -24,6 +25,7 @@ const BACKGROUND: [u8; 4] = [0, 0, 255, 255];
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DETAIL: (u32, u32) = (12, 10);
 
+/// A device, with mesh shaders if the adapter has them.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
@@ -32,7 +34,15 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         eprintln!("no graphics adapter, nothing was checked");
         return None;
     };
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    let mesh_shaders = adapter.features() & wgpu::Features::EXPERIMENTAL_MESH_SHADER;
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: mesh_shaders,
+        required_limits: adapter.limits(),
+        // SAFETY: mesh shaders are what is being tested here.
+        experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+        ..Default::default()
+    };
+    pollster::block_on(adapter.request_device(&descriptor)).ok()
 }
 
 fn registry() -> NodeRegistry {
@@ -221,6 +231,20 @@ impl Scene {
             color: Vec3::new(0.8, 0.7, 0.6),
             rings,
             sides,
+            auto: None,
+        }
+    }
+
+    /// As fine as it appears, with steps of `pixels` on screen.
+    fn auto(&self, pixels: f32, debug: bool) -> DrawView {
+        DrawView {
+            auto: Some(AutoDetail {
+                pixels,
+                max_level: 6,
+                viewport: (SIZE as f32, SIZE as f32),
+                debug,
+            }),
+            ..self.view(1, 1)
         }
     }
 
@@ -383,4 +407,182 @@ fn a_device_can_turn_up_later() {
     gpu.sync(store);
     let handle = store.get(key).unwrap();
     assert!(gpu.page(handle.page).is_some() && handle.len == 2 * 28);
+}
+
+/// Both ways of drawing a surface as fine as it appears: with vertex
+/// shaders only, and with mesh shaders if the device has them.
+fn stages(scene: &Scene) -> Vec<(&'static str, DrawStage)> {
+    let mut stages = vec![(
+        "vertex pulling",
+        DrawStage::new(&scene.device, FORMAT).without_mesh_shaders(),
+    )];
+    let stage = DrawStage::new(&scene.device, FORMAT);
+    if stage.uses_mesh_shaders() {
+        stages.push(("mesh shaders", stage));
+    } else {
+        eprintln!("no mesh shaders, only vertex pulling was checked");
+    }
+    stages
+}
+
+/// How many pixels are missing in the middle of what should be there: a
+/// gap between two patches shows up as background inside the surface.
+fn holes(drawn: &[[u8; 4]], reference: &[[u8; 4]]) -> usize {
+    let size = SIZE as usize;
+    let solid = |x: usize, y: usize| reference[y * size + x] != BACKGROUND;
+    let mut holes = 0;
+    for y in 2..size - 2 {
+        for x in 2..size - 2 {
+            // Well inside: everything around it is part of the surface.
+            let inside = (y - 2..=y + 2).all(|y| (x - 2..=x + 2).all(|x| solid(x, y)));
+            if inside && drawn[y * size + x] == BACKGROUND {
+                holes += 1;
+            }
+        }
+    }
+    holes
+}
+
+/// How much red and how much blue there is in what was drawn.
+fn red_and_blue(pixels: &[[u8; 4]]) -> (u32, u32) {
+    pixels
+        .iter()
+        .filter(|pixel| **pixel != BACKGROUND)
+        .fold((0, 0), |(red, blue), pixel| {
+            (red + pixel[0] as u32, blue + pixel[2] as u32)
+        })
+}
+
+#[test]
+fn detail_follows_the_size_on_screen() {
+    for circle in [true, false] {
+        let Some(mut scene) = scene(circle) else {
+            return;
+        };
+        // What it should look like: the surface drawn very fine.
+        let mut fixed = DrawStage::new(&scene.device, FORMAT);
+        let near = scene.drawn(&mut fixed, scene.view(64, 64));
+        let lit = covered(&near);
+
+        for (name, mut stage) in stages(&scene) {
+            // Small steps look like the fine picture up to its outline,
+            // without a gap anywhere between the patches.
+            let fine = scene.drawn(&mut stage, scene.auto(3.0, false));
+            let off = different(&fine, &near);
+            assert!(off * 10 < lit, "{name}: {off} of {lit} pixels differ");
+            assert_eq!(holes(&fine, &near), 0, "{name}");
+
+            // Steps as long as the whole picture leave as few as there
+            // can be: one per edge, and four around a closed profile.
+            let coarse = scene.drawn(&mut stage, scene.auto(4096.0, false));
+            let least = scene.drawn(&mut fixed, scene.view(1, if circle { 4 } else { 1 }));
+            assert!(different(&coarse, &least) * 40 < lit, "{name}");
+            assert!(different(&coarse, &near) > lit / 10, "{name}");
+
+            assert!(stage.errors().is_empty(), "{name}: {:?}", stage.errors());
+        }
+    }
+}
+
+/// How many pixels in the middle of the picture are not drawn.
+fn open_in_the_middle(pixels: &[[u8; 4]]) -> usize {
+    let size = SIZE as usize;
+    let (from, to) = (size / 2 - 16, size / 2 + 16);
+    (from..to)
+        .flat_map(|y| (from..to).map(move |x| y * size + x))
+        .filter(|index| pixels[*index] == BACKGROUND)
+        .count()
+}
+
+#[test]
+fn there_are_no_cracks_between_patches() {
+    for circle in [true, false] {
+        let Some(mut scene) = scene(circle) else {
+            return;
+        };
+        // Right where the two segments of the curve meet, so close that
+        // the surface covers the middle of the picture. The near patch is
+        // much finer there than the far one next to it.
+        let curve = oneiroi_nodes::curve::nurbs::CubicNurbs::new(
+            [[-2., -1., 0., 1.], [-1., 1., 0., 1.], [0., -1., 1., 1.], [1., 1., 0., 1.], [2., -1., 0., 1.]]
+                .into_iter()
+                .map(glam::Vec4::from_array)
+                .collect(),
+            clamped_uniform_knots(5),
+        );
+        let seam = curve.segments()[0].frame(1.0);
+        scene.camera.frame(seam.position, 1.1);
+
+        let mut fixed = DrawStage::new(&scene.device, FORMAT);
+        let reference = scene.drawn(&mut fixed, scene.view(64, 64));
+        assert_eq!(open_in_the_middle(&reference), 0, "the surface covers the middle");
+
+        for (name, mut stage) in stages(&scene) {
+            for pixels in [3.0, 6.0, 10.0, 17.0, 30.0, 60.0] {
+                let drawn = scene.drawn(&mut stage, scene.auto(pixels, true));
+                assert_eq!(open_in_the_middle(&drawn), 0, "{name} at {pixels}");
+            }
+        }
+    }
+}
+
+#[test]
+fn what_is_far_away_is_drawn_coarser() {
+    let Some(mut scene) = scene(true) else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        // Coloured by how fine each patch is drawn: red is fine.
+        scene.camera.frame(Vec3::ZERO, 5.0);
+        let near = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, true)));
+        scene.camera.frame(Vec3::ZERO, 40.0);
+        let far = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, true)));
+
+        assert!(near.0 > near.1, "{name}: near is fine, {near:?}");
+        assert!(far.1 > far.0, "{name}: far is coarse, {far:?}");
+    }
+}
+
+#[test]
+fn both_ways_draw_the_same_picture() {
+    let Some(mut scene) = scene(false) else {
+        return;
+    };
+    let mut stages = stages(&scene);
+    if stages.len() < 2 {
+        return;
+    }
+    // From close by and at an angle, where the patches differ in detail.
+    scene.camera.yaw_pitch_delta(0.9, 0.2);
+    scene.camera.frame(Vec3::new(1.0, 0.0, 0.0), 4.0);
+    for pixels in [4.0, 12.0, 40.0] {
+        let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, false));
+        let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, false));
+        let lit = covered(&pulled);
+        assert!(lit > 500);
+        let off = different(&pulled, &meshed);
+        assert!(off * 50 < lit, "{off} of {lit} pixels differ at {pixels}");
+    }
+}
+
+#[test]
+fn what_is_out_of_view_is_not_drawn() {
+    let Some(mut scene) = scene(true) else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        // The camera looks at something far to the side of the tube.
+        scene.camera.frame(Vec3::new(0.0, 60.0, 0.0), 7.0);
+        let away = scene.drawn(&mut stage, scene.auto(8.0, false));
+        assert_eq!(covered(&away), 0, "{name}");
+
+        // Half of it in view is half of the fine picture.
+        scene.camera.frame(Vec3::new(2.0, 0.0, 0.0), 3.0);
+        let mut fixed = DrawStage::new(&scene.device, FORMAT);
+        let reference = scene.drawn(&mut fixed, scene.view(64, 64));
+        let partly = scene.drawn(&mut stage, scene.auto(3.0, false));
+        let lit = covered(&reference);
+        assert!(lit > 500);
+        assert!(different(&partly, &reference) * 40 < lit, "{name}");
+    }
 }

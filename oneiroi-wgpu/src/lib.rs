@@ -15,7 +15,7 @@ pub mod executor;
 pub mod mesh;
 pub mod orbit;
 
-pub use draw::{DrawStage, DrawView};
+pub use draw::{AutoDetail, DrawStage, DrawView};
 pub use executor::{DeferredExecutor, GpuExecutor, GpuStats};
 pub use mesh::{MeshData, MeshPreview};
 

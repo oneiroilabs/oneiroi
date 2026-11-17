@@ -12,12 +12,15 @@ use iced::{
     widget::shader::{self, Action, Pipeline, Primitive},
 };
 use oneiroi_core::node::Topology;
-use oneiroi_wgpu::{DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera};
+use oneiroi_wgpu::{AutoDetail, DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera};
 
 use crate::document::{Session, Shown};
 
 /// How many steps every piece of a line is drawn with.
 const LINE_STEPS: u32 = 64;
+
+/// A patch of a surface gets at most `2^MAX_LEVEL` steps along a side.
+const MAX_LEVEL: u32 = 6;
 
 /// Shows what a [`Session`] shows. Drag with the middle mouse button to
 /// orbit, scroll to zoom.
@@ -26,8 +29,11 @@ pub struct Preview {
     pub session: Arc<Mutex<Session>>,
     /// The camera is aimed at what is shown again whenever this changes.
     pub frame: u64,
-    /// Steps along and across every patch of a surface.
-    pub detail: (u32, u32),
+    /// How long a step along a surface should be on screen, in pixels.
+    /// The finer it is, the more triangles everything gets.
+    pub pixels: f32,
+    /// Colours every patch by how fine it is drawn.
+    pub show_detail: bool,
 }
 
 pub struct CameraState {
@@ -132,7 +138,8 @@ impl<Message> shader::Program<Message> for Preview {
             session: self.session.clone(),
             camera,
             frame,
-            detail: self.detail,
+            pixels: self.pixels,
+            show_detail: self.show_detail,
         }
     }
 }
@@ -143,7 +150,8 @@ pub struct Shot {
     camera: OrbitCamera,
     /// A request to aim the camera which nobody answered yet.
     frame: Option<u64>,
-    detail: (u32, u32),
+    pixels: f32,
+    show_detail: bool,
 }
 
 impl std::fmt::Debug for Shot {
@@ -230,8 +238,15 @@ impl Primitive for Shot {
             view_projection: camera.view_projection(bounds.width / bounds.height.max(1.0)),
             light: camera.position() - camera.target(),
             color: Vec3::new(0.8, 0.7, 0.6),
-            rings: self.detail.0,
-            sides: self.detail.1,
+            rings: LINE_STEPS,
+            sides: 1,
+            // A surface gets as much detail as there is to see of it.
+            auto: Some(AutoDetail {
+                pixels: self.pixels,
+                max_level: MAX_LEVEL,
+                viewport: (pipeline.bounds.2, pipeline.bounds.3),
+                debug: self.show_detail,
+            }),
         };
 
         pipeline.drawing = Drawing::Nothing;
@@ -244,8 +259,6 @@ impl Primitive for Shot {
                 };
                 gpu.sync(store);
                 if drawable.topology == Topology::Line {
-                    // A line has nothing but its steps to look round with.
-                    view.rings = LINE_STEPS;
                     view.color = Vec3::new(1.0, 0.75, 0.3);
                 }
                 if let Some(handle) = store.get(key)
