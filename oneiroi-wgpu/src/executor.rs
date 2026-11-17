@@ -108,7 +108,26 @@ pub struct GpuExecutor {
     pipelines: HashMap<&'static str, Option<Pipeline>>,
     stats: GpuStats,
     errors: Vec<ShaderError>,
+    /// Timestamps around every compute pass, while profiling.
+    profiler: Option<Profiler>,
 }
+
+/// Measures how long the device works on compute passes, with a timestamp
+/// at the start and at the end of each.
+struct Profiler {
+    queries: wgpu::QuerySet,
+    resolved: wgpu::Buffer,
+    read: wgpu::Buffer,
+    /// Timestamps written since the last submit.
+    used: u32,
+    /// Nanoseconds per tick of a timestamp.
+    period: f64,
+    /// The time of all passes measured so far.
+    nanoseconds: f64,
+}
+
+/// How many passes one submit can measure. More of them submit early.
+const PROFILED_PASSES: u32 = 512;
 
 /// Whether `ONEIROI_COMPUTE=cpu` asks for every node to run on the CPU.
 /// Values are still drawn from the device.
@@ -161,7 +180,63 @@ impl GpuExecutor {
                 ..GpuStats::default()
             },
             errors: Vec::new(),
+            profiler: None,
         }
+    }
+
+    /// Starts measuring how long the device takes for the compute passes,
+    /// see [`GpuExecutor::take_gpu_time`]. Every submit then waits for the
+    /// device, so wall clock times measured meanwhile mean little. Returns
+    /// whether the device can measure it.
+    pub fn enable_profiling(&mut self) -> bool {
+        if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return false;
+        }
+        if self.profiler.is_none() {
+            let count = PROFILED_PASSES * 2;
+            let bytes = count as u64 * 8;
+            self.profiler = Some(Profiler {
+                queries: self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("Oneiroi Passes"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                }),
+                resolved: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Oneiroi Passes"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                read: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Oneiroi Passes"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                used: 0,
+                period: self.queue.get_timestamp_period() as f64,
+                nanoseconds: 0.0,
+            });
+        }
+        true
+    }
+
+    /// How long the device worked on compute passes since the last call,
+    /// if profiling is on.
+    pub fn take_gpu_time(&mut self) -> Option<std::time::Duration> {
+        self.submit();
+        let profiler = self.profiler.as_mut()?;
+        let nanoseconds = std::mem::take(&mut profiler.nanoseconds);
+        Some(std::time::Duration::from_nanos(nanoseconds as u64))
+    }
+
+    /// Hands over what was recorded and waits until the device is done
+    /// with all of it.
+    pub fn wait(&mut self) {
+        self.submit();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device is alive while its executor is");
     }
 
     fn bindless(device: &wgpu::Device, ring: &wgpu::Buffer) -> Option<Bindless> {
@@ -393,11 +468,50 @@ impl GpuExecutor {
 
     /// Hands over all work which was recorded.
     fn submit(&mut self) {
-        if let Some(encoder) = self.encoder.take() {
+        if let Some(mut encoder) = self.encoder.take() {
+            let measured = self.profiler.as_ref().map_or(0, |profiler| profiler.used);
+            if let Some(profiler) = self.profiler.as_ref().filter(|_| measured > 0) {
+                encoder.resolve_query_set(&profiler.queries, 0..measured, &profiler.resolved, 0);
+                encoder.copy_buffer_to_buffer(
+                    &profiler.resolved,
+                    0,
+                    &profiler.read,
+                    0,
+                    measured as u64 * 8,
+                );
+            }
             self.queue.submit([encoder.finish()]);
             self.stats.submits += 1;
+            if measured > 0 {
+                self.read_timestamps(measured);
+            }
         }
         self.ring_cursor = 0;
+    }
+
+    /// Adds up the time between the timestamps of each pass. Waits for the
+    /// device to get there.
+    fn read_timestamps(&mut self, measured: u32) {
+        let profiler = self.profiler.as_mut().expect("only called while profiling");
+        let bytes = measured as u64 * 8;
+        profiler.read.map_async(wgpu::MapMode::Read, ..bytes, |result| {
+            result.expect("the timestamps are only read here")
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device is alive while its executor is");
+        {
+            let mapped = profiler
+                .read
+                .get_mapped_range(..bytes)
+                .expect("the buffer was mapped right above");
+            let ticks: &[u64] = bytemuck::cast_slice(&mapped);
+            for pass in ticks.chunks_exact(2) {
+                profiler.nanoseconds += pass[1].saturating_sub(pass[0]) as f64 * profiler.period;
+            }
+        }
+        profiler.read.unmap();
+        profiler.used = 0;
     }
 
     /// Puts calls into the ring and returns the dynamic offset in bytes
@@ -446,10 +560,27 @@ impl GpuExecutor {
         let offset = self.push_calls(calls);
         let bind_group = self.bind_group();
         let calls = self.bindless.as_ref().unwrap().calls.clone();
-        let encoder = self.encoder();
+        if self.profiler.as_ref().is_some_and(|profiler| profiler.used == PROFILED_PASSES * 2) {
+            self.submit();
+        }
+        let encoder = self.encoder.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Oneiroi"),
+                })
+        });
+        let timestamp_writes = self.profiler.as_mut().map(|profiler| {
+            let first = profiler.used;
+            profiler.used += 2;
+            wgpu::ComputePassTimestampWrites {
+                query_set: &profiler.queries,
+                beginning_of_pass_write_index: Some(first),
+                end_of_pass_write_index: Some(first + 1),
+            }
+        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(label),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
