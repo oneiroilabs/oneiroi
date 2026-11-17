@@ -137,6 +137,18 @@ struct View {
     depth: wgpu::TextureView,
     prepared: Option<Prepared>,
     counter: Counter,
+    /// The bind group of the last frame, and what it was made for. Pages
+    /// and uniforms stay, so it can almost always be used again.
+    bound: Option<(BindKey, wgpu::BindGroup)>,
+}
+
+/// What a bind group of a view is made of: the pipeline it is for, the
+/// page it reads, and which of the two uniforms.
+#[derive(Clone, PartialEq)]
+struct BindKey {
+    pipeline: (&'static str, Kind),
+    page: wgpu::Buffer,
+    lod: bool,
 }
 
 impl View {
@@ -155,6 +167,7 @@ impl View {
             depth: depth_texture(device, (1, 1)),
             prepared: None,
             counter: Counter::new(device),
+            bound: None,
         }
     }
 }
@@ -180,6 +193,7 @@ pub struct DrawStage {
     /// Whether the device can run task and mesh shaders.
     mesh_shaders: bool,
     views: Vec<View>,
+    bind_groups: usize,
 }
 
 impl DrawStage {
@@ -192,7 +206,14 @@ impl DrawStage {
                 .features()
                 .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER),
             views: Vec::new(),
+            bind_groups: 0,
         }
+    }
+
+    /// How many bind groups were made. While the same value is drawn from
+    /// the same view, this does not grow.
+    pub fn bind_groups(&self) -> usize {
+        self.bind_groups
     }
 
     /// The types whose shader did not compile. They are not drawn.
@@ -506,20 +527,33 @@ impl DrawStage {
             }
         };
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(key.0),
-            layout: &pipeline.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: page.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: uniform.as_entire_binding(),
-                },
-            ],
-        });
+        let bind_key = BindKey {
+            pipeline: key,
+            page: page.clone(),
+            lod: matches!(draw, Draw::Tasks { .. }) || std::ptr::eq(uniform, &slot.lod_uniform),
+        };
+        let bind_group = match &slot.bound {
+            Some((bound, bind_group)) if *bound == bind_key => bind_group.clone(),
+            _ => {
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(key.0),
+                    layout: &pipeline.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: page.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: uniform.as_entire_binding(),
+                        },
+                    ],
+                });
+                self.bind_groups += 1;
+                slot.bound = Some((bind_key, bind_group.clone()));
+                bind_group
+            }
+        };
         slot.prepared = Some(Prepared {
             key,
             bind_group,

@@ -1,7 +1,6 @@
 //! Draws a triangle mesh an engine computed, to look at it.
 
 use glam::{Mat4, Vec3, Vec4};
-use wgpu::util::DeviceExt;
 
 /// A triangle mesh as the outputs of a graph describe it.
 #[derive(Debug, Clone, Copy)]
@@ -28,10 +27,10 @@ struct Vertex {
     normal: [f32; 3],
 }
 
+/// Kept from mesh to mesh, and only made anew when a mesh does not fit.
 struct Buffers {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    index_count: u32,
 }
 
 /// One normal per position, each the average of the triangles around it.
@@ -61,6 +60,9 @@ pub struct MeshPreview {
     bind_group: wgpu::BindGroup,
     depth: wgpu::TextureView,
     buffers: Option<Buffers>,
+    /// How many indices of the buffers are the mesh, none if there is none.
+    index_count: u32,
+    allocations: usize,
     bounds: Option<(Vec3, f32)>,
     pub color: Vec3,
 }
@@ -148,6 +150,8 @@ impl MeshPreview {
             bind_group,
             depth: Self::depth(device, (1, 1)),
             buffers: None,
+            index_count: 0,
+            allocations: 0,
             bounds: None,
             color: Vec3::new(0.8, 0.7, 0.6),
         }
@@ -210,8 +214,13 @@ pub(crate) fn restrict(
 impl MeshPreview {
     /// Replaces the mesh that is drawn. Call it when the mesh changed, not
     /// every frame: it uploads everything again.
-    pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: Option<MeshData<'_>>) {
-        self.buffers = None;
+    pub fn set_mesh(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mesh: Option<MeshData<'_>>,
+    ) {
+        self.index_count = 0;
         self.bounds = None;
         let Some(mesh) = mesh else {
             return;
@@ -245,19 +254,39 @@ impl MeshPreview {
             .fold((Vec3::MAX, Vec3::MIN), |(min, max), p| (min.min(*p), max.max(*p)));
         self.bounds = Some(((min + max) * 0.5, (max - min).length() * 0.5));
 
-        self.buffers = Some(Buffers {
-            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Mesh Preview Vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Mesh Preview Indices"),
-                contents: bytemuck::cast_slice(&mesh.indices[..mesh.indices.len() / 3 * 3]),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
-            index_count: (mesh.indices.len() / 3 * 3) as u32,
+        let indices = &mesh.indices[..mesh.indices.len() / 3 * 3];
+        let vertices: &[u8] = bytemuck::cast_slice(&vertices);
+        let indices: &[u8] = bytemuck::cast_slice(indices);
+        let fits = self.buffers.as_ref().is_some_and(|buffers| {
+            buffers.vertices.size() >= vertices.len() as u64
+                && buffers.indices.size() >= indices.len() as u64
         });
+        if !fits {
+            // Some room to grow, so a mesh which gets a little larger with
+            // every edit does not need new buffers every time.
+            let buffer = |label, size: usize, usage| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: (size as u64).next_power_of_two().max(256),
+                    usage: usage | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            };
+            self.buffers = Some(Buffers {
+                vertices: buffer("Mesh Preview Vertices", vertices.len(), wgpu::BufferUsages::VERTEX),
+                indices: buffer("Mesh Preview Indices", indices.len(), wgpu::BufferUsages::INDEX),
+            });
+            self.allocations += 1;
+        }
+        let buffers = self.buffers.as_ref().unwrap();
+        queue.write_buffer(&buffers.vertices, 0, vertices);
+        queue.write_buffer(&buffers.indices, 0, indices);
+        self.index_count = (indices.len() / 4) as u32;
+    }
+
+    /// How many times buffers had to be made for a mesh.
+    pub fn allocations(&self) -> usize {
+        self.allocations
     }
 
     /// Center and radius of a sphere around the mesh, to aim a camera.
@@ -297,7 +326,7 @@ impl MeshPreview {
         target: &wgpu::TextureView,
         bounds: Option<(f32, f32, f32, f32)>,
     ) {
-        let Some(buffers) = &self.buffers else {
+        let Some(buffers) = self.buffers.as_ref().filter(|_| self.index_count > 0) else {
             return;
         };
 
@@ -333,6 +362,6 @@ impl MeshPreview {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, buffers.vertices.slice(..));
         pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+        pass.draw_indexed(0..self.index_count, 0, 0..1);
     }
 }

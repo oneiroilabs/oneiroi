@@ -1,14 +1,13 @@
 //! Runs nodes on the GPU.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use oneiroi_core::{
     exec::{CpuExecutor, Executor, Work},
     node::{Caps, GpuKernel, Inputs, NodeDef},
-    shader::{self, ShaderError, WORKGROUP_SIZE},
+    shader::{self, CALL_WINDOW, GATHER, GATHER_CALL_WORDS, ShaderError, WORKGROUP_SIZE},
     store::{ContentKey, Handle, Store},
 };
-use wgpu::util::DeviceExt;
 
 /// How many nodes ran where since the executor was made.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,12 +20,30 @@ pub struct GpuStats {
     pub dispatches: usize,
     /// How many values were brought back from the GPU.
     pub downloads: usize,
+    /// How many buffers the executor made. Once every page of the store
+    /// has one, this does not grow anymore.
+    pub buffers: usize,
+    /// How many times work was handed to the device.
+    pub submits: usize,
 }
+
+/// The features a device needs for an executor to run anything on it.
+/// Without them everything runs on the CPU.
+pub const FEATURES: wgpu::Features = wgpu::Features::BUFFER_BINDING_ARRAY
+    .union(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY)
+    .union(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY)
+    .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
+
+/// How many pages of the store a device has to be able to bind at once.
+/// A store with more pages runs what touches the others on the CPU.
+pub const MAX_PAGES: u32 = 1024;
+
+/// How many words of calls the ring holds before work is handed over.
+const RING_WORDS: u32 = 1 << 18;
 
 struct Pipeline {
     kernel: &'static GpuKernel,
     pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
     call_words: usize,
 }
 
@@ -37,17 +54,32 @@ struct Call<'a> {
     elements: usize,
 }
 
+/// What is needed to run anything at all, if the device can.
+struct Bindless {
+    layout: wgpu::BindGroupLayout,
+    /// The calls, through the ring.
+    calls: wgpu::BindGroup,
+    pipeline_layout: wgpu::PipelineLayout,
+    gather: wgpu::ComputePipeline,
+    /// How many pages one bind group holds.
+    max_pages: u32,
+    /// Every page, made again when a page is added.
+    bind_group: Option<wgpu::BindGroup>,
+}
+
 /// An [`Executor`] which runs every node that has a kernel for this device
 /// as a compute shader, and all the others on the CPU.
 ///
 /// The pages of the store are mirrored into buffers on the device, and
-/// only what was written since the last time is uploaded. A kernel reads
-/// its inputs straight out of those buffers and its output is copied into
-/// them, at the place the store reserved for it.
+/// only what was written since the last time is uploaded. All of them are
+/// bound at once, so a kernel reads its inputs from wherever they are and
+/// writes its output right where the store reserved it. Nodes which do not
+/// depend on each other run together: all calls of one node are a single
+/// compute pass.
 ///
-/// Nodes which do not depend on each other run together: all calls of one
-/// node are a single compute pass, as long as each of their inputs lies
-/// in the same page for all of them.
+/// Nothing is made per call: calls go through a ring buffer, results are
+/// read back through one buffer which only grows, and all work of one run
+/// is handed to the device at once.
 ///
 /// A result stays on the device. It is only brought back when a node on
 /// the CPU reads it or somebody asks for it, see
@@ -57,10 +89,18 @@ pub struct GpuExecutor {
     queue: wgpu::Queue,
     caps: Caps,
     cpu: CpuExecutor,
+    /// `None` when the device lacks [`FEATURES`].
+    bindless: Option<Bindless>,
     /// The buffer of every page of the store, by its index.
     pages: Vec<wgpu::Buffer>,
-    /// Bound for inputs which have no elements at all.
-    empty: wgpu::Buffer,
+    /// The calls of the dispatches which were not handed over yet.
+    ring: wgpu::Buffer,
+    ring_cursor: u32,
+    /// In words, what a dynamic offset into the ring has to be a multiple of.
+    ring_alignment: u32,
+    readback: Option<wgpu::Buffer>,
+    /// Work which was recorded and not handed over yet.
+    encoder: Option<wgpu::CommandEncoder>,
     /// By the id of the node. `None` for nodes which run on the CPU.
     pipelines: HashMap<&'static str, Option<Pipeline>>,
     stats: GpuStats,
@@ -68,34 +108,135 @@ pub struct GpuExecutor {
 }
 
 impl GpuExecutor {
+    /// Whether a device has what an executor needs to run anything on it.
+    pub fn supports(device: &wgpu::Device) -> bool {
+        device.features().contains(FEATURES)
+            && device.limits().max_binding_array_elements_per_shader_stage > 0
+    }
+
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let features = device.features();
         let caps = Caps {
             subgroups: features.contains(wgpu::Features::SUBGROUP),
             mesh_shaders: features.contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER),
         };
-        let empty = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Oneiroi Empty Input"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE,
+        let ring = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Oneiroi Calls"),
+            size: RING_WORDS as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let bindless = Self::supports(&device).then(|| Self::bindless(&device, &ring));
         Self {
+            ring_alignment: (device.limits().min_storage_buffer_offset_alignment / 4).max(1),
             device,
             queue,
             caps,
             cpu: CpuExecutor::default(),
+            bindless,
             pages: Vec::new(),
-            empty,
+            ring,
+            ring_cursor: 0,
+            readback: None,
+            encoder: None,
             pipelines: HashMap::new(),
-            stats: GpuStats::default(),
+            stats: GpuStats {
+                buffers: 1,
+                ..GpuStats::default()
+            },
             errors: Vec::new(),
         }
+    }
+
+    fn bindless(device: &wgpu::Device, ring: &wgpu::Buffer) -> Bindless {
+        let max_pages = device
+            .limits()
+            .max_binding_array_elements_per_shader_stage
+            .min(MAX_PAGES);
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Oneiroi Pages"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: NonZeroU32::new(max_pages),
+                },
+            ],
+        });
+        let calls_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Oneiroi Calls"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: true,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let calls = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Oneiroi Calls"),
+            layout: &calls_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: ring,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(CALL_WINDOW as u64 * 4),
+                }),
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Oneiroi Pages"),
+            bind_group_layouts: &[Some(&layout), Some(&calls_layout)],
+            immediate_size: 0,
+        });
+        let gather = Self::compute_pipeline(device, &pipeline_layout, "Oneiroi Gather", GATHER);
+        Bindless {
+            layout,
+            calls,
+            pipeline_layout,
+            gather,
+            max_pages,
+            bind_group: None,
+        }
+    }
+
+    fn compute_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        label: &str,
+        wgsl: &str,
+    ) -> wgpu::ComputePipeline {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
     }
 
     /// What the device can do, which decides the kernels that are used.
     pub fn caps(&self) -> Caps {
         self.caps
+    }
+
+    /// Whether anything runs on the GPU at all, see [`FEATURES`].
+    pub fn is_supported(&self) -> bool {
+        self.bindless.is_some()
     }
 
     pub fn stats(&self) -> GpuStats {
@@ -109,78 +250,28 @@ impl GpuExecutor {
 
     fn pipeline(&mut self, node: &'static NodeDef) -> Option<&Pipeline> {
         if !self.pipelines.contains_key(node.id) {
-            let pipeline = node.gpu_kernel(self.caps).and_then(|kernel| {
-                match shader::compute(node, kernel) {
-                    Ok(shader) => Some(self.build(node, kernel, &shader)),
+            let bindless = self.bindless.as_ref();
+            let pipeline = bindless
+                .and_then(|bindless| Some((bindless, node.gpu_kernel(self.caps)?)))
+                .and_then(|(bindless, kernel)| match shader::compute(node, kernel) {
+                    Ok(shader) => Some(Pipeline {
+                        kernel,
+                        pipeline: Self::compute_pipeline(
+                            &self.device,
+                            &bindless.pipeline_layout,
+                            node.id,
+                            &shader.wgsl,
+                        ),
+                        call_words: shader.call_words,
+                    }),
                     Err(error) => {
                         self.errors.push(error);
                         None
                     }
-                }
-            });
+                });
             self.pipelines.insert(node.id, pipeline);
         }
         self.pipelines[node.id].as_ref()
-    }
-
-    fn build(
-        &self,
-        node: &NodeDef,
-        kernel: &'static GpuKernel,
-        shader: &shader::ComputeShader,
-    ) -> Pipeline {
-        let buffer = |binding: usize, ty| wgpu::BindGroupLayoutEntry {
-            binding: binding as u32,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let inputs = node.inputs.len();
-        let mut entries: Vec<_> = (0..inputs)
-            .map(|index| buffer(index, wgpu::BufferBindingType::Storage { read_only: true }))
-            .collect();
-        entries.push(buffer(inputs, wgpu::BufferBindingType::Storage { read_only: false }));
-        entries.push(buffer(inputs + 1, wgpu::BufferBindingType::Storage { read_only: true }));
-
-        let layout = self
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some(node.id),
-                entries: &entries,
-            });
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(node.id),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            });
-        let module = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(node.id),
-                source: wgpu::ShaderSource::Wgsl(shader.wgsl.as_str().into()),
-            });
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(node.id),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        Pipeline {
-            kernel,
-            pipeline,
-            layout,
-            call_words: shader.call_words,
-        }
     }
 
     /// The buffer which mirrors a page of the store. Whoever draws a value
@@ -190,10 +281,11 @@ impl GpuExecutor {
     }
 
     /// Brings the buffers up to date with what the CPU wrote into the
-    /// store. Kernels do this themselves, anything else which reads the
-    /// buffers has to ask for it.
+    /// store, and hands over all work which was recorded. Kernels do this
+    /// themselves, anything else which reads the buffers has to ask for it.
     pub fn sync(&mut self, store: &mut Store) {
         self.upload(store);
+        self.submit();
     }
 
     /// Brings the buffers up to date with the pages of the store.
@@ -209,11 +301,19 @@ impl GpuExecutor {
                         | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 }));
+                self.stats.buffers += 1;
+                if let Some(bindless) = &mut self.bindless {
+                    bindless.bind_group = None;
+                }
             }
         }
         let pages: Vec<_> = store.pages().collect();
         for (page, range) in dirty {
             let words = &pages[page as usize][range.start as usize..range.end as usize];
+            // The write happens before anything which is handed over after
+            // it, including what is recorded already. That is fine: it goes
+            // to memory nothing recorded touches, since nothing in the
+            // store is ever written twice.
             self.queue.write_buffer(
                 &self.pages[page as usize],
                 range.start as u64 * 4,
@@ -222,8 +322,98 @@ impl GpuExecutor {
         }
     }
 
-    /// Runs every call of one node which is in `items`. The ones whose
-    /// output is too large for the device are left to the CPU.
+    /// Whether a value is somewhere every kernel can reach it.
+    fn reachable(&self, handle: &Handle) -> bool {
+        let Some(bindless) = &self.bindless else {
+            return false;
+        };
+        let max_bytes = self.device.limits().max_storage_buffer_binding_size;
+        handle.page < bindless.max_pages
+            && self
+                .pages
+                .get(handle.page as usize)
+                .is_none_or(|page| page.size() <= max_bytes)
+    }
+
+    fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
+        self.encoder.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Oneiroi"),
+                })
+        })
+    }
+
+    /// Hands over all work which was recorded.
+    fn submit(&mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            self.queue.submit([encoder.finish()]);
+            self.stats.submits += 1;
+        }
+        self.ring_cursor = 0;
+    }
+
+    /// Puts calls into the ring and returns the dynamic offset in bytes
+    /// they are found at.
+    fn push_calls(&mut self, calls: &[u32]) -> u32 {
+        debug_assert!(calls.len() <= CALL_WINDOW as usize);
+        let align = self.ring_alignment;
+        let mut offset = self.ring_cursor.div_ceil(align) * align;
+        if offset + CALL_WINDOW > RING_WORDS {
+            // Full: what was recorded goes first, then the ring is free.
+            self.submit();
+            offset = 0;
+        }
+        self.queue
+            .write_buffer(&self.ring, offset as u64 * 4, bytemuck::cast_slice(calls));
+        self.ring_cursor = offset + calls.len() as u32;
+        offset * 4
+    }
+
+    /// The bind group of every page.
+    fn bind_group(&mut self) -> wgpu::BindGroup {
+        let bindless = self.bindless.as_mut().expect("only used where it exists");
+        if let Some(bind_group) = &bindless.bind_group {
+            return bind_group.clone();
+        }
+        let pages: Vec<_> = self
+            .pages
+            .iter()
+            .take(bindless.max_pages as usize)
+            .map(|page| page.as_entire_buffer_binding())
+            .collect();
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Oneiroi Pages"),
+            layout: &bindless.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::BufferArray(&pages),
+            }],
+        });
+        bindless.bind_group = Some(bind_group.clone());
+        bind_group
+    }
+
+    /// Records one compute pass which runs `pipeline` for every call.
+    fn record(&mut self, label: &str, pipeline: &wgpu::ComputePipeline, calls: &[u32], groups: (u32, u32)) {
+        let offset = self.push_calls(calls);
+        let bind_group = self.bind_group();
+        let calls = self.bindless.as_ref().unwrap().calls.clone();
+        let encoder = self.encoder();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(1, &calls, &[offset]);
+        pass.dispatch_workgroups(groups.0, groups.1, 1);
+        drop(pass);
+        self.stats.dispatches += 1;
+    }
+
+    /// Runs every call of one node which is in `items`. The ones the device
+    /// can not take are left to the CPU.
     fn run_node(&mut self, store: &mut Store, node: &'static NodeDef, items: &[&Work]) {
         let Some(pipeline) = self.pipeline(node) else {
             for item in items {
@@ -231,14 +421,14 @@ impl GpuExecutor {
             }
             return;
         };
-        let kernel = pipeline.kernel;
+        let (kernel, call_words) = (pipeline.kernel, pipeline.call_words);
         let words = node.outputs[0].ty.words as u64;
         let limits = self.device.limits();
         let max_bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
-        let max_groups = limits.max_compute_workgroups_per_dimension as u64;
+        let max_groups = limits.max_compute_workgroups_per_dimension as usize;
+        let max_rows = (CALL_WINDOW as usize / call_words).min(max_groups);
 
         let mut batch: Vec<Call<'_>> = Vec::new();
-        let mut batch_bytes = 0;
         for item in items {
             // Asking for the length may look at some inputs, which then
             // have to be here.
@@ -255,32 +445,23 @@ impl GpuExecutor {
                 })
                 .collect();
             let elements = (kernel.len)(&Inputs::new(store, node, &inputs));
-            let bytes = elements as u64 * words * 4;
             if elements == 0 {
                 store.insert(item.outputs[0], &[]);
                 self.stats.gpu += 1;
                 continue;
             }
-            if bytes > max_bytes || elements.div_ceil(WORKGROUP_SIZE as usize) as u64 > max_groups {
+            let bytes = elements as u64 * words * 4;
+            let fits = bytes <= max_bytes
+                && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups
+                && inputs.iter().all(|handle| self.reachable(handle));
+            if !fits {
                 self.run_on_cpu(store, item);
                 continue;
             }
-
-            // Every input is bound once for the whole batch, so all calls
-            // have to find theirs in the same page.
-            let fits = batch.first().is_none_or(|first| {
-                first
-                    .inputs
-                    .iter()
-                    .zip(&inputs)
-                    .all(|(a, b)| a.len == 0 || b.len == 0 || a.page == b.page)
-            });
-            if !fits || batch_bytes + bytes > max_bytes || batch.len() as u64 == max_groups {
+            if batch.len() == max_rows {
                 self.dispatch(store, node, &batch);
                 batch.clear();
-                batch_bytes = 0;
             }
-            batch_bytes += bytes;
             batch.push(Call {
                 item,
                 inputs,
@@ -296,97 +477,36 @@ impl GpuExecutor {
             return;
         }
         let words = node.outputs[0].ty.words as usize;
-        let inputs = node.inputs.len();
 
         // Make room for the results where they belong, then bring the
-        // device up to date with what the CPU wrote.
+        // device up to date with what the CPU wrote and the new pages.
         let targets: Vec<_> = batch
             .iter()
             .map(|call| store.reserve(call.item.outputs[0], (call.elements * words) as u32))
             .collect();
         self.upload(store);
-
-        let pipeline = self.pipelines[node.id].as_ref().unwrap();
-        let mut calls = Vec::with_capacity(batch.len() * pipeline.call_words);
-        let mut offset = 0;
-        for call in batch {
-            for input in &call.inputs {
-                calls.extend([input.offset, input.len]);
+        if !targets.iter().all(|target| self.reachable(target)) {
+            for call in batch {
+                self.run_on_cpu(store, call.item);
             }
-            calls.extend([offset, call.elements as u32]);
-            offset += (call.elements * words) as u32;
+            return;
         }
-        let calls = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Oneiroi Calls"),
-                contents: bytemuck::cast_slice(&calls),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-        let result = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Oneiroi Output"),
-            size: offset as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
 
-        let mut entries: Vec<_> = (0..inputs)
-            .map(|index| {
-                // The page of the first call which has anything there.
-                let page = batch
-                    .iter()
-                    .map(|call| call.inputs[index])
-                    .find(|handle| handle.len > 0)
-                    .map(|handle| handle.page);
-                wgpu::BindGroupEntry {
-                    binding: index as u32,
-                    resource: match page {
-                        Some(page) => self.pages[page as usize].as_entire_binding(),
-                        None => self.empty.as_entire_binding(),
-                    },
-                }
-            })
-            .collect();
-        entries.push(wgpu::BindGroupEntry {
-            binding: inputs as u32,
-            resource: result.as_entire_binding(),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: inputs as u32 + 1,
-            resource: calls.as_entire_binding(),
-        });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(node.id),
-            layout: &pipeline.layout,
-            entries: &entries,
-        });
-
-        let most = batch.iter().map(|call| call.elements).max().unwrap_or(0);
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(node.id),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(
-                most.div_ceil(WORKGROUP_SIZE as usize) as u32,
-                batch.len() as u32,
-                1,
-            );
-        }
-        let mut offset = 0;
+        let mut calls = Vec::new();
         for (call, target) in batch.iter().zip(&targets) {
-            let bytes = (call.elements * words) as u64 * 4;
-            let page = &self.pages[target.page as usize];
-            encoder.copy_buffer_to_buffer(&result, offset, page, target.offset as u64 * 4, bytes);
-            offset += bytes;
+            for input in &call.inputs {
+                calls.extend([input.page, input.offset, input.len]);
+            }
+            calls.extend([target.page, target.offset, call.elements as u32]);
         }
-        self.queue.submit([encoder.finish()]);
-
+        let most = batch.iter().map(|call| call.elements).max().unwrap_or(0);
+        let groups = (
+            most.div_ceil(WORKGROUP_SIZE as usize) as u32,
+            batch.len() as u32,
+        );
+        let pipeline = self.pipelines[node.id].as_ref().unwrap().pipeline.clone();
+        self.record(node.id, &pipeline, &calls, groups);
         self.stats.gpu += batch.len();
-        self.stats.dispatches += 1;
     }
 
     fn run_on_cpu(&mut self, store: &mut Store, item: &Work) {
@@ -432,6 +552,7 @@ impl Executor for GpuExecutor {
                 self.run_node(store, node, &items);
             }
         }
+        self.submit();
     }
 
     /// Copies the parts together on the device. Nothing is brought over.
@@ -446,26 +567,40 @@ impl Executor for GpuExecutor {
         // Parts the CPU made are only in the store so far.
         self.upload(store);
 
-        // A buffer can not be copied into itself, and the parts may well be
-        // in the page the result goes to. So they meet somewhere else.
-        let size = len as u64 * 4;
-        let scratch = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Oneiroi Gather"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        let mut offset = 0;
-        for handle in handles.iter().filter(|handle| handle.len > 0) {
-            let bytes = handle.len as u64 * 4;
-            let page = &self.pages[handle.page as usize];
-            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, &scratch, offset, bytes);
-            offset += bytes;
+        let reachable = self.bindless.is_some()
+            && self.reachable(&target)
+            && handles.iter().all(|handle| self.reachable(handle));
+        if !reachable {
+            self.download(store, parts);
+            let mut words = Vec::with_capacity(len as usize);
+            for handle in &handles {
+                words.extend_from_slice(store.words(*handle));
+            }
+            store.insert(output, &words);
+            return;
         }
-        let page = &self.pages[target.page as usize];
-        encoder.copy_buffer_to_buffer(&scratch, 0, page, target.offset as u64 * 4, size);
-        self.queue.submit([encoder.finish()]);
+
+        // A part longer than one dispatch can reach is copied in pieces.
+        let max_groups = self.device.limits().max_compute_workgroups_per_dimension;
+        let longest = max_groups * 64;
+        let mut calls = Vec::new();
+        let mut offset = target.offset;
+        for handle in handles.iter().filter(|handle| handle.len > 0) {
+            let mut start = 0;
+            while start < handle.len {
+                let len = (handle.len - start).min(longest);
+                calls.push([handle.page, handle.offset + start, len, target.page, offset]);
+                offset += len;
+                start += len;
+            }
+        }
+        let pipeline = self.bindless.as_ref().unwrap().gather.clone();
+        let max_rows = (CALL_WINDOW as usize / GATHER_CALL_WORDS).min(max_groups as usize);
+        for chunk in calls.chunks(max_rows) {
+            let most = chunk.iter().map(|call| call[2]).max().unwrap_or(0);
+            let flat: Vec<u32> = chunk.iter().flatten().copied().collect();
+            self.record("Oneiroi Gather", &pipeline, &flat, (most.div_ceil(64), chunk.len() as u32));
+        }
     }
 
     fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
@@ -479,39 +614,50 @@ impl Executor for GpuExecutor {
             return;
         }
 
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Oneiroi Readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        // What is to be read may not even be computed yet.
+        self.submit();
+        if self.readback.as_ref().is_none_or(|readback| readback.size() < size) {
+            self.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Oneiroi Readback"),
+                size: size.next_power_of_two(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+            self.stats.buffers += 1;
+        }
+        let readback = self.readback.as_ref().unwrap();
+
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let mut offset = 0;
         for (_, handle) in &remote {
             let bytes = handle.len as u64 * 4;
             let page = &self.pages[handle.page as usize];
-            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, &readback, offset, bytes);
+            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, readback, offset, bytes);
             offset += bytes;
         }
         self.queue.submit([encoder.finish()]);
+        self.stats.submits += 1;
 
-        readback.map_async(wgpu::MapMode::Read, .., |result| {
+        readback.map_async(wgpu::MapMode::Read, ..size, |result| {
             result.expect("the readback buffer is only used here")
         });
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("the device is alive while its executor is");
-        let bytes = readback
-            .get_mapped_range(..)
-            .expect("the buffer was mapped right above");
-        let words: &[u32] = bytemuck::cast_slice(&bytes);
+        {
+            let bytes = readback
+                .get_mapped_range(..size)
+                .expect("the buffer was mapped right above");
+            let words: &[u32] = bytemuck::cast_slice(&bytes);
 
-        let mut offset = 0;
-        for (key, handle) in &remote {
-            store.fill(*key, &words[offset..offset + handle.len as usize]);
-            offset += handle.len as usize;
-            self.stats.downloads += 1;
+            let mut offset = 0;
+            for (key, handle) in &remote {
+                store.fill(*key, &words[offset..offset + handle.len as usize]);
+                offset += handle.len as usize;
+                self.stats.downloads += 1;
+            }
         }
+        readback.unmap();
     }
 }
 

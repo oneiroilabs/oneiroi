@@ -10,6 +10,11 @@ use oneiroi_core::{
 use oneiroi_nodes::curve::{EvaluatedFrame, FRAMES, NURBS, nurbs::clamped_uniform_knots};
 use oneiroi_wgpu::{GpuExecutor, GpuStats};
 
+/// Nodes on the GPU, nodes on the CPU, compute passes and downloads.
+fn counts(stats: GpuStats) -> (usize, usize, usize, usize) {
+    (stats.gpu, stats.cpu, stats.dispatches, stats.downloads)
+}
+
 fn gpu() -> Option<Engine<GpuExecutor>> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
@@ -18,8 +23,16 @@ fn gpu() -> Option<Engine<GpuExecutor>> {
         eprintln!("no graphics adapter, nothing was checked");
         return None;
     };
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: adapter.features() & oneiroi_wgpu::FEATURES,
+        required_limits: adapter.limits(),
+        ..Default::default()
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).ok()?;
+    if !GpuExecutor::supports(&device) {
+        eprintln!("no binding arrays, nothing was checked");
+        return None;
+    }
     Some(Engine::new(GpuExecutor::new(device, queue)))
 }
 
@@ -98,16 +111,16 @@ fn only_nodes_with_a_kernel_run_on_the_gpu() {
 
     // The curve is built on the CPU, its frames are computed on the GPU.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, dispatches: 1, downloads: 1 });
+    assert_eq!(counts(gpu.executor().stats()), (1, 1, 1, 1));
 
     // What is in the store already is not computed again, wherever it
     // came from.
     frames(&mut gpu, &mut instance);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 1, dispatches: 1, downloads: 1 });
+    assert_eq!(counts(gpu.executor().stats()), (1, 1, 1, 1));
 
     gpu.set_param(&mut instance, "samples", &[3u32]).unwrap();
     assert_eq!(frames(&mut gpu, &mut instance).len(), 6 * 3 * 16);
-    assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, dispatches: 2, downloads: 2 });
+    assert_eq!(counts(gpu.executor().stats()), (2, 1, 2, 2));
 }
 
 #[test]
@@ -131,10 +144,7 @@ fn calls_of_one_node_share_a_pass() {
 
     // Five curves on the CPU, then all of their frames in a single pass.
     assert_eq!(gpu.evaluate(&mut on_gpu), 10);
-    assert_eq!(
-        gpu.executor().stats(),
-        GpuStats { gpu: 5, cpu: 5, dispatches: 1, downloads: 0 }
-    );
+    assert_eq!(counts(gpu.executor().stats()), (5, 5, 1, 0));
 
     cpu.evaluate(&mut on_cpu);
     for (a, b) in on_gpu.iter().zip(&on_cpu) {
@@ -142,6 +152,31 @@ fn calls_of_one_node_share_a_pass() {
         let b = cpu.read::<EvaluatedFrame>(b, "frames").unwrap();
         assert_close(bytemuck::cast_slice(a), bytemuck::cast_slice(b));
     }
+}
+
+#[test]
+fn nothing_is_made_again_once_it_runs() {
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let id = program(&mut gpu, 30);
+    let mut instance = gpu.instantiate(id);
+    frames(&mut gpu, &mut instance);
+    let warm = gpu.executor().stats();
+
+    // Every change runs the frames on the GPU again. None of it needs a
+    // buffer of its own.
+    for samples in [10u32, 12, 16, 9, 30, 4] {
+        gpu.set_param(&mut instance, "samples", &[samples]).unwrap();
+        gpu.plan([&mut instance]);
+        gpu.flush();
+        let stats = gpu.executor().stats();
+        assert_eq!(stats.buffers, warm.buffers, "{stats:?}");
+    }
+    // Each run was handed to the device at once.
+    let stats = gpu.executor().stats();
+    assert_eq!(stats.submits - warm.submits, 6, "{stats:?}");
+    assert!(stats.buffers <= 4, "the ring, a page and the readback: {stats:?}");
 }
 
 #[test]
@@ -268,7 +303,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // Two kernels ran and nothing came back.
-        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 2, cpu: 1, dispatches: 2, downloads: 0 });
+        assert_eq!(counts(gpu.executor().stats()), (2, 1, 2, 0));
         assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
         assert!(gpu.read::<Vec3>(&instance, "positions").is_none());
 
@@ -294,7 +329,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // The frames were brought back for the node which has no kernel.
-        assert_eq!(gpu.executor().stats(), GpuStats { gpu: 1, cpu: 2, dispatches: 1, downloads: 1 });
+        assert_eq!(counts(gpu.executor().stats()), (1, 2, 1, 1));
         close(
             gpu.read::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
@@ -426,6 +461,8 @@ mod for_each {
         // came back.
         let stats = gpu.executor().stats();
         assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 7, 2), "{stats:?}");
-        assert_eq!(stats.dispatches, 2, "{stats:?}");
+        // The frames of the segments, putting them together, and the
+        // frames of the whole curve.
+        assert_eq!(stats.dispatches, 3, "{stats:?}");
     }
 }

@@ -162,6 +162,7 @@ fn a_mesh_shows_up() {
     let (positions, normals, indices) = tube_mesh();
     preview.set_mesh(
         &device,
+        &queue,
         Some(MeshData {
             positions: &positions,
             normals: Some(&normals),
@@ -178,6 +179,7 @@ fn a_mesh_shows_up() {
     // Without normals they are worked out from the triangles.
     preview.set_mesh(
         &device,
+        &queue,
         Some(MeshData {
             positions: &positions,
             normals: None,
@@ -188,8 +190,24 @@ fn a_mesh_shows_up() {
     assert!(covered(&flat).abs_diff(lit) < 20);
     assert!(flat.iter().any(|pixel| pixel[0] > 150));
 
-    preview.set_mesh(&device, None);
+    preview.set_mesh(&device, &queue, None);
     assert_eq!(covered(&draw(&device, &queue, &mut preview, None)), 0);
+
+    // Showing a mesh again, or a smaller one, needs no new buffers.
+    let allocations = preview.allocations();
+    for count in [indices.len(), indices.len() / 2, indices.len()] {
+        preview.set_mesh(
+            &device,
+            &queue,
+            Some(MeshData {
+                positions: &positions,
+                normals: Some(&normals),
+                indices: &indices[..count],
+            }),
+        );
+    }
+    assert_eq!(preview.allocations(), allocations);
+    assert!(covered(&draw(&device, &queue, &mut preview, None)) > 300);
 }
 
 #[test]
@@ -201,6 +219,7 @@ fn drawing_stays_inside_its_bounds() {
     let (positions, normals, indices) = tube_mesh();
     preview.set_mesh(
         &device,
+        &queue,
         Some(MeshData {
             positions: &positions,
             normals: Some(&normals),
@@ -231,6 +250,7 @@ fn broken_meshes_are_not_drawn() {
     let positions = [Vec3::ZERO, Vec3::X, Vec3::Y];
     preview.set_mesh(
         &device,
+        &queue,
         Some(MeshData {
             positions: &positions,
             normals: None,

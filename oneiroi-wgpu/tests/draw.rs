@@ -34,9 +34,9 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         eprintln!("no graphics adapter, nothing was checked");
         return None;
     };
-    let mesh_shaders = adapter.features() & wgpu::Features::EXPERIMENTAL_MESH_SHADER;
+    let wanted = wgpu::Features::EXPERIMENTAL_MESH_SHADER | oneiroi_wgpu::FEATURES;
     let descriptor = wgpu::DeviceDescriptor {
-        required_features: mesh_shaders,
+        required_features: adapter.features() & wanted,
         required_limits: adapter.limits(),
         // SAFETY: mesh shaders are what is being tested here.
         experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
@@ -295,6 +295,7 @@ impl Scene {
         let mut preview = MeshPreview::new(&self.device, FORMAT);
         preview.set_mesh(
             &self.device,
+            &self.queue,
             Some(MeshData {
                 positions: &positions,
                 normals: Some(&normals),
@@ -342,7 +343,15 @@ fn detail_is_decided_when_drawing() {
     assert!(covered(&coarse) > 200 && covered(&fine) > covered(&coarse));
     assert!(different(&coarse, &fine) > 100);
     // Nothing ran for it and nothing was brought back from the device.
-    assert_eq!(scene.engine.executor().stats(), nodes);
+    let stats = scene.engine.executor().stats();
+    assert_eq!((stats.gpu, stats.cpu, stats.downloads), (nodes.gpu, nodes.cpu, nodes.downloads));
+
+    // Drawing the same thing again needs no new bind group.
+    let made = stage.bind_groups();
+    for _ in 0..3 {
+        scene.drawn(&mut stage, scene.view(40, 40));
+    }
+    assert_eq!(stage.bind_groups(), made);
 
     stage.clear();
     let nothing = picture(&scene.device, &scene.queue, |encoder, target| {
@@ -672,7 +681,8 @@ fn several_views_draw_the_same_patches() {
         assert_eq!(different(&both[0], &alone_front), 0, "{name}");
         assert_eq!(different(&both[1], &alone_side), 0, "{name}");
         // Nothing was made again for the second view.
-        assert_eq!(scene.engine.executor().stats(), ran);
+        let stats = scene.engine.executor().stats();
+        assert_eq!((stats.gpu, stats.cpu, stats.downloads), (ran.gpu, ran.cpu, ran.downloads));
         scene.camera = front;
     }
 }
