@@ -210,12 +210,9 @@ pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
 fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let spine = inputs.get::<CubicNurbsSegmentCache>(0);
     let profile = inputs.get::<P>(1);
-    let mut patches = Vec::new();
-    let mut offsets = vec![0];
-    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
-        patches.extend(P::sweep(&spine[curve], P::select(profile, group)));
-        offsets.push(patches.len() as u32);
-    }
+    let (patches, offsets) = crate::parallel::per_group(inputs.groups(0), |group, curve| {
+        P::sweep(&spine[curve], P::select(profile, group))
+    });
     outputs.set(0, &patches);
     outputs.set_groups(0, &offsets);
 }

@@ -11,6 +11,8 @@ use oneiroi_core::{
     types::{DataType, PortDefault, Trait},
 };
 
+use rayon::prelude::*;
+
 use crate::generic::version;
 
 /// Everything which can be turned into a mesh implements this trait.
@@ -22,7 +24,7 @@ pub const SURFACE: Trait = Trait { name: "surface" };
 /// A surface is a slice of patches like any other value. It is small and
 /// exact, and how fine it gets meshed is only decided where it is drawn
 /// or turned into a [mesh](MESH).
-pub trait Surface: DataType {
+pub trait Surface: DataType + Send + Sync {
     /// Position and normal at `u` along and `v` across the patch.
     fn point(&self, u: f32, v: f32) -> (Vec3, Vec3);
 
@@ -155,21 +157,27 @@ pub fn register_surface<S: Surface>(registry: &mut NodeRegistry) {
 /// as good as the probes, so a bend much smaller than a probe step can go
 /// unseen.
 pub fn detail<S: Surface>(patches: &[S], tolerance: f32) -> (usize, usize) {
-    let (mut along, mut across) = (0.0f32, 0.0f32);
     let at = |step: usize| step as f32 / PROBES as f32;
-    for patch in patches {
-        for line in 0..=PROBES {
-            for step in 0..PROBES {
-                let (from, to) = (at(step), at(step + 1));
-                let middle = (from + to) * 0.5;
-                let sag = |point: &dyn Fn(f32) -> Vec3| {
-                    point(middle).distance((point(from) + point(to)) * 0.5)
-                };
-                along = along.max(sag(&|u| patch.point(u, at(line)).0));
-                across = across.max(sag(&|v| patch.point(at(line), v).0));
+    // The largest sag along and across of every patch, the patches on
+    // every core. The largest is the same in any order.
+    let (along, across) = patches
+        .par_iter()
+        .map(|patch| {
+            let (mut along, mut across) = (0.0f32, 0.0f32);
+            for line in 0..=PROBES {
+                for step in 0..PROBES {
+                    let (from, to) = (at(step), at(step + 1));
+                    let middle = (from + to) * 0.5;
+                    let sag = |point: &dyn Fn(f32) -> Vec3| {
+                        point(middle).distance((point(from) + point(to)) * 0.5)
+                    };
+                    along = along.max(sag(&|u| patch.point(u, at(line)).0));
+                    across = across.max(sag(&|v| patch.point(at(line), v).0));
+                }
             }
-        }
-    }
+            (along, across)
+        })
+        .reduce(|| (0.0, 0.0), |a, b| (a.0.max(b.0), a.1.max(b.1)));
     // Where the surface bends both ways, the middle of a quad is off by
     // both, so each way gets half of it.
     let tolerance = (tolerance * 0.5).max(f32::EPSILON);
@@ -182,6 +190,41 @@ pub fn detail<S: Surface>(patches: &[S], tolerance: f32) -> (usize, usize) {
 
 /// How many steps [`detail`] looks at a patch in, both ways.
 pub const PROBES: usize = 8;
+
+/// One patch as a grid of `rings` by `sides` cells, its vertices numbered
+/// from `first` on.
+fn grid<S: Surface>(
+    patch: &S,
+    rings: usize,
+    sides: usize,
+    first: usize,
+) -> (Vec<Vec3>, Vec<Vec3>, Vec<Vec2>, Vec<u32>) {
+    let count = (rings + 1) * (sides + 1);
+    let mut positions = Vec::with_capacity(count);
+    let mut normals = Vec::with_capacity(count);
+    let mut uvs = Vec::with_capacity(count);
+    for ring in 0..=rings {
+        let u = ring as f32 / rings as f32;
+        for side in 0..=sides {
+            let v = side as f32 / sides as f32;
+            let (position, normal) = patch.point(u, v);
+            positions.push(position);
+            normals.push(normal);
+            uvs.push(patch.uv(u, v));
+        }
+    }
+    let mut indices = Vec::with_capacity(rings * sides * 6);
+    for ring in 0..rings {
+        for side in 0..sides {
+            let a = (first + ring * (sides + 1) + side) as u32;
+            let b = a + 1;
+            let c = a + sides as u32 + 1;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
+    }
+    (positions, normals, uvs, indices)
+}
 
 /// Every patch becomes a grid of its own. Patches which meet share their
 /// positions there but not their vertices, so an edge between two of
@@ -197,27 +240,22 @@ fn tessellate<S: Surface>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     for surface in inputs.groups(0) {
         let surface = &patches[surface];
         let (rings, sides) = detail(surface, tolerance);
-        for patch in surface {
-            let first = positions.len();
-            for ring in 0..=rings {
-                let u = ring as f32 / rings as f32;
-                for side in 0..=sides {
-                    let v = side as f32 / sides as f32;
-                    let (position, normal) = patch.point(u, v);
-                    positions.push(position);
-                    normals.push(normal);
-                    uvs.push(patch.uv(u, v));
-                }
-            }
-            for ring in 0..rings {
-                for side in 0..sides {
-                    let a = (first + ring * (sides + 1) + side) as u32;
-                    let b = a + 1;
-                    let c = a + sides as u32 + 1;
-                    let d = c + 1;
-                    indices.extend_from_slice(&[a, b, c, b, d, c]);
-                }
-            }
+        let per_patch = (rings + 1) * (sides + 1);
+        // Every patch has as many vertices, so each knows where its own
+        // start, and they are made on every core.
+        let grids: Vec<_> = surface
+            .par_iter()
+            .enumerate()
+            .map(|(index, patch)| {
+                let first = positions.len() + index * per_patch;
+                grid(patch, rings, sides, first)
+            })
+            .collect();
+        for (grid_positions, grid_normals, grid_uvs, grid_indices) in grids {
+            positions.extend(grid_positions);
+            normals.extend(grid_normals);
+            uvs.extend(grid_uvs);
+            indices.extend(grid_indices);
         }
     }
 

@@ -1,6 +1,8 @@
 //! The curve functionality as nodes of a graph.
 
 use bytemuck::{Pod, Zeroable};
+
+use crate::parallel::per_group;
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
     node::{
@@ -9,6 +11,8 @@ use oneiroi_core::{
     },
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
+
+use rayon::prelude::*;
 
 use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments, spans};
 
@@ -196,14 +200,11 @@ fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let knots = inputs.get::<f32>(1);
     let knot_groups = inputs.groups(1);
 
-    let mut segments = Vec::new();
-    let mut offsets = vec![0];
-    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
+    let (segments, offsets) = per_group(inputs.groups(0), |group, curve| {
         let points: Vec<_> = points[curve].iter().map(|p| Vec4::from_array(*p)).collect();
         let knots = curve_knots(points.len(), knots, &knot_groups, group);
-        segments.extend(extract_segments(&points, &knots));
-        offsets.push(segments.len() as u32);
-    }
+        extract_segments(&points, &knots)
+    });
     outputs.set(0, &segments);
     outputs.set_groups(0, &offsets);
 }
@@ -325,29 +326,27 @@ fn sample_curve(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let ts = inputs.get::<f32>(3);
     let per = per_curve(inputs);
 
-    let mut frames = Vec::new();
-    let mut offsets = vec![0];
-    for curve in inputs.groups(0) {
+    let (frames, offsets) = per_group(inputs.groups(0), |_, curve| {
         let curve = &segments[curve];
-        if let (Some(first), Some(last)) = (curve.first(), curve.last()) {
-            let start = first.cumulative_length() - first.length();
-            let length = last.cumulative_length() - start;
-            let at = |distance: f32| -> EvaluatedFrame { frame_at(curve, distance).into() };
-            if !ts.is_empty() {
-                frames.extend(ts.iter().map(|t| at(t.clamp(0.0, 1.0) * length + start)));
-            } else if spacing > 0.0 {
-                let count = ((length / spacing) as usize + 1).min(MAX_SPACED);
-                frames.extend((0..count).map(|i| at(i as f32 * spacing + start)));
-            } else {
-                let fraction = |i: usize| match per {
-                    0 | 1 => 0.0,
-                    _ => i as f32 / (per - 1) as f32,
-                };
-                frames.extend((0..per).map(|i| at(fraction(i) * length + start)));
-            }
+        let (Some(first), Some(last)) = (curve.first(), curve.last()) else {
+            return Vec::new();
+        };
+        let start = first.cumulative_length() - first.length();
+        let length = last.cumulative_length() - start;
+        let at = |distance: f32| -> EvaluatedFrame { frame_at(curve, distance).into() };
+        if !ts.is_empty() {
+            ts.iter().map(|t| at(t.clamp(0.0, 1.0) * length + start)).collect()
+        } else if spacing > 0.0 {
+            let count = ((length / spacing) as usize + 1).min(MAX_SPACED);
+            (0..count).map(|i| at(i as f32 * spacing + start)).collect()
+        } else {
+            let fraction = |i: usize| match per {
+                0 | 1 => 0.0,
+                _ => i as f32 / (per - 1) as f32,
+            };
+            (0..per).map(|i| at(fraction(i) * length + start)).collect()
         }
-        offsets.push(frames.len() as u32);
-    }
+    });
     outputs.set(0, &frames);
     outputs.set_groups(0, &offsets);
 }
@@ -421,7 +420,7 @@ fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let offset = inputs.value::<Vec3>(1);
     let moved: Vec<_> = inputs
         .get::<CubicNurbsSegmentCache>(0)
-        .iter()
+        .par_iter()
         .map(|segment| segment.translated(offset))
         .collect();
     outputs.set(0, &moved);

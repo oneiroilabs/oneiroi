@@ -12,7 +12,7 @@ pub const PROFILE: Trait = Trait { name: "profile" };
 /// element for an analytic shape, many for a curve made of segments.
 ///
 /// It has to run counter-clockwise for the swept surface to face outwards.
-pub trait Profile: DataType {
+pub trait Profile: DataType + Sync {
     /// What a piece of the surface it sweeps out is.
     type Patch: Surface;
 

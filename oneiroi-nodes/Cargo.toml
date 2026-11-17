@@ -12,6 +12,7 @@ edition.workspace = true
 glam.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 serde.workspace = true
+rayon.workspace = true
 
 oneiroi-core.workspace = true
 

@@ -2,6 +2,7 @@ use oneiroi_core::node::NodeRegistry;
 
 pub mod curve;
 mod generic;
+mod parallel;
 pub mod primitive;
 pub mod property;
 pub mod surface;

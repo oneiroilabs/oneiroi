@@ -10,6 +10,7 @@ members = [
     "oneiroi-editor",
     "oneiroi-nodes",
     "oneiroi-graph",
+    "oneiroi-bench",
     "oneiroi-core-macro",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
@@ -49,6 +50,9 @@ serde = { version = "1", features = ["derive"] }
 mlua = { version = "0.12", features = ["luau"] }
 fixedbitset = { version = "0" }
 petgraph = { version = "0.8", features = ["serde-1"] }
+rayon = { version = "1.11" }
+serde_json = { version = "1" }
+insta = { version = "1", features = ["yaml"] }
 
 
 [patch.crates-io]

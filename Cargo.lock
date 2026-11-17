@@ -5867,6 +5867,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneiroi-bench"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.32.1",
+ "insta",
+ "oneiroi-core",
+ "oneiroi-nodes",
+ "oneiroi-wgpu",
+ "pollster",
+ "rayon",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
 name = "oneiroi-bevy"
 version = "0.0.0"
 dependencies = [
@@ -5949,6 +5966,7 @@ dependencies = [
  "glam 0.32.1",
  "oneiroi-core",
  "oneiroi-core-macro",
+ "rayon",
  "serde",
 ]
 
