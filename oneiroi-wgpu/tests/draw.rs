@@ -71,17 +71,27 @@ fn square(b: &mut ProgramBuilder) -> SlotId {
     b.node(&NURBS, &[points, knots]).unwrap()[0]
 }
 
+const BENT: [[f32; 4]; 5] = [
+    [-2., -1., 0., 1.],
+    [-1., 1., 0., 1.],
+    [0., -1., 1., 1.],
+    [1., 1., 0., 1.],
+    [2., -1., 0., 1.],
+];
+
 /// A profile swept along a bent curve, as a surface and as its mesh.
 fn program(registry: &NodeRegistry, circle: bool) -> oneiroi_core::program::Program {
+    program_along(registry, circle, &BENT)
+}
+
+fn program_along(
+    registry: &NodeRegistry,
+    circle: bool,
+    spine: &[[f32; 4]],
+) -> oneiroi_core::program::Program {
     let mut b = ProgramBuilder::new("surface");
-    let points = b.constant::<[f32; 4]>(&[
-        [-2., -1., 0., 1.],
-        [-1., 1., 0., 1.],
-        [0., -1., 1., 1.],
-        [1., 1., 0., 1.],
-        [2., -1., 0., 1.],
-    ]);
-    let knots = b.constant(&clamped_uniform_knots(5));
+    let points = b.constant::<[f32; 4]>(spine);
+    let knots = b.constant(&clamped_uniform_knots(spine.len()));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let profile = if circle {
         let radius = b.constant::<f32>(&[0.3]);
@@ -203,10 +213,14 @@ struct Scene {
 }
 
 fn scene(circle: bool) -> Option<Scene> {
+    scene_along(circle, &BENT)
+}
+
+fn scene_along(circle: bool, spine: &[[f32; 4]]) -> Option<Scene> {
     let (device, queue) = device()?;
     let registry = registry();
     let mut engine = Engine::new(GpuExecutor::new(device.clone(), queue.clone()));
-    let id = engine.add_program(program(&registry, circle));
+    let id = engine.add_program(program_along(&registry, circle, spine));
     let mut instance = engine.instantiate(id);
     engine.evaluate([&mut instance]);
 
@@ -243,6 +257,7 @@ impl Scene {
                 max_level: 6,
                 viewport: (SIZE as f32, SIZE as f32),
                 debug,
+                count: true,
             }),
             ..self.view(1, 1)
         }
@@ -584,5 +599,116 @@ fn what_is_out_of_view_is_not_drawn() {
         let lit = covered(&reference);
         assert!(lit > 500);
         assert!(different(&partly, &reference) * 40 < lit, "{name}");
+    }
+}
+
+/// Prepares view `index` of `stage` with what the scene shows and counts
+/// its triangles once they arrived.
+fn counted(scene: &mut Scene, stage: &mut DrawStage, pixels: f32) -> u32 {
+    let view = scene.auto(pixels, false);
+    scene.drawn(stage, view);
+    scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    stage.triangles(&scene.device, 0).expect("they were counted")
+}
+
+#[test]
+fn triangles_are_counted() {
+    for circle in [true, false] {
+        let Some(mut scene) = scene(circle) else {
+            return;
+        };
+        for (name, mut stage) in stages(&scene) {
+            // As coarse as it gets: one step along each of the 2 segments,
+            // and around either a circle of 4 steps or 4 straight edges.
+            assert_eq!(counted(&mut scene, &mut stage, 4096.0), 16, "{name}");
+
+            let fine = counted(&mut scene, &mut stage, 4.0);
+            let coarse = counted(&mut scene, &mut stage, 16.0);
+            assert!(fine > 4 * coarse / 2 && coarse > 16, "{name}: {fine} {coarse}");
+
+            // What is out of view has none.
+            let camera = scene.camera;
+            scene.camera.frame(Vec3::new(0.0, 60.0, 0.0), 7.0);
+            assert_eq!(counted(&mut scene, &mut stage, 4.0), 0, "{name}");
+            scene.camera = camera;
+        }
+    }
+}
+
+#[test]
+fn several_views_draw_the_same_patches() {
+    let Some(mut scene) = scene(true) else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        // Every view alone, as a reference.
+        let front = scene.camera;
+        let front_view = scene.auto(6.0, false);
+        let alone_front = scene.drawn(&mut stage, front_view);
+        scene.camera.yaw_pitch_delta(1.4, 0.6);
+        let side_view = scene.auto(6.0, false);
+        let alone_side = scene.drawn(&mut stage, side_view);
+        assert!(different(&alone_front, &alone_side) > 200, "{name}");
+
+        // Both prepared at once from the same patches, and drawn after.
+        let key = scene.engine.output_key(&scene.instance, "surface").unwrap();
+        let program = scene.engine.programs().get(scene.instance.program());
+        let drawable = *scene.registry.drawable(&program.slot(program.outputs[0].slot).ty).unwrap();
+        let ran = scene.engine.executor().stats();
+        let (store, executor) = scene.engine.parts_mut();
+        executor.sync(store);
+        let handle = store.get(key).unwrap();
+        let page = executor.page(handle.page).unwrap();
+        for (index, view) in [front_view, side_view].iter().enumerate() {
+            stage.prepare_view(index, &scene.device, &scene.queue, (SIZE, SIZE), &drawable, page, handle, view);
+        }
+        let both: Vec<_> = (0..2)
+            .map(|index| {
+                picture(&scene.device, &scene.queue, |encoder, target| {
+                    stage.render_view(index, encoder, target, None)
+                })
+            })
+            .collect();
+        assert_eq!(different(&both[0], &alone_front), 0, "{name}");
+        assert_eq!(different(&both[1], &alone_side), 0, "{name}");
+        // Nothing was made again for the second view.
+        assert_eq!(scene.engine.executor().stats(), ran);
+        scene.camera = front;
+    }
+}
+
+#[test]
+fn many_patches_are_drawn_alike_both_ways() {
+    // A long winding curve: 37 segments, more than two task groups' worth.
+    let spine: Vec<_> = (0..40)
+        .map(|i| {
+            let t = i as f32 * 0.35;
+            [t.cos() * 2.0, t * 0.3 - 2.0, t.sin() * 2.0, 1.0]
+        })
+        .collect();
+    for circle in [true, false] {
+        let Some(mut scene) = scene_along(circle, &spine) else {
+            return;
+        };
+        let mut stages = stages(&scene);
+        if stages.len() < 2 {
+            return;
+        }
+        // Close by, where some patches are cut into blocks, and far away,
+        // where many small ones share a mesh shader.
+        for (distance, pixels) in [(4.0, 4.0), (9.0, 8.0), (40.0, 6.0)] {
+            scene.camera.frame(Vec3::ZERO, distance);
+            let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, false));
+            let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, false));
+            let lit = covered(&pulled);
+            assert!(lit > 100, "{lit}");
+            let off = different(&pulled, &meshed);
+            assert!(off * 50 < lit, "{off} of {lit} pixels differ at {distance}");
+
+            let a = counted(&mut scene, &mut stages[0].1, pixels);
+            let b = counted(&mut scene, &mut stages[1].1, pixels);
+            assert_eq!(a, b);
+        }
+        assert!(stages[1].1.errors().is_empty());
     }
 }
