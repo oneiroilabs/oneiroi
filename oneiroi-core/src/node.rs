@@ -265,6 +265,11 @@ pub struct GpuOutput {
     /// How many elements the output will have. This is asked before the
     /// kernel runs, to make room for them.
     pub len: fn(&Inputs<'_>) -> usize,
+    /// The words of the output, made on the CPU instead of by `entry`, from
+    /// what `len` may read as well. For small outputs which are known
+    /// before the kernel runs, like where the groups of a bigger one start:
+    /// the CPU then has them without asking the device.
+    pub words: Option<fn(&Inputs<'_>) -> Vec<u32>>,
 }
 
 pub struct NodeDef {

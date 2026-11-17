@@ -498,21 +498,30 @@ impl GpuExecutor {
             .chain(node.hidden_outputs().map(|_| 1))
             .collect();
 
-        // Make room for the results where they belong, then bring the
-        // device up to date with what the CPU wrote and the new pages.
-        let targets: Vec<Vec<Handle>> = batch
+        // Make room for the results where they belong, or write the ones
+        // the CPU knows already, then bring the device up to date with what
+        // the CPU wrote and the new pages.
+        let kernel = self.pipelines[node.id].as_ref().unwrap().kernel;
+        let targets: Vec<Vec<Option<Handle>>> = batch
             .iter()
             .map(|call| {
                 (0..words.len())
-                    .map(|output| {
-                        let len = (call.elements[output] * words[output]) as u32;
-                        store.reserve(call.item.outputs[output], len)
+                    .map(|output| match kernel.outputs[output].words {
+                        Some(make) => {
+                            let values = make(&Inputs::new(store, node, &call.inputs));
+                            store.insert(call.item.outputs[output], &values);
+                            None
+                        }
+                        None => {
+                            let len = (call.elements[output] * words[output]) as u32;
+                            Some(store.reserve(call.item.outputs[output], len))
+                        }
                     })
                     .collect()
             })
             .collect();
         self.upload(store);
-        let reachable = targets.iter().flatten().all(|target| self.reachable(target));
+        let reachable = targets.iter().flatten().flatten().all(|target| self.reachable(target));
         if !reachable {
             for call in batch {
                 self.run_on_cpu(store, call.item);
@@ -521,12 +530,15 @@ impl GpuExecutor {
         }
 
         for output in 0..words.len() {
+            if kernel.outputs[output].words.is_some() {
+                continue;
+            }
             let mut calls = Vec::new();
             for (call, targets) in batch.iter().zip(&targets) {
                 for input in &call.inputs {
                     calls.extend([input.page, input.offset, input.len]);
                 }
-                let target = targets[output];
+                let target = targets[output].unwrap();
                 calls.extend([target.page, target.offset, call.elements[output] as u32]);
             }
             let most = batch.iter().map(|call| call.elements[output]).max().unwrap_or(0);

@@ -79,7 +79,9 @@ fn assert_close(gpu: &[f32], cpu: &[f32]) {
         .zip(cpu)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0, f32::max);
-    assert!(worst < 1e-4, "the backends are {worst} apart");
+    // Frames are carried along the curve from segment to segment, so on a
+    // long one both backends drift apart a little.
+    assert!(worst < 1e-3, "the backends are {worst} apart");
 }
 
 #[test]
@@ -110,26 +112,26 @@ fn both_backends_compute_the_same_frames() {
 }
 
 #[test]
-fn only_nodes_with_a_kernel_run_on_the_gpu() {
+fn nodes_run_once_on_the_gpu() {
     let Some(mut gpu) = gpu() else {
         return;
     };
     let program = program(&mut gpu, 9);
     let mut instance = gpu.instantiate(program);
 
-    // The curve is built on the CPU, its frames are computed on the GPU:
-    // a pass for them and one for where the frames of each curve start.
+    // The curve and its frames are made on the GPU, a pass each. Where
+    // the segments and the frames of each curve start the CPU knows
+    // without a pass.
     frames(&mut gpu, &mut instance);
-    assert_eq!(counts(gpu.executor().stats()), (1, 1, 2, 1));
+    assert_eq!(counts(gpu.executor().stats()), (2, 0, 2, 1));
 
-    // What is in the store already is not computed again, wherever it
-    // came from.
+    // What is in the store already is not computed again.
     frames(&mut gpu, &mut instance);
-    assert_eq!(counts(gpu.executor().stats()), (1, 1, 2, 1));
+    assert_eq!(counts(gpu.executor().stats()), (2, 0, 2, 1));
 
     gpu.set_param(&mut instance, "samples", &[3u32]).unwrap();
     assert_eq!(frames(&mut gpu, &mut instance).len(), 3 * 16);
-    assert_eq!(counts(gpu.executor().stats()), (2, 1, 4, 2));
+    assert_eq!(counts(gpu.executor().stats()), (3, 0, 3, 2));
 }
 
 #[test]
@@ -151,10 +153,9 @@ fn calls_of_one_node_share_a_pass() {
         on_cpu.push(b);
     }
 
-    // Five curves on the CPU, then all of their frames in a single pass,
-    // and one for where they start.
+    // Five curves in a single pass, then all of their frames in another.
     assert_eq!(gpu.evaluate(&mut on_gpu), 10);
-    assert_eq!(counts(gpu.executor().stats()), (5, 5, 2, 0));
+    assert_eq!(counts(gpu.executor().stats()), (10, 0, 2, 0));
 
     cpu.evaluate(&mut on_cpu);
     for (a, b) in on_gpu.iter().zip(&on_cpu) {
@@ -255,6 +256,7 @@ mod staying_on_the_gpu {
             outputs: &[GpuOutput {
                 entry: "positions",
                 len: |inputs| inputs.len(0),
+                words: None,
             }],
             requires: Caps::NONE,
             reads: &[],
@@ -316,9 +318,8 @@ mod staying_on_the_gpu {
         let mut instance = gpu.instantiate(program);
         gpu.evaluate([&mut instance]);
 
-        // Two kernels ran and nothing came back. The frames take a pass
-        // for themselves and one for where those of each curve start.
-        assert_eq!(counts(gpu.executor().stats()), (2, 1, 3, 0));
+        // Three kernels ran, a pass each, and nothing came back.
+        assert_eq!(counts(gpu.executor().stats()), (3, 0, 3, 0));
         assert!(gpu.read::<EvaluatedFrame>(&instance, "frames").is_none());
         assert!(gpu.read::<Vec3>(&instance, "positions").is_none());
 
@@ -344,7 +345,7 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // The frames were brought back for the node which has no kernel.
-        assert_eq!(counts(gpu.executor().stats()), (1, 2, 2, 1));
+        assert_eq!(counts(gpu.executor().stats()), (2, 1, 2, 1));
         close(
             gpu.read::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
@@ -378,14 +379,14 @@ mod staying_on_the_gpu {
         gpu.evaluate([&mut instance]);
 
         // The frames never came over: those of each curve were read where
-        // they are. Only where each curve starts did, to know how often to
-        // run.
-        assert_eq!(gpu.executor().stats().downloads, 1);
+        // they are. Where each curve starts, to know how often to run, the
+        // CPU knew already.
+        assert_eq!(gpu.executor().stats().downloads, 0);
         close(
             gpu.fetch::<Vec3>(&instance, "positions").unwrap(),
             &reference(None).0,
         );
-        assert_eq!(gpu.executor().stats().downloads, 2);
+        assert_eq!(gpu.executor().stats().downloads, 1);
     }
 
     #[test]
@@ -480,13 +481,57 @@ mod for_each {
         assert_eq!(gpu.groups(&a, "each"), Some(&[0, 16, 32][..]));
         assert_close(&each, &frames(&mut gpu, &a, "whole"));
 
-        // The curves on the CPU, then the frames of both curves in a single
-        // pass and gathered on the device. Only what was asked for came
-        // back.
+        // Everything on the device: the curves, the frames of both in a
+        // single pass, gathered, and the frames of both at once. Only what
+        // was asked for came back.
         let stats = gpu.executor().stats();
-        assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 3, 2), "{stats:?}");
-        // The frames of the curves and where they start, putting them
-        // together, and the frames of both at once and where they start.
-        assert_eq!(stats.dispatches, 5, "{stats:?}");
+        assert_eq!((stats.cpu, stats.gpu, stats.downloads), (0, 4, 2), "{stats:?}");
+        assert_eq!(stats.dispatches, 4, "{stats:?}");
+    }
+}
+
+mod long_curves {
+    use oneiroi_nodes::curve::nurbs::CubicNurbsSegmentCache;
+
+    use super::*;
+
+    fn segments<E: Executor>(engine: &mut Engine<E>, count: usize) -> Vec<f32> {
+        let mut b = ProgramBuilder::new("long curve");
+        let points = b.param("points", &points(count));
+        let knots = b.constant::<f32>(&[]);
+        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        b.output("segments", segments);
+        let id = engine.add_program(b.finish());
+        let mut instance = engine.instantiate(id);
+        engine.evaluate([&mut instance]);
+        let segments = engine.fetch::<CubicNurbsSegmentCache>(&instance, "segments").unwrap();
+        bytemuck::cast_slice(segments).to_vec()
+    }
+
+    #[test]
+    fn long_curves_drift_apart_only_a_little() {
+        let Some(mut gpu) = gpu() else {
+            return;
+        };
+        let mut cpu = Engine::default();
+
+        // Every segment carries the frame on from the one before, and both
+        // backends round a little differently on the way. The shape of the
+        // curve is the same, the stored normals move apart slowly.
+        let (a, b) = (segments(&mut gpu, 250), segments(&mut cpu, 250));
+        assert_eq!(gpu.executor().stats().gpu, 1);
+        assert_eq!(a.len(), b.len());
+        let words = size_of::<CubicNurbsSegmentCache>() / 4;
+        for (a, b) in a.chunks_exact(words).zip(b.chunks_exact(words)) {
+            let shape = a[..18].iter().zip(&b[..18]);
+            assert!(shape.clone().all(|(a, b)| (a - b).abs() <= 1e-4 * (1.0 + b.abs())));
+            assert!(a[18..22].iter().zip(&b[18..22]).all(|(a, b)| (a - b).abs() < 1e-3));
+        }
+
+        // Longer ones are left to the CPU, where walking along them once
+        // is cheaper than once for every segment.
+        let (a, b) = (segments(&mut gpu, 400), segments(&mut cpu, 400));
+        assert_eq!(gpu.executor().stats().cpu, 1);
+        assert_eq!(a, b);
     }
 }

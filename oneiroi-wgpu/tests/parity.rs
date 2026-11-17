@@ -73,18 +73,28 @@ fn set<E: Executor>(engine: &Engine<E>, instance: &mut Instance, node: &NodeDef,
     assert_eq!(given, example.len(), "`{}` has an example with too many inputs", node.id);
 }
 
-fn close(node: &NodeDef, name: &str, scalar: Scalar, gpu: &[u32], cpu: &[u32]) {
-    assert_eq!(gpu.len(), cpu.len(), "`{}`, `{name}`: the lengths differ", node.id);
+fn close(node: &NodeDef, example: usize, name: &str, scalar: Scalar, gpu: &[u32], cpu: &[u32]) {
+    let at = format!("`{}`, example {example}, `{name}`", node.id);
+    assert_eq!(gpu.len(), cpu.len(), "{at}: the lengths differ");
+    // The worst word, by how far apart both are relative to the value.
+    let mut worst = (0.0f32, 0);
     for (index, (a, b)) in gpu.iter().zip(cpu).enumerate() {
-        let same = match scalar {
+        let off = match scalar {
             Scalar::F32 => {
                 let (a, b) = (f32::from_bits(*a), f32::from_bits(*b));
-                (a - b).abs() <= 1e-4 * (1.0 + b.abs()) || (a.is_nan() && b.is_nan())
+                match a.is_nan() && b.is_nan() {
+                    true => 0.0,
+                    false => (a - b).abs() / (1.0 + b.abs()),
+                }
             }
-            _ => a == b,
+            _ => f32::from(a != b) * f32::INFINITY,
         };
-        assert!(same, "`{}`, `{name}`: word {index} is {a:#x} on the GPU and {b:#x} on the CPU", node.id);
+        if !(off <= worst.0) {
+            worst = (off, index);
+        }
     }
+    eprintln!("{at}: {} words, worst {:e} at word {}", gpu.len(), worst.0, worst.1);
+    assert!(worst.0 <= 1e-4, "{at}: word {} is {:e} off", worst.1, worst.0);
 }
 
 #[test]
@@ -105,7 +115,7 @@ fn every_kernel_computes_what_the_cpu_computes() {
         let mut cpu = Engine::default();
         let before = gpu.executor().stats().gpu;
         let (on_gpu, on_cpu) = (program(&mut gpu, node), program(&mut cpu, node));
-        for example in kernel.examples {
+        for (index, example) in kernel.examples.iter().enumerate() {
             let example = example();
             let (mut a, mut b) = (gpu.instantiate(on_gpu), cpu.instantiate(on_cpu));
             set(&gpu, &mut a, node, &example);
@@ -117,7 +127,7 @@ fn every_kernel_computes_what_the_cpu_computes() {
             for port in node.outputs {
                 let words = gpu.fetch::<u32>(&a, port.name).unwrap().to_vec();
                 let expected = cpu.fetch::<u32>(&b, port.name).unwrap();
-                close(node, port.name, port.ty.scalar, &words, expected);
+                close(node, index, port.name, port.ty.scalar, &words, expected);
                 let groups = gpu.fetch_groups(&a, port.name).map(<[u32]>::to_vec);
                 assert_eq!(groups.as_deref(), cpu.fetch_groups(&b, port.name), "`{}`, `{}`: the groups differ", node.id, port.name);
             }

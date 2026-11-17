@@ -10,7 +10,7 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments};
+use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments, spans};
 
 /// A [`MovingFrame`] in the layout of the WGSL struct with the same name.
 #[repr(C)]
@@ -83,8 +83,113 @@ pub static NURBS: NodeDef = NodeDef {
     ],
     outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped()],
     cpu: nurbs,
-    gpu: &[],
+    gpu: &[GpuKernel {
+        wgsl: concat!(include_str!("curve.wgsl"), include_str!("nurbs.wgsl")),
+        outputs: &[
+            GpuOutput {
+                entry: "nurbs_segment",
+                len: |inputs| segment_counts(inputs).sum(),
+                words: None,
+            },
+            GpuOutput {
+                entry: "nurbs_offset",
+                len: |inputs| inputs.group_count(0) + 1,
+                // Known from the knots, so the CPU has them right away.
+                words: Some(|inputs| offsets(segment_counts(inputs))),
+            },
+        ],
+        requires: Caps::NONE,
+        // The knots, and where the points and the knots of each curve start.
+        reads: &[1, 2, 3],
+        // Each segment walks along its curve from the start, which only
+        // pays off for curves of not too many segments.
+        accepts: Some(|inputs| {
+            inputs.group_count(0) <= MAX_GPU_CURVES
+                && (inputs.len(1) == 0 || !inputs.groups(1).is_empty())
+                && segment_counts(inputs).all(|count| count <= MAX_GPU_SEGMENTS)
+        }),
+        examples: &[
+            || nurbs_example(&[9, 5], &[]),
+            || nurbs_example(&[7], &[&[0., 0., 0., 0., 0.3, 0.3, 0.3, 0.6, 1., 1., 1.]]),
+            || {
+                let uniform: Vec<f32> = (0..10).map(|k| k as f32 / 9.0).collect();
+                nurbs_example(&[6, 6], &[&clamped_uniform_knots(6), &uniform])
+            },
+            // No curve of 3 points, then knots which do not fit and ones
+            // which do.
+            || nurbs_example(&[3, 6, 5], &[&clamped_uniform_knots(3), &[0.0; 4], &clamped_uniform_knots(5)]),
+            // Longer curves drift apart a bit more, see the tests of the
+            // executor.
+            || nurbs_example(&[40], &[]),
+            || {
+                let line: Vec<[f32; 4]> = (0..6).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
+                vec![bytemuck::cast_slice(&line).to_vec(), Vec::new(), Vec::new(), Vec::new()]
+            },
+        ],
+    }],
 };
+
+/// Where each group starts, of groups this long, and where the last ends.
+fn offsets(lengths: impl Iterator<Item = usize>) -> Vec<u32> {
+    let mut offsets = vec![0];
+    for len in lengths {
+        offsets.push(offsets.last().unwrap() + len as u32);
+    }
+    offsets
+}
+
+/// No more curves than these at once on the GPU.
+const MAX_GPU_CURVES: usize = 1024;
+/// No longer curves than these on the GPU.
+const MAX_GPU_SEGMENTS: usize = 256;
+
+/// The inputs of [`NURBS`] as words: curves with as many `points` each,
+/// with a group of `knots` each or none at all.
+fn nurbs_example(points: &[usize], knots: &[&[f32]]) -> Vec<Vec<u32>> {
+    let (points, offsets) = example_points(points);
+    let mut knot_offsets = vec![0];
+    let mut all = Vec::new();
+    for group in knots {
+        all.extend_from_slice(group);
+        knot_offsets.push(all.len() as u32);
+    }
+    if knots.is_empty() {
+        knot_offsets.clear();
+    }
+    vec![
+        bytemuck::cast_slice(&points).to_vec(),
+        bytemuck::cast_slice(&all).to_vec(),
+        offsets,
+        knot_offsets,
+    ]
+}
+
+/// The knots of the curve of group `group` with `points` points.
+fn curve_knots<'a>(
+    points: usize,
+    knots: &'a [f32],
+    knot_groups: &[std::ops::Range<usize>],
+    group: usize,
+) -> std::borrow::Cow<'a, [f32]> {
+    match knots.is_empty() {
+        true => clamped_uniform_knots(points).into(),
+        false => knots[knot_groups[group.min(knot_groups.len() - 1)].clone()].into(),
+    }
+}
+
+/// How many segments each curve gets, without making them.
+fn segment_counts<'a>(inputs: &'a Inputs<'_>) -> impl Iterator<Item = usize> + 'a {
+    let knots = inputs.get::<f32>(1);
+    let knot_groups = inputs.groups(1);
+    inputs.groups(0).into_iter().enumerate().map(move |(group, curve)| {
+        let points = curve.len();
+        let knots = curve_knots(points, knots, &knot_groups, group);
+        match points >= 4 && knots.len() == points + 4 {
+            true => spans(points, &knots).count(),
+            false => 0,
+        }
+    })
+}
 
 fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let points = inputs.get::<[f32; 4]>(0);
@@ -95,10 +200,7 @@ fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let mut offsets = vec![0];
     for (group, curve) in inputs.groups(0).into_iter().enumerate() {
         let points: Vec<_> = points[curve].iter().map(|p| Vec4::from_array(*p)).collect();
-        let knots = match knots.is_empty() {
-            true => clamped_uniform_knots(points.len()),
-            false => knots[knot_groups[group.min(knot_groups.len() - 1)].clone()].to_vec(),
-        };
+        let knots = curve_knots(points.len(), knots, &knot_groups, group);
         segments.extend(extract_segments(&points, &knots));
         offsets.push(segments.len() as u32);
     }
@@ -134,10 +236,14 @@ pub static SAMPLE_CURVE: NodeDef = NodeDef {
             GpuOutput {
                 entry: "sample_curve_frames",
                 len: |inputs| inputs.group_count(0) * per_curve(inputs),
+                words: None,
             },
             GpuOutput {
                 entry: "sample_curve_offsets",
                 len: |inputs| inputs.group_count(0) + 1,
+                words: Some(|inputs| {
+                    offsets((0..inputs.group_count(0)).map(|_| per_curve(inputs)))
+                }),
             },
         ],
         requires: Caps::NONE,
@@ -289,6 +395,7 @@ fn translate(index: u32) -> CubicNurbsSegmentCache {
         outputs: &[GpuOutput {
             entry: "translate",
             len: |inputs| inputs.len(0),
+            words: None,
         }],
         requires: Caps::NONE,
         reads: &[],
@@ -501,7 +608,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 5);
+        assert_eq!(checked, 6);
 
         // And so does everything which says it can be drawn as it is: the
         // two kinds of surface, the curve and the circle.

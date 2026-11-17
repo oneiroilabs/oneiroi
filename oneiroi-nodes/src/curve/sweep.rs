@@ -164,10 +164,12 @@ impl<P: Profile> Ports<P> {
             GpuOutput {
                 entry: "sweep_patch",
                 len: |inputs| P::patches(inputs.len(0), inputs.len(1)),
+                words: None,
             },
             GpuOutput {
                 entry: "sweep_offset",
                 len: |inputs| inputs.group_count(0) + 1,
+                words: None,
             },
         ],
         requires: Caps::NONE,

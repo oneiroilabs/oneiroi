@@ -274,60 +274,50 @@ pub fn extract_segments(points: &[Vec4], knots: &[f32]) -> Vec<CubicNurbsSegment
     segments
 }
 
+/// The knot spans of a curve of `points` with these knots which are no
+/// shorter than nothing: one segment of the curve each. A span is known by
+/// the knot it starts at.
+pub(crate) fn spans(points: usize, knots: &[f32]) -> impl Iterator<Item = usize> + '_ {
+    (3..points).filter(move |span| knots[*span] < knots[span + 1])
+}
+
+/// The Bézier form of every segment, each made from the few points and
+/// knots around its span alone. The GPU makes them the same way, one
+/// segment at a time.
 fn bezier_extraction(points: &[Vec4], knots: &[f32]) -> Vec<CubicNurbsSegmentCache> {
-    let p = 3;
-    let mut w_knots = knots.to_vec();
-    let mut w_points = points.to_vec();
+    spans(points.len(), knots)
+        .map(|span| span_segment(points, knots, span))
+        .collect()
+}
 
-    let mut i = w_knots.len() - p - 2;
-    while i > p {
-        let knot_val = w_knots[i];
-        let mut count = 0;
-        while count <= i && w_knots[i - count] == knot_val {
-            count += 1;
-        }
-        let start_idx = i + 1 - count;
-        let num_insertions = p.saturating_sub(count);
-
-        for _ in 0..num_insertions {
-            let k = start_idx;
-            w_knots.insert(k, knot_val);
-
-            let mut new_points = Vec::with_capacity(w_points.len() + 1);
-            new_points.extend_from_slice(&w_points[..k - p]);
-
-            for j in (k - p)..k {
-                let alpha = (knot_val - w_knots[j]) / (w_knots[j + p + 1] - w_knots[j]);
-                let new_pt = w_points[j - 1].lerp(w_points[j], alpha);
-                new_points.push(new_pt);
-            }
-
-            new_points.extend_from_slice(&w_points[k - 1..]);
-            w_points = new_points;
-        }
-        i = i.saturating_sub(count);
-    }
-
+/// The segment of the span which starts at knot `span`.
+pub(crate) fn span_segment(points: &[Vec4], knots: &[f32], span: usize) -> CubicNurbsSegmentCache {
+    let (a, b) = (knots[span], knots[span + 1]);
+    let bezier = [[a, a, a], [a, a, b], [a, b, b], [b, b, b]].map(|at| blossom(points, knots, span, at));
     let bezier_basis = Mat4::from_cols(
         Vec4::new(-1.0, 3.0, -3.0, 1.0),
         Vec4::new(3.0, -6.0, 3.0, 0.0),
         Vec4::new(-3.0, 3.0, 0.0, 0.0),
         Vec4::new(1.0, 0.0, 0.0, 0.0),
     );
+    let points = Mat4::from_cols(bezier[0], bezier[1], bezier[2], bezier[3]);
+    CubicNurbsSegmentCache::from_basis(points * bezier_basis)
+}
 
-    let num_segments = (w_points.len() - 1) / p;
-    (0..num_segments)
-        .map(|s| {
-            let offset = s * p;
-            let p_matrix = Mat4::from_cols(
-                w_points[offset],
-                w_points[offset + 1],
-                w_points[offset + 2],
-                w_points[offset + 3],
-            );
-            CubicNurbsSegmentCache::from_basis(p_matrix * bezier_basis)
-        })
-        .collect()
+/// The blossom of the span at the three parameters `at`: de Boor's
+/// algorithm with another parameter on every level. With the ends of the
+/// span as parameters it gives the Bézier points of the segment.
+fn blossom(points: &[Vec4], knots: &[f32], span: usize, at: [f32; 3]) -> Vec4 {
+    let mut d = [points[span - 3], points[span - 2], points[span - 1], points[span]];
+    for level in 1..=3 {
+        for j in (level..=3).rev() {
+            let i = span - 3 + j;
+            let width = knots[i + 4 - level] - knots[i];
+            let alpha = if width > 0.0 { (at[level - 1] - knots[i]) / width } else { 0.0 };
+            d[j] = d[j - 1] + (d[j] - d[j - 1]) * alpha;
+        }
+    }
+    d[3]
 }
 
 fn compute_lengths(segments: &mut [CubicNurbsSegmentCache]) {

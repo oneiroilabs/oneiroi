@@ -1091,6 +1091,7 @@ mod tests {
             outputs: &[GpuOutput {
                 entry: "grow",
                 len: |inputs| inputs.len(0),
+                words: None,
             }],
             requires: Caps::NONE,
             reads: &[],
@@ -1171,6 +1172,7 @@ mod tests {
             outputs: &[GpuOutput {
                 entry: "swap",
                 len: |inputs| inputs.len(0),
+                words: None,
             }],
             requires: Caps::NONE,
             reads: &[],
@@ -1249,10 +1251,12 @@ mod tests {
                 GpuOutput {
                     entry: "length_of",
                     len: |_| 0,
+                    words: None,
                 },
                 GpuOutput {
                     entry: "one_each",
                     len: |_| 0,
+                    words: None,
                 },
             ],
             requires: Caps::NONE,

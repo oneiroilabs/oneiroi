@@ -139,6 +139,7 @@ pub static CIRCLE: NodeDef = NodeDef {
         outputs: &[GpuOutput {
             entry: "circle",
             len: |inputs| inputs.len(0),
+            words: None,
         }],
         requires: Caps::NONE,
         reads: &[],
