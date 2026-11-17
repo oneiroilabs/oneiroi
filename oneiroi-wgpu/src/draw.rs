@@ -298,11 +298,14 @@ impl DrawStage {
         });
 
         // naga zeroes workgroup memory with an index of the invocation of
-        // its own. A mesh shader then has two of them in SPIR-V, which is
-        // invalid and makes some drivers lose the device. The shaders write
-        // all of it before they read it anyway.
+        // its own. In SPIR-V a mesh shader then has two of them, which is
+        // invalid and makes some drivers lose the device. In HLSL it is the
+        // other way round: without the zeroing the task shader uses the
+        // index without declaring it. The shaders write all of the memory
+        // before they read it, so it only has to be right for the backend.
         let unzeroed = wgpu::PipelineCompilationOptions {
-            zero_initialize_workgroup_memory: false,
+            zero_initialize_workgroup_memory: device.adapter_info().backend
+                != wgpu::Backend::Vulkan,
             ..Default::default()
         };
         let pipeline = if mesh {
