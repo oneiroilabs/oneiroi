@@ -236,6 +236,29 @@ impl DrawStage {
         self
     }
 
+    /// [`DrawStage::build`], or what the backend said when it refused the
+    /// shader. naga can be fine with a shader which the compiler of the
+    /// backend then refuses, which only shows here.
+    fn try_build(
+        &self,
+        device: &wgpu::Device,
+        drawable: &Drawable,
+        kind: Kind,
+        wgsl: &str,
+    ) -> Result<Pipeline, String> {
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = self.build(device, drawable, kind, wgsl);
+        let errors = [
+            pollster::block_on(validation.pop()),
+            pollster::block_on(internal.pop()),
+        ];
+        match errors.into_iter().flatten().next() {
+            Some(error) => Err(error.to_string()),
+            None => Ok(pipeline),
+        }
+    }
+
     fn build(&self, device: &wgpu::Device, drawable: &Drawable, kind: Kind, wgsl: &str) -> Pipeline {
         let mesh = kind == Kind::Lod(LodMethod::MeshShader);
         let visibility = match mesh {
@@ -448,26 +471,47 @@ impl DrawStage {
         // A surface picks its own detail if it is asked to, with mesh
         // shaders where the device has them.
         let auto = view.auto.filter(|_| drawable.topology == Topology::Surface);
-        let kind = match auto {
-            Some(_) if self.mesh_shaders => Kind::Lod(LodMethod::MeshShader),
-            Some(_) => Kind::Lod(LodMethod::VertexPulling),
-            None => Kind::Fixed,
-        };
-        let key = (drawable.ty.name, kind);
-        if !self.pipelines.contains_key(&key) {
+        let kind = loop {
+            let kind = match auto {
+                Some(_) if self.mesh_shaders => Kind::Lod(LodMethod::MeshShader),
+                Some(_) => Kind::Lod(LodMethod::VertexPulling),
+                None => Kind::Fixed,
+            };
+            let key = (drawable.ty.name, kind);
+            if self.pipelines.contains_key(&key) {
+                break kind;
+            }
             let wgsl = match kind {
                 Kind::Fixed => shader::draw(drawable).map(|shader| shader.wgsl),
                 Kind::Lod(method) => shader::draw_lod(drawable, method).map(|shader| shader.wgsl),
             };
-            let pipeline = match wgsl {
-                Ok(wgsl) => Some(self.build(device, drawable, kind, &wgsl)),
+            let built = wgsl.and_then(|wgsl| {
+                self.try_build(device, drawable, kind, &wgsl)
+                    .map_err(|message| ShaderError::Invalid {
+                        node: drawable.ty.name,
+                        message,
+                    })
+            });
+            match built {
+                Ok(pipeline) => {
+                    self.pipelines.insert(key, Some(pipeline));
+                    break kind;
+                }
+                // Where the backend can not take the mesh shaders, every
+                // surface is drawn with vertex shaders instead.
+                Err(error) if kind == Kind::Lod(LodMethod::MeshShader) => {
+                    eprintln!("oneiroi: drawing without mesh shaders: {error}");
+                    self.errors.push(error);
+                    self.mesh_shaders = false;
+                }
                 Err(error) => {
                     self.errors.push(error);
-                    None
+                    self.pipelines.insert(key, None);
+                    break kind;
                 }
-            };
-            self.pipelines.insert(key, pipeline);
-        }
+            }
+        };
+        let key = (drawable.ty.name, kind);
         let Some(pipeline) = &self.pipelines[&key] else {
             return;
         };

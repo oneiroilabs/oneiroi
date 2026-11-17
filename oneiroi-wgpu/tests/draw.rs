@@ -29,10 +29,14 @@ const TOLERANCE: f32 = 0.005;
 /// A device, with mesh shaders if the adapter has them. `WGPU_BACKEND`
 /// picks the backend and `WGPU_VALIDATION=1` turns on its validation, the
 /// same as in the editor.
+///
+/// Shaders are compiled with optimizations like in the editor, also in a
+/// debug build. On DX12, DXC refuses some unoptimized mesh shaders.
+/// `WGPU_DEBUG=1` compiles them without.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::from_env().unwrap_or(descriptor.backends);
-    descriptor.flags = descriptor.flags.with_env();
+    descriptor.flags = (descriptor.flags - wgpu::InstanceFlags::DEBUG).with_env();
     let instance = wgpu::Instance::new(descriptor);
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()));

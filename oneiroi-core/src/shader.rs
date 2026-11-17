@@ -942,40 +942,9 @@ struct MeshOutput {
 
 var<workgroup> mesh_output: MeshOutput;
 
-// One piece of what a mesh shader makes: the cells `first..first + size`
-// of the patch at `place`, behind `vertices` vertices and `triangles`
-// triangles of the pieces before it.
-struct Piece {
-    place: u32,
-    first: vec2<u32>,
-    size: vec2<u32>,
-    vertices: u32,
-    triangles: u32,
-}
-
-// The pieces of the mesh shader which is told `word`: a block of a large
-// patch, or several small patches each whole. Every invocation finds the
-// same ones.
-fn mesh_pieces(word: u32, pieces: ptr<function, array<Piece, 15>>) -> u32 {
-    let place = word & 15u;
-    let count = (word >> 4u) & 15u;
-    if (count == 0u) {
-        let cells = cells_of(payload.levels[place]);
-        let first = vec2<u32>((word >> 8u) & 255u, (word >> 16u) & 255u) * BLOCK;
-        (*pieces)[0] = Piece(place, first, min(cells - first, vec2<u32>(BLOCK)), 0u, 0u);
-        return 1u;
-    }
-    var vertices = 0u;
-    var triangles = 0u;
-    for (var k = 0u; k < count; k++) {
-        let cells = cells_of(payload.levels[place + k]);
-        (*pieces)[k] = Piece(place + k, vec2<u32>(0u), cells, vertices, triangles);
-        vertices += (cells.x + 1u) * (cells.y + 1u);
-        triangles += cells.x * cells.y * 2u;
-    }
-    return count;
-}
-
+// A mesh shader makes either one block of a large patch, or several small
+// patches each whole. Everything it reads of the payload is read right in
+// `ms_main`: DXC has crashed on helpers which take the payload or arrays.
 @mesh(mesh_output) @payload(payload) @workgroup_size(32)
 fn ms_main(
     @builtin(workgroup_id) group: vec3<u32>,
@@ -983,24 +952,48 @@ fn ms_main(
     @builtin(local_invocation_id) local: vec3<u32>,
 ) {
     let lane = local.x;
-    var pieces: array<Piece, 15>;
-    let count = mesh_pieces(payload.groups[group.x], &pieces);
-    let last = pieces[count - 1u];
-    let vertices = last.vertices + (last.size.x + 1u) * (last.size.y + 1u);
-    let triangles = last.triangles + last.size.x * last.size.y * 2u;
+    let word = payload.groups[group.x];
+    let start = word & 15u;
+    let whole = ((word >> 4u) & 15u) != 0u;
+    var count = (word >> 4u) & 15u;
+    var block = vec2<u32>(0u);
+    var block_size = vec2<u32>(0u);
+    if (!whole) {
+        let cells = cells_of(payload.levels[start]);
+        block = vec2<u32>((word >> 8u) & 255u, (word >> 16u) & 255u) * BLOCK;
+        block_size = min(cells - block, vec2<u32>(BLOCK));
+        count = 1u;
+    }
 
-    // Every invocation makes every 32nd vertex and triangle.
+    var vertices = 0u;
+    var triangles = 0u;
+    for (var k = 0u; k < count; k++) {
+        let size = select(block_size, cells_of(payload.levels[start + k]), whole);
+        vertices += (size.x + 1u) * (size.y + 1u);
+        triangles += size.x * size.y * 2u;
+    }
+
+    // Every invocation makes every 32nd vertex and triangle. Which of the
+    // pieces one belongs to is found by going over them.
     for (var vertex = lane; vertex < vertices; vertex += LANES) {
         var k = 0u;
-        while (k + 1u < count && pieces[k + 1u].vertices <= vertex) {
+        var base = 0u;
+        var size = select(block_size, cells_of(payload.levels[start]), whole);
+        loop {
+            let here = (size.x + 1u) * (size.y + 1u);
+            if (k + 1u >= count || vertex < base + here) {
+                break;
+            }
+            base += here;
             k++;
+            size = cells_of(payload.levels[start + k]);
         }
-        let piece = pieces[k];
-        let local = vertex - piece.vertices;
-        let at = vec2<u32>(local / (piece.size.y + 1u), local % (piece.size.y + 1u));
-        let lod = Lod(payload.along[piece.place], payload.across[piece.place]);
-        let uv = lod_uv(lod, payload.levels[piece.place], piece.first + at);
-        let point = surface_point(element(payload.first + piece.place), uv);
+        let place = start + k;
+        let local_vertex = vertex - base;
+        let at = vec2<u32>(local_vertex / (size.y + 1u), local_vertex % (size.y + 1u));
+        let lod = Lod(payload.along[place], payload.across[place]);
+        let uv = lod_uv(lod, payload.levels[place], block + at);
+        let point = surface_point(element(payload.first + place), uv);
         mesh_output.vertices[vertex] = VertexOutput(
             args.view_projection * vec4<f32>(point.position, 1.0),
             point.normal,
@@ -1009,14 +1002,23 @@ fn ms_main(
     }
     for (var triangle = lane; triangle < triangles; triangle += LANES) {
         var k = 0u;
-        while (k + 1u < count && pieces[k + 1u].triangles <= triangle) {
+        var base = 0u;
+        var vertex_base = 0u;
+        var size = select(block_size, cells_of(payload.levels[start]), whole);
+        loop {
+            let here = size.x * size.y * 2u;
+            if (k + 1u >= count || triangle < base + here) {
+                break;
+            }
+            base += here;
+            vertex_base += (size.x + 1u) * (size.y + 1u);
             k++;
+            size = cells_of(payload.levels[start + k]);
         }
-        let piece = pieces[k];
-        let cell = (triangle - piece.triangles) / 2u;
-        let a = piece.vertices + (cell / piece.size.y) * (piece.size.y + 1u) + cell % piece.size.y;
-        let c = a + piece.size.y + 1u;
-        if ((triangle - piece.triangles) % 2u == 0u) {
+        let cell = (triangle - base) / 2u;
+        let a = vertex_base + (cell / size.y) * (size.y + 1u) + cell % size.y;
+        let c = a + size.y + 1u;
+        if ((triangle - base) % 2u == 0u) {
             mesh_output.primitives[triangle].indices = vec3<u32>(a, a + 1u, c);
         } else {
             mesh_output.primitives[triangle].indices = vec3<u32>(a + 1u, c + 1u, c);
