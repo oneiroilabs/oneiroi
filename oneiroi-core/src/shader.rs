@@ -813,9 +813,14 @@ const PATCHES: u32 = 16u;
 struct Payload {
     first: u32,
     // How fine each of the patches is, by its place among the 16.
-    levels: array<vec2<u32>, 16>,
-    along: array<vec2<f32>, 16>,
-    across: array<vec2<f32>, 16>,
+    // Only arrays of scalars: DXC crashes on a payload with an array of
+    // vectors, as naga hands the payload to a function by value. Both
+    // levels are in one word, along and then across from bit 16 on.
+    levels: array<u32, 16>,
+    along_from: array<f32, 16>,
+    along_to: array<f32, 16>,
+    across_from: array<f32, 16>,
+    across_to: array<f32, 16>,
     // What each mesh shader makes. The lowest 4 bits are the place of a
     // patch. Above them is how many patches from there on it makes whole,
     // or 0 if it makes one block of that patch, which is at the bits from
@@ -841,6 +846,11 @@ fn cells_of(levels: vec2<u32>) -> vec2<u32> {
     return vec2<u32>(1u << levels.x, 1u << levels.y);
 }
 
+// Both levels of a patch out of the word of the payload they are kept in.
+fn levels_of(word: u32) -> vec2<u32> {
+    return vec2<u32>(word & 0xffffu, word >> 16u);
+}
+
 // Which of the 16 patches are on screen, found by one invocation each.
 var<workgroup> task_shown: array<u32, 16>;
 // How many mesh shaders the task shader starts.
@@ -864,9 +874,11 @@ fn ts_main(
             if (!lod_hidden(piece)) {
                 let lod = lod_of(piece);
                 let inside = lod_inside(lod);
-                payload.levels[lane] = vec2<u32>(lod_level(inside.x), lod_level(inside.y));
-                payload.along[lane] = lod.along;
-                payload.across[lane] = lod.across;
+                payload.levels[lane] = lod_level(inside.x) | (lod_level(inside.y) << 16u);
+                payload.along_from[lane] = lod.along.x;
+                payload.along_to[lane] = lod.along.y;
+                payload.across_from[lane] = lod.across.x;
+                payload.across_to[lane] = lod.across.y;
                 shown = 1u;
             }
         }
@@ -890,7 +902,7 @@ fn ts_main(
                 continue;
             }
 
-            let cells = cells_of(payload.levels[place]);
+            let cells = cells_of(levels_of(payload.levels[place]));
             let vertices = (cells.x + 1u) * (cells.y + 1u);
             let triangles = cells.x * cells.y * 2u;
             let fits = vertices <= VERTICES && triangles <= TRIANGLES;
@@ -931,10 +943,6 @@ fn ts_main(
 
 struct PrimitiveOutput {
     @builtin(triangle_indices) indices: vec3<u32>,
-    // Not read by anything. Without something per triangle besides its
-    // corners, naga gives DX12 an empty struct of outputs per triangle,
-    // which DXC crashes on. A cull flag instead crashes llvmpipe.
-    @location(7) @interpolate(flat) @per_primitive unused: u32,
 }
 
 struct MeshOutput {
@@ -947,8 +955,7 @@ struct MeshOutput {
 var<workgroup> mesh_output: MeshOutput;
 
 // A mesh shader makes either one block of a large patch, or several small
-// patches each whole. Everything it reads of the payload is read right in
-// `ms_main`: DXC has crashed on helpers which take the payload or arrays.
+// patches each whole.
 @mesh(mesh_output) @payload(payload) @workgroup_size(32)
 fn ms_main(
     @builtin(workgroup_id) group: vec3<u32>,
@@ -963,7 +970,7 @@ fn ms_main(
     var block = vec2<u32>(0u);
     var block_size = vec2<u32>(0u);
     if (!whole) {
-        let cells = cells_of(payload.levels[start]);
+        let cells = cells_of(levels_of(payload.levels[start]));
         block = vec2<u32>((word >> 8u) & 255u, (word >> 16u) & 255u) * BLOCK;
         block_size = min(cells - block, vec2<u32>(BLOCK));
         count = 1u;
@@ -972,7 +979,7 @@ fn ms_main(
     var vertices = 0u;
     var triangles = 0u;
     for (var k = 0u; k < count; k++) {
-        let size = select(block_size, cells_of(payload.levels[start + k]), whole);
+        let size = select(block_size, cells_of(levels_of(payload.levels[start + k])), whole);
         vertices += (size.x + 1u) * (size.y + 1u);
         triangles += size.x * size.y * 2u;
     }
@@ -982,7 +989,7 @@ fn ms_main(
     for (var vertex = lane; vertex < vertices; vertex += LANES) {
         var k = 0u;
         var base = 0u;
-        var size = select(block_size, cells_of(payload.levels[start]), whole);
+        var size = select(block_size, cells_of(levels_of(payload.levels[start])), whole);
         loop {
             let here = (size.x + 1u) * (size.y + 1u);
             if (k + 1u >= count || vertex < base + here) {
@@ -990,13 +997,16 @@ fn ms_main(
             }
             base += here;
             k++;
-            size = cells_of(payload.levels[start + k]);
+            size = cells_of(levels_of(payload.levels[start + k]));
         }
         let place = start + k;
         let local_vertex = vertex - base;
         let at = vec2<u32>(local_vertex / (size.y + 1u), local_vertex % (size.y + 1u));
-        let lod = Lod(payload.along[place], payload.across[place]);
-        let uv = lod_uv(lod, payload.levels[place], block + at);
+        let lod = Lod(
+            vec2<f32>(payload.along_from[place], payload.along_to[place]),
+            vec2<f32>(payload.across_from[place], payload.across_to[place]),
+        );
+        let uv = lod_uv(lod, levels_of(payload.levels[place]), block + at);
         let point = surface_point(element(payload.first + place), uv);
         mesh_output.vertices[vertex] = VertexOutput(
             args.view_projection * vec4<f32>(point.position, 1.0),
@@ -1008,7 +1018,7 @@ fn ms_main(
         var k = 0u;
         var base = 0u;
         var vertex_base = 0u;
-        var size = select(block_size, cells_of(payload.levels[start]), whole);
+        var size = select(block_size, cells_of(levels_of(payload.levels[start])), whole);
         loop {
             let here = size.x * size.y * 2u;
             if (k + 1u >= count || triangle < base + here) {
@@ -1017,7 +1027,7 @@ fn ms_main(
             base += here;
             vertex_base += (size.x + 1u) * (size.y + 1u);
             k++;
-            size = cells_of(payload.levels[start + k]);
+            size = cells_of(levels_of(payload.levels[start + k]));
         }
         let cell = (triangle - base) / 2u;
         let a = vertex_base + (cell / size.y) * (size.y + 1u) + cell % size.y;
@@ -1026,7 +1036,7 @@ fn ms_main(
         if ((triangle - base) % 2u == 0u) {
             indices = vec3<u32>(a, a + 1u, c);
         }
-        mesh_output.primitives[triangle] = PrimitiveOutput(indices, 0u);
+        mesh_output.primitives[triangle] = PrimitiveOutput(indices);
     }
     if (lane == 0u) {
         mesh_output.vertex_count = vertices;
