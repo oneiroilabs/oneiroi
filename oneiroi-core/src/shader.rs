@@ -849,8 +849,11 @@ var<workgroup> task_groups: u32;
 @task @payload(payload) @workgroup_size(32)
 fn ts_main(
     @builtin(workgroup_id) group: vec3<u32>,
-    @builtin(local_invocation_index) lane: u32,
+    // Not `local_invocation_index`: naga declares that one for DX12 itself,
+    // and then twice when the shader does as well.
+    @builtin(local_invocation_id) local: vec3<u32>,
 ) -> @builtin(mesh_task_size) vec3<u32> {
+    let lane = local.x;
     let first = group.x * PATCHES;
     // Every patch on its own: whether it is there and how fine it gets.
     if (lane < PATCHES) {
@@ -976,8 +979,10 @@ fn mesh_pieces(word: u32, pieces: ptr<function, array<Piece, 15>>) -> u32 {
 @mesh(mesh_output) @payload(payload) @workgroup_size(32)
 fn ms_main(
     @builtin(workgroup_id) group: vec3<u32>,
-    @builtin(local_invocation_index) lane: u32,
+    // See `ts_main`.
+    @builtin(local_invocation_id) local: vec3<u32>,
 ) {
+    let lane = local.x;
     var pieces: array<Piece, 15>;
     let count = mesh_pieces(payload.groups[group.x], &pieces);
     let last = pieces[count - 1u];

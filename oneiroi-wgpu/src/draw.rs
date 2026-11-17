@@ -297,6 +297,14 @@ impl DrawStage {
             bias: wgpu::DepthBiasState::default(),
         });
 
+        // naga zeroes workgroup memory with an index of the invocation of
+        // its own. A mesh shader then has two of them in SPIR-V, which is
+        // invalid and makes some drivers lose the device. The shaders write
+        // all of it before they read it anyway.
+        let unzeroed = wgpu::PipelineCompilationOptions {
+            zero_initialize_workgroup_memory: false,
+            ..Default::default()
+        };
         let pipeline = if mesh {
             device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
                 label: Some(drawable.ty.name),
@@ -304,12 +312,12 @@ impl DrawStage {
                 task: Some(wgpu::TaskState {
                     module: &module,
                     entry_point: Some("ts_main"),
-                    compilation_options: Default::default(),
+                    compilation_options: unzeroed.clone(),
                 }),
                 mesh: wgpu::MeshState {
                     module: &module,
                     entry_point: Some("ms_main"),
-                    compilation_options: Default::default(),
+                    compilation_options: unzeroed,
                 },
                 fragment,
                 primitive,
