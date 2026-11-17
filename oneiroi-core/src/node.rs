@@ -257,6 +257,26 @@ pub struct GpuKernel {
     /// compares the results of. As words, for every input and then the
     /// offsets of every grouped one.
     pub examples: &'static [fn() -> Vec<Vec<u32>>],
+    /// Results in between, made before the outputs in this order, which
+    /// the passes after them read. The graph never sees them.
+    pub stages: &'static [GpuStage],
+}
+
+/// A result in between of a [`GpuKernel`], made by a pass of its own:
+/// `fn entry(index: u32) -> ty` for every element. Every pass after it
+/// reads it with `stage_name(index)` and `stage_name_len()`.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuStage {
+    pub name: &'static str,
+    pub ty: TypeInfo,
+    /// Not used when the stage is made on the CPU.
+    pub entry: &'static str,
+    /// How many elements the stage has, asked before any pass runs. It may
+    /// read what [`GpuKernel::reads`] lists.
+    pub len: fn(&Inputs<'_>) -> usize,
+    /// The words of the stage, made on the CPU instead of by a pass, from
+    /// what [`GpuKernel::reads`] lists as well.
+    pub words: Option<fn(&Inputs<'_>) -> Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy)]

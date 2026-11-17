@@ -43,9 +43,44 @@ const RING_WORDS: u32 = 1 << 18;
 
 struct Pipeline {
     kernel: &'static GpuKernel,
-    /// One per output, offsets included.
-    pipelines: Vec<wgpu::ComputePipeline>,
+    /// One per pass: every stage, then every output, offsets included.
+    /// `None` for what the CPU makes.
+    pipelines: Vec<Option<wgpu::ComputePipeline>>,
     call_words: usize,
+}
+
+/// What one pass of a kernel makes.
+#[derive(Clone, Copy)]
+struct Pass {
+    /// The words of one element.
+    words: usize,
+    len: fn(&Inputs<'_>) -> usize,
+    /// Made on the CPU instead.
+    words_of: Option<fn(&Inputs<'_>) -> Vec<u32>>,
+    /// A stage, which every pass reads, or else an output.
+    stage: bool,
+}
+
+/// The passes of `kernel` of `node` in the order they run.
+fn passes(node: &NodeDef, kernel: &GpuKernel) -> Vec<Pass> {
+    let stages = kernel.stages.iter().map(|stage| Pass {
+        words: stage.ty.words as usize,
+        len: stage.len,
+        words_of: stage.words,
+        stage: true,
+    });
+    let words = node
+        .outputs
+        .iter()
+        .map(|port| port.ty.words as usize)
+        .chain(node.hidden_outputs().map(|_| 1));
+    let outputs = kernel.outputs.iter().zip(words).map(|(output, words)| Pass {
+        words,
+        len: output.len,
+        words_of: output.words,
+        stage: false,
+    });
+    stages.chain(outputs).collect()
 }
 
 /// One node to run on the GPU, with what is known before it does.
@@ -53,7 +88,7 @@ struct Call<'a> {
     item: &'a Work,
     /// Its inputs and the offsets of the grouped ones.
     inputs: Vec<Handle>,
-    /// How many elements each of its outputs gets.
+    /// How many elements each of its passes makes.
     elements: Vec<usize>,
 }
 
@@ -360,15 +395,26 @@ impl GpuExecutor {
                 .and_then(|bindless| Some((bindless, node.gpu_kernel(self.caps)?)))
                 .and_then(|(bindless, kernel)| {
                     let shader = shader::compute(node, kernel).and_then(|shader| {
-                        let pipelines = (0..kernel.outputs.len())
-                            .map(|index| {
-                                Self::compute_pipeline(
-                                    &self.device,
-                                    &bindless.pipeline_layout,
-                                    node.id,
-                                    &shader.wgsl,
-                                    &format!("main_{index}"),
-                                )
+                        let stages = kernel.stages.iter().enumerate().map(|(index, stage)| {
+                            stage.words.is_none().then(|| shader::stage_entry(index))
+                        });
+                        let outputs = kernel.outputs.iter().enumerate().map(|(index, output)| {
+                            output.words.is_none().then(|| format!("main_{index}"))
+                        });
+                        let pipelines = stages
+                            .chain(outputs)
+                            .map(|entry| {
+                                entry
+                                    .map(|entry| {
+                                        Self::compute_pipeline(
+                                            &self.device,
+                                            &bindless.pipeline_layout,
+                                            node.id,
+                                            &shader.wgsl,
+                                            &entry,
+                                        )
+                                    })
+                                    .transpose()
                             })
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(|message| ShaderError::Invalid {
@@ -600,12 +646,7 @@ impl GpuExecutor {
             return;
         };
         let (kernel, call_words) = (pipeline.kernel, pipeline.call_words);
-        let words: Vec<u64> = node
-            .outputs
-            .iter()
-            .map(|port| port.ty.words as u64)
-            .chain(node.hidden_outputs().map(|_| 1))
-            .collect();
+        let passes = passes(node, kernel);
         let limits = self.device.limits();
         let max_bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         let max_groups = limits.max_compute_workgroups_per_dimension as usize;
@@ -632,9 +673,9 @@ impl GpuExecutor {
                 self.run_on_cpu(store, item);
                 continue;
             }
-            let elements: Vec<usize> = kernel.outputs.iter().map(|output| (output.len)(&view)).collect();
-            let fits = elements.iter().zip(&words).all(|(elements, words)| {
-                *elements as u64 * words * 4 <= max_bytes
+            let elements: Vec<usize> = passes.iter().map(|pass| (pass.len)(&view)).collect();
+            let fits = elements.iter().zip(&passes).all(|(elements, pass)| {
+                (*elements * pass.words) as u64 * 4 <= max_bytes
                     && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups
             }) && inputs.iter().all(|handle| self.reachable(handle));
             if !fits {
@@ -654,35 +695,43 @@ impl GpuExecutor {
         self.dispatch(store, node, &batch);
     }
 
-    /// A compute pass per output for all of `batch`.
+    /// A compute pass per stage and per output for all of `batch`.
     fn dispatch(&mut self, store: &mut Store, node: &'static NodeDef, batch: &[Call<'_>]) {
         if batch.is_empty() {
             return;
         }
-        let words: Vec<usize> = node
-            .outputs
-            .iter()
-            .map(|port| port.ty.words as usize)
-            .chain(node.hidden_outputs().map(|_| 1))
-            .collect();
-
-        // Make room for the results where they belong, or write the ones
-        // the CPU knows already, then bring the device up to date with what
-        // the CPU wrote and the new pages.
         let kernel = self.pipelines[node.id].as_ref().unwrap().kernel;
+        let passes = passes(node, kernel);
+
+        // Make room for what the passes make, or write what the CPU knows
+        // already, then bring the device up to date with what the CPU wrote
+        // and the new pages. A stage is kept in the store under a key of
+        // its own, for every pass after it to read.
         let targets: Vec<Vec<Option<Handle>>> = batch
             .iter()
             .map(|call| {
-                (0..words.len())
-                    .map(|output| match kernel.outputs[output].words {
-                        Some(make) => {
-                            let values = make(&Inputs::new(store, node, &call.inputs));
-                            store.insert(call.item.outputs[output], &values);
-                            None
-                        }
-                        None => {
-                            let len = (call.elements[output] * words[output]) as u32;
-                            Some(store.reserve(call.item.outputs[output], len))
+                let mut output = 0;
+                passes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pass)| {
+                        let key = match pass.stage {
+                            true => ContentKey::derive("stage", index as u32, &[call.item.outputs[0]]),
+                            false => {
+                                output += 1;
+                                call.item.outputs[output - 1]
+                            }
+                        };
+                        match pass.words_of {
+                            Some(make) => {
+                                let values = make(&Inputs::new(store, node, &call.inputs));
+                                let handle = store.insert(key, &values);
+                                pass.stage.then_some(handle)
+                            }
+                            None => {
+                                let len = (call.elements[index] * pass.words) as u32;
+                                Some(store.reserve(key, len))
+                            }
                         }
                     })
                     .collect()
@@ -697,8 +746,8 @@ impl GpuExecutor {
             return;
         }
 
-        for output in 0..words.len() {
-            if kernel.outputs[output].words.is_some() {
+        for (index, pass) in passes.iter().enumerate() {
+            if pass.words_of.is_some() {
                 continue;
             }
             let mut calls = Vec::new();
@@ -706,10 +755,15 @@ impl GpuExecutor {
                 for input in &call.inputs {
                     calls.extend([input.page, input.offset, input.len]);
                 }
-                let target = targets[output].unwrap();
-                calls.extend([target.page, target.offset, call.elements[output] as u32]);
+                for (stage, handle) in passes.iter().zip(targets).filter(|(pass, _)| pass.stage) {
+                    let handle = handle.expect("every stage has a place");
+                    debug_assert!(stage.stage);
+                    calls.extend([handle.page, handle.offset, handle.len]);
+                }
+                let target = targets[index].unwrap();
+                calls.extend([target.page, target.offset, call.elements[index] as u32]);
             }
-            let most = batch.iter().map(|call| call.elements[output]).max().unwrap_or(0);
+            let most = batch.iter().map(|call| call.elements[index]).max().unwrap_or(0);
             if most == 0 {
                 continue;
             }
@@ -717,7 +771,9 @@ impl GpuExecutor {
                 most.div_ceil(WORKGROUP_SIZE as usize) as u32,
                 batch.len() as u32,
             );
-            let pipeline = self.pipelines[node.id].as_ref().unwrap().pipelines[output].clone();
+            let pipeline = self.pipelines[node.id].as_ref().unwrap().pipelines[index]
+                .clone()
+                .expect("passes made on the GPU have a pipeline");
             self.record(node.id, &pipeline, &calls, groups);
         }
         self.stats.gpu += batch.len();

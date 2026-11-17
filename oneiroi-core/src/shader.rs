@@ -42,6 +42,11 @@ pub struct ComputeShader {
     pub call_words: usize,
 }
 
+/// The entry point of the pass which makes stage `index` of a kernel.
+pub fn stage_entry(index: usize) -> String {
+    format!("stage_{index}")
+}
+
 /// How many words of calls one dispatch can see.
 pub const CALL_WINDOW: u32 = 1 << 14;
 
@@ -254,11 +259,19 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
     let _ = writeln!(out, "enable wgpu_binding_array;\n");
     let _ = writeln!(out, "// Generated for `{}`.\n", node.id);
     let mut declared = Vec::new();
-    for ty in node.inputs.iter().map(|port| &port.ty).chain(&outputs) {
+    let stages = kernel.stages;
+    for ty in node
+        .inputs
+        .iter()
+        .map(|port| &port.ty)
+        .chain(&outputs)
+        .chain(stages.iter().map(|stage| &stage.ty))
+    {
         declare(out, &mut declared, ty);
     }
 
-    let call_words = inputs * 3 + 3;
+    // A call is every input, then every stage, then where the pass writes.
+    let call_words = (inputs + stages.len()) * 3 + 3;
     let _ = writeln!(out, "{BINDLESS}");
     let _ = writeln!(out, "// Where the call this invocation works on starts in `calls`.");
     let _ = writeln!(out, "var<private> call: u32;\n");
@@ -332,14 +345,45 @@ fn in_{name}_group_of(index: u32) -> u32 {{
         );
     }
 
-    let _ = writeln!(out, "{}\n", kernel.wgsl.trim());
-
-    // An entry point for every output, which fills one element of it.
-    let output = inputs * 3;
-    for (index, (ty, entry)) in outputs.iter().zip(kernel.outputs).enumerate() {
+    // The stages, read like inputs.
+    for (index, stage) in stages.iter().enumerate() {
+        let (name, ty, words) = (stage.name, stage.ty.wgsl, stage.ty.words);
+        let at = (inputs + index) * 3;
         let _ = writeln!(
             out,
-            "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main_{index}(\n    @builtin(global_invocation_id) id: vec3<u32>,\n    @builtin(workgroup_id) group: vec3<u32>,\n) {{"
+            "fn stage_{name}_len() -> u32 {{\n    return calls[call + {}u] / {words}u;\n}}\n",
+            at + 2
+        );
+        let element = read_element(&stage.ty, "pages[page].words", "base");
+        let _ = writeln!(
+            out,
+            "fn stage_{name}(index: u32) -> {ty} {{\n    let page = calls[call + {at}u];\n    let base = calls[call + {}u] + index * {words}u;\n    return {element};\n}}\n",
+            at + 1
+        );
+    }
+
+    let _ = writeln!(out, "{}\n", kernel.wgsl.trim());
+
+    // An entry point for every stage made on the GPU and every output,
+    // which fills one element of it.
+    let output = (inputs + stages.len()) * 3;
+    let passes = stages
+        .iter()
+        .enumerate()
+        .filter(|(_, stage)| stage.words.is_none())
+        .map(|(index, stage)| (stage_entry(index), stage.ty, stage.entry))
+        .chain(
+            outputs
+                .iter()
+                .zip(kernel.outputs)
+                .enumerate()
+                .map(|(index, (ty, entry))| (format!("main_{index}"), *ty, entry.entry)),
+        );
+    for (main, ty, entry) in passes {
+        let ty = &ty;
+        let _ = writeln!(
+            out,
+            "@compute @workgroup_size({WORKGROUP_SIZE})\nfn {main}(\n    @builtin(global_invocation_id) id: vec3<u32>,\n    @builtin(workgroup_id) group: vec3<u32>,\n) {{"
         );
         let _ = writeln!(out, "    call = group.y * {call_words}u;");
         let _ = writeln!(
@@ -347,7 +391,7 @@ fn in_{name}_group_of(index: u32) -> u32 {{
             "    if (id.x >= calls[call + {}u]) {{\n        return;\n    }}",
             output + 2
         );
-        let _ = writeln!(out, "    let value = {}(id.x);", entry.entry);
+        let _ = writeln!(out, "    let value = {entry}(id.x);");
         let _ = writeln!(out, "    let page = calls[call + {output}u];");
         let _ = writeln!(
             out,
@@ -1165,6 +1209,7 @@ mod tests {
             reads: &[],
             accepts: None,
             examples: &[],
+            stages: &[],
         };
         (node, kernel)
     }
@@ -1246,6 +1291,7 @@ mod tests {
             reads: &[],
             accepts: None,
             examples: &[],
+            stages: &[],
         };
         let shader = compute(&node, &kernel).unwrap().wgsl;
 
@@ -1331,6 +1377,7 @@ mod tests {
             reads: &[],
             accepts: None,
             examples: &[],
+            stages: &[],
         };
         let shader = compute(&node, &kernel).unwrap();
         // The values and their offsets, and where the output goes.
