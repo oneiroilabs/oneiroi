@@ -18,24 +18,74 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// A compute shader which fills the output of one node, for any number
 /// of calls of that node at once.
 ///
-/// Its entry point is `main` and everything is bound in group 0. For a
-/// node with `n` inputs:
+/// Every page of the store is bound at once, so a call can read its inputs
+/// from wherever they are and write its output right where the store
+/// reserved it. It is bound the same for every shader:
 ///
-/// - bindings `0..n`: the page input `i` of every call lives in,
-///   read-only `array<u32>`
-/// - binding `n`: where the outputs go, read-write `array<u32>`
-/// - binding `n + 1`: the calls, read-only `array<u32>`. A call is
-///   [`call_words`](ComputeShader::call_words) long: the offset and the
-///   length in words of each input, then the offset in words of its output
-///   and how many elements that has.
+/// - group 0, binding 0: every page, a read-write `binding_array<Page>`
+///   where a `Page` holds `words: array<u32>`
+/// - group 1, binding 0: the calls, a read-only `array<u32>` with a dynamic
+///   offset of at most [`CALL_WINDOW`] words. A binding array and a
+///   dynamic offset can not share a group. A call is
+///   [`call_words`](ComputeShader::call_words) long: page, offset and
+///   length in words of every input, then page and offset of its output
+///   and how many elements that gets.
 ///
-/// Dispatch `(ceil(elements / WORKGROUP_SIZE), calls, 1)` workgroups,
-/// with the elements of the call which has the most.
+/// Its entry point is `main`. Dispatch `(ceil(elements / WORKGROUP_SIZE),
+/// calls, 1)` workgroups, with the elements of the call which has the most.
 #[derive(Debug, Clone)]
 pub struct ComputeShader {
     pub wgsl: String,
     pub call_words: usize,
 }
+
+/// How many words of calls one dispatch can see.
+pub const CALL_WINDOW: u32 = 1 << 14;
+
+/// What a device needs for the shaders of this module, as `naga` calls it.
+fn bindless() -> naga::valid::Capabilities {
+    naga::valid::Capabilities::BUFFER_BINDING_ARRAY
+        | naga::valid::Capabilities::STORAGE_BUFFER_BINDING_ARRAY
+        | naga::valid::Capabilities::STORAGE_BUFFER_BINDING_ARRAY_NON_UNIFORM_INDEXING
+}
+
+const BINDLESS: &str = "struct Page {
+    words: array<u32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> pages: binding_array<Page>;
+@group(1) @binding(0) var<storage, read> calls: array<u32>;
+";
+
+/// A shader which copies runs of words from wherever they are to wherever
+/// they go, bound like a [`ComputeShader`]. A call is 5 words: page and
+/// offset it copies from, how many words, and page and offset it copies to.
+pub const GATHER: &str = "enable wgpu_binding_array;
+
+struct Page {
+    words: array<u32>,
+}
+
+@group(0) @binding(0) var<storage, read_write> pages: binding_array<Page>;
+@group(1) @binding(0) var<storage, read> calls: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(workgroup_id) group: vec3<u32>,
+) {
+    let call = group.y * 5u;
+    if (id.x >= calls[call + 2u]) {
+        return;
+    }
+    let from_page = calls[call];
+    let to_page = calls[call + 3u];
+    pages[to_page].words[calls[call + 4u] + id.x] = pages[from_page].words[calls[call + 1u] + id.x];
+}
+";
+
+/// How many words a call of [`GATHER`] takes.
+pub const GATHER_CALL_WORDS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShaderError {
@@ -180,7 +230,7 @@ pub(crate) fn declare(out: &mut String, declared: &mut Vec<&'static str>, ty: &T
 /// Writes the compute shader which runs `kernel` for `node`, and checks
 /// that it compiles.
 pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, ShaderError> {
-    let [output] = node.outputs else {
+    let [output_port] = node.outputs else {
         return Err(ShaderError::Outputs {
             node: node.id,
             found: node.outputs.len(),
@@ -190,42 +240,29 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
     let mut wgsl = String::new();
     let out = &mut wgsl;
 
+    let _ = writeln!(out, "enable wgpu_binding_array;\n");
     let _ = writeln!(out, "// Generated for `{}`.\n", node.id);
     let mut declared = Vec::new();
-    for ty in node.inputs.iter().map(|port| &port.ty).chain([&output.ty]) {
+    for ty in node.inputs.iter().map(|port| &port.ty).chain([&output_port.ty]) {
         declare(out, &mut declared, ty);
     }
 
-    let call_words = inputs * 2 + 2;
-    for index in 0..inputs {
-        let _ = writeln!(
-            out,
-            "@group(0) @binding({index}) var<storage, read> page_{index}: array<u32>;"
-        );
-    }
-    let _ = writeln!(
-        out,
-        "@group(0) @binding({inputs}) var<storage, read_write> out_page: array<u32>;"
-    );
-    let _ = writeln!(
-        out,
-        "@group(0) @binding({}) var<storage, read> calls: array<u32>;\n",
-        inputs + 1
-    );
+    let call_words = inputs * 3 + 3;
+    let _ = writeln!(out, "{BINDLESS}");
     let _ = writeln!(out, "// Where the call this invocation works on starts in `calls`.");
     let _ = writeln!(out, "var<private> call: u32;\n");
 
     for (index, port) in node.inputs.iter().enumerate() {
         let (name, ty, words) = (port.name, port.ty.wgsl, port.ty.words);
-        let (offset, len) = (index * 2, index * 2 + 1);
+        let (page, offset, len) = (index * 3, index * 3 + 1, index * 3 + 2);
         let _ = writeln!(
             out,
             "fn in_{name}_len() -> u32 {{\n    return calls[call + {len}u] / {words}u;\n}}\n"
         );
-        let element = read_element(&port.ty, &format!("page_{index}"), "base");
+        let element = read_element(&port.ty, "pages[page].words", "base");
         let _ = writeln!(
             out,
-            "fn in_{name}(index: u32) -> {ty} {{\n    let base = calls[call + {offset}u] + index * {words}u;\n    return {element};\n}}\n"
+            "fn in_{name}(index: u32) -> {ty} {{\n    let page = calls[call + {page}u];\n    let base = calls[call + {offset}u] + index * {words}u;\n    return {element};\n}}\n"
         );
     }
 
@@ -233,25 +270,27 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
 
     let _ = writeln!(
         out,
-        "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main(@builtin(global_invocation_id) id: vec3<u32>) {{"
+        "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main(\n    @builtin(global_invocation_id) id: vec3<u32>,\n    @builtin(workgroup_id) group: vec3<u32>,\n) {{"
     );
-    let _ = writeln!(out, "    call = id.y * {call_words}u;");
+    let _ = writeln!(out, "    call = group.y * {call_words}u;");
+    let output = inputs * 3;
     let _ = writeln!(
         out,
         "    if (id.x >= calls[call + {}u]) {{\n        return;\n    }}",
-        inputs * 2 + 1
+        output + 2
     );
     let _ = writeln!(out, "    let value = {}(id.x);", kernel.entry);
+    let _ = writeln!(out, "    let page = calls[call + {output}u];");
     let _ = writeln!(
         out,
         "    let base = calls[call + {}u] + id.x * {}u;",
-        inputs * 2,
-        output.ty.words
+        output + 1,
+        output_port.ty.words
     );
-    write_element(out, &output.ty, "value", "out_page", "base");
+    write_element(out, &output_port.ty, "value", "pages[page].words", "base");
     let _ = writeln!(out, "}}");
 
-    validate(node.id, &wgsl)?;
+    validate_with(node.id, &wgsl, bindless())?;
     Ok(ComputeShader { wgsl, call_words })
 }
 
@@ -1008,13 +1047,13 @@ mod tests {
         assert!(shader.contains("fn in_particles(index: u32) -> Particle"));
         assert!(shader.contains("fn in_scale(index: u32) -> f32"));
         // A call names where both inputs are and where the output goes.
-        assert_eq!(compute(&node, &kernel).unwrap().call_words, 6);
-        assert!(shader.contains("call = id.y * 6u;"));
+        assert_eq!(compute(&node, &kernel).unwrap().call_words, 9);
+        assert!(shader.contains("call = group.y * 9u;"));
         // 21 words per particle: the padding is skipped when reading and
         // zeroed when writing.
         assert!(shader.contains("index * 21u"));
-        assert!(shader.contains("out_page[base + 3u] = 0u;"));
-        assert!(shader.contains("out_page[base + 20u] = value.id;"));
+        assert!(shader.contains("pages[page].words[base + 3u] = 0u;"));
+        assert!(shader.contains("pages[page].words[base + 20u] = value.id;"));
     }
 
     #[repr(C)]
@@ -1068,8 +1107,8 @@ mod tests {
         assert!(shader.find("struct Particle {") < shader.find("struct Pair {"));
         // 21 + 1 + 21 words, with the second particle behind the weight.
         assert!(shader.contains("index * 43u"));
-        assert!(shader.contains("out_page[base + 42u] = value.second.id;"));
-        assert!(shader.contains("out_page[base + 21u] = bitcast<u32>(value.weight);"));
+        assert!(shader.contains("pages[page].words[base + 42u] = value.second.id;"));
+        assert!(shader.contains("pages[page].words[base + 21u] = bitcast<u32>(value.weight);"));
     }
 
     #[test]
@@ -1087,6 +1126,11 @@ mod tests {
             compute(&node, &kernel),
             Err(ShaderError::Invalid { .. })
         ));
+    }
+
+    #[test]
+    fn the_gather_shader_compiles() {
+        validate_with("gather", GATHER, bindless()).unwrap();
     }
 
     #[test]

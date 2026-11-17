@@ -241,8 +241,10 @@ impl Store {
     pub fn insert(&mut self, key: ContentKey, words: &[u32]) -> Handle {
         if let Some(entry) = self.entries.get(&key) {
             let (handle, resident) = (entry.handle, entry.resident);
-            if !resident {
-                self.fill(key, words);
+            // A place the backend reserved and then left to somebody else:
+            // the backend does not have these words, so they are uploaded.
+            if !resident && self.fill(key, words) && !words.is_empty() {
+                self.pages[handle.page as usize].mark_dirty(handle.offset, handle.offset + handle.len);
             }
             self.touch(key);
             return handle;
