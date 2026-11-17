@@ -50,6 +50,10 @@ pub enum LowerErrorKind {
     Value { expected: &'static str },
     /// Two inputs of different types are exposed under one name.
     ExposedTwice(String),
+    /// Only a node which is another graph can run for each element.
+    EachOnNode,
+    /// A graph runs for each element of one input, not of several.
+    EachTwice,
     DuplicateOutput(String),
     Build(BuildError),
 }
@@ -80,6 +84,12 @@ impl fmt::Display for LowerError {
             }
             LowerErrorKind::ExposedTwice(name) => {
                 write!(f, "`{name}` is exposed with two different types")
+            }
+            LowerErrorKind::EachOnNode => {
+                write!(f, "only a graph can run for each element")
+            }
+            LowerErrorKind::EachTwice => {
+                write!(f, "a graph can run for each element of one input only")
             }
             LowerErrorKind::DuplicateOutput(name) => {
                 write!(f, "there are two outputs `{name}`")
@@ -219,6 +229,8 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut slots = Vec::with_capacity(ports.len());
+        // The input the node runs for each element of, if there is one.
+        let mut each = None;
         for port in &ports {
             let exact = |kind| match port.ty {
                 PortType::Exact(ty) => Ok(ty),
@@ -260,7 +272,22 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 }
-                Some(Input::Link { node, output }) => {
+                Some(Input::Link {
+                    node,
+                    output,
+                    each: per_element,
+                }) => {
+                    if *per_element {
+                        let kind = match (&target, each) {
+                            (Target::Graph(..), None) => None,
+                            (Target::Graph(..), Some(_)) => Some(LowerErrorKind::EachTwice),
+                            _ => Some(LowerErrorKind::EachOnNode),
+                        };
+                        if let Some(kind) = kind {
+                            return Err(at(Some(&port.name), kind));
+                        }
+                        each = Some(slots.len());
+                    }
                     if self.graph.node(*node).is_none() {
                         return Err(at(Some(&port.name), LowerErrorKind::MissingNode(*node)));
                     }
@@ -289,7 +316,16 @@ impl<'a> Lowerer<'a> {
                 self.builder
                     .generic(self.context.registry, node, &given())
             }
-            Target::Graph(callee, _) => self.builder.call(self.context.programs, callee, &slots),
+            Target::Graph(callee, _) => match each {
+                Some(element) => self.builder.for_each(
+                    self.context.programs,
+                    callee,
+                    &slots,
+                    element,
+                    crate::MAX_ELEMENTS,
+                ),
+                None => self.builder.call(self.context.programs, callee, &slots),
+            },
         }
         .map_err(|error| {
             let port = match &error {

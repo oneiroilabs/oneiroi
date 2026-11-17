@@ -130,6 +130,30 @@ fn frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     }
 }
 
+/// The curve moved by an offset. Only its first element is used.
+pub static TRANSLATE: NodeDef = NodeDef {
+    id: "curve.translate",
+    display_name: "Translate Curve",
+    inputs: &[
+        PortDecl::new::<CubicNurbsSegmentCache>("segments"),
+        PortDecl::new::<Vec3>("offset").with_default(PortDefault::F32(&[0.0; 3])),
+    ],
+    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments")],
+    shape: Shape::Map,
+    cpu: translate,
+    gpu: &[],
+};
+
+fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
+    let offset = inputs.value::<Vec3>(1);
+    let moved: Vec<_> = inputs
+        .get::<CubicNurbsSegmentCache>(0)
+        .iter()
+        .map(|segment| segment.translated(offset))
+        .collect();
+    outputs.set(0, &moved);
+}
+
 /// The position on the curve for every `t` in `0..=1`.
 pub static SAMPLE: NodeDef = NodeDef {
     id: "curve.sample",
@@ -186,6 +210,7 @@ pub fn register(registry: &mut NodeRegistry) {
     registry.register(&NURBS);
     registry.register(&FRAMES);
     registry.register(&SAMPLE);
+    registry.register(&TRANSLATE);
     registry.register(&crate::primitive::CIRCLE);
     super::register_profile::<crate::primitive::Circle>(registry);
     super::register_profile::<CubicNurbsSegmentCache>(registry);
@@ -325,7 +350,9 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        assert_eq!(registry.iter().count(), 8);
+        // 6 nodes of curves, a tessellation for each of the 2 surfaces
+        // and a sweep for each of the 2 profiles, and 2 values.
+        assert_eq!(registry.iter().count(), 11);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

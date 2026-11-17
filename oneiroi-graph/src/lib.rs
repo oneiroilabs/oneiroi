@@ -87,8 +87,20 @@ pub enum Input {
         value: Option<Value>,
     },
     /// The output of another node.
-    Link { node: NodeId, output: String },
+    Link {
+        node: NodeId,
+        output: String,
+        /// Only for a node which is another graph: it runs once for every
+        /// element of the output, and its outputs are what all of the runs
+        /// gave, one after the other.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        each: bool,
+    },
 }
+
+/// How many elements a graph runs for at most, when it runs for each one.
+/// The rest is left out, and that is reported.
+pub const MAX_ELEMENTS: u32 = 4096;
 
 /// What an editor keeps with a node. It never changes what the graph does.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -281,8 +293,22 @@ impl Graph {
         let link = Input::Link {
             node: from,
             output: output.into(),
+            each: false,
         };
         self.input(to, input, link)
+    }
+
+    /// Makes a linked input one the node runs for each element of, or a
+    /// plain link again. Returns whether the input is linked.
+    pub fn set_each(&mut self, node: NodeId, input: &str, each: bool) -> bool {
+        let input = self.nodes.get_mut(&node).and_then(|node| node.inputs.get_mut(input));
+        match input {
+            Some(Input::Link { each: flag, .. }) => {
+                *flag = each;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Puts an input back to the default of its port.

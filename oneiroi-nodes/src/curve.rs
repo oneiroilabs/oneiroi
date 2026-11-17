@@ -9,7 +9,7 @@ pub mod ops;
 mod profile;
 mod sweep;
 
-pub use nodes::{EvaluatedFrame, FRAMES, NURBS, SAMPLE, register};
+pub use nodes::{EvaluatedFrame, FRAMES, NURBS, SAMPLE, TRANSLATE, register};
 pub(crate) use profile::fractions;
 pub use profile::{PROFILE, Profile};
 pub use sweep::{SWEEP, SweptPatch, TubePatch, register_profile, tube};

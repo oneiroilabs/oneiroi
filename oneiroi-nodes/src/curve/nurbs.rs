@@ -133,6 +133,19 @@ impl CubicNurbsSegmentCache {
         self.cumulative_length
     }
 
+    /// The same segment, moved by `offset`.
+    pub fn translated(&self, offset: Vec3) -> Self {
+        let mut moved = *self;
+        // The columns are homogeneous, so the offset scales with the weight.
+        for column in &mut moved.monomial_basis {
+            let weight = column[3];
+            for (value, offset) in column.iter_mut().zip(offset.to_array()) {
+                *value += offset * weight;
+            }
+        }
+        moved
+    }
+
     /// Position, velocity and unit tangent at `u` in `0..=1`.
     pub fn evaluate(&self, u: f32) -> (Vec3, Vec3, Vec3) {
         let m = Mat4::from_cols_array_2d(&self.monomial_basis);
@@ -1039,6 +1052,26 @@ mod tests {
         let (end, start) = (corner.segments()[0].frame(1.0), corner.segments()[1].frame(0.0));
         assert!(start.normal.dot(start.tangent).abs() < 1e-4);
         assert!(end.normal.dot(end.tangent).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_moved_curve_is_the_same_curve_somewhere_else() {
+        let offset = Vec3::new(1.0, -2.0, 3.0);
+        let weighted: Vec<_> = points()
+            .iter()
+            .enumerate()
+            .map(|(i, point)| *point * (1.0 + i as f32 * 0.3))
+            .collect();
+        let curve = CubicNurbs::new(weighted, clamped_uniform_knots(8));
+        for segment in curve.segments() {
+            let moved = segment.translated(offset);
+            for step in 0..=8 {
+                let u = step as f32 / 8.0;
+                assert!((moved.evaluate(u).0 - segment.evaluate(u).0 - offset).length() < 1e-4);
+                assert!(moved.frame(u).normal.distance(segment.frame(u).normal) < 1e-4);
+            }
+            assert_eq!(moved.length(), segment.length());
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::{
 
 use glam::Vec3;
 use oneiroi_core::{
-    exec::{Engine, Instance},
+    exec::{Engine, Instance, Overflow},
     node::{Drawable, NodeRegistry, PortType},
     store::ContentKey,
     types::{DataType, Scalar, Trait, TypeInfo},
@@ -124,6 +124,10 @@ pub struct Session {
     /// The camera which was aimed at what is shown, and the request it
     /// was aimed for.
     pub framed: Option<(u64, OrbitCamera)>,
+    /// How many nodes ran for what is shown since it was last planned.
+    ran: usize,
+    /// The graphs which ran for fewer elements than they were given.
+    overflows: Vec<Overflow>,
 }
 
 impl Session {
@@ -134,6 +138,8 @@ impl Session {
             shown: Shown::Nothing,
             generation: 0,
             framed: None,
+            ran: 0,
+            overflows: Vec::new(),
         }
     }
 
@@ -160,7 +166,12 @@ impl Session {
     /// Runs what was planned. On the GPU once a device is attached to the
     /// executor, on the CPU before that.
     pub fn run(&mut self) -> usize {
+        if self.engine.pending() == 0 {
+            return 0;
+        }
         let ran = self.engine.flush();
+        self.ran += ran;
+        self.overflows = self.engine.overflows().to_vec();
         if ran > 0 {
             self.engine.end_frame(BUDGET_WORDS);
         }
@@ -255,7 +266,6 @@ pub struct Document {
     registry: NodeRegistry,
     session: Arc<Mutex<Session>>,
     error: Option<LowerError>,
-    nodes_run: usize,
 }
 
 impl Default for Document {
@@ -293,7 +303,6 @@ impl Document {
             registry,
             session: Arc::new(Mutex::new(Session::new())),
             error: None,
-            nodes_run: 0,
         };
         document.refresh();
         document
@@ -490,7 +499,7 @@ impl Document {
             .nodes()
             .flat_map(|(_, other)| other.inputs.values())
             .filter_map(|input| match input {
-                Input::Link { node, output } if *node == id => Some(output.clone()),
+                Input::Link { node, output, .. } if *node == id => Some(output.clone()),
                 _ => None,
             })
             .collect();
@@ -568,7 +577,7 @@ impl Document {
     /// Removes the link into `input` of `to` if it comes from `from`.
     pub fn disconnect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) {
         let linked = self.graph().node(to).and_then(|node| node.inputs.get(input));
-        if matches!(linked, Some(Input::Link { node, output: o }) if *node == from && o == output) {
+        if matches!(linked, Some(Input::Link { node, output: o, .. }) if *node == from && o == output) {
             self.reset(to, input);
         }
     }
@@ -590,8 +599,10 @@ impl Document {
         let view = self.view(node)?;
         let port = view.inputs.iter().find(|port| port.name == input)?;
         let stored = self.graph().node(node)?.inputs.get(input);
-        if matches!(stored, Some(Input::Link { .. })) {
-            return Some(("linked".into(), false));
+        match stored {
+            Some(Input::Link { each: true, .. }) => return Some(("each element".into(), false)),
+            Some(Input::Link { .. }) => return Some(("linked".into(), false)),
+            _ => {}
         }
         let PinType::Exact(ty) = port.ty else {
             return Some(("needs a link".into(), false));
@@ -654,7 +665,6 @@ impl Document {
     /// computed twice. Running happens in the [`Session`].
     fn refresh(&mut self) {
         self.error = None;
-        self.nodes_run = 0;
         let mut session = self.session.lock().unwrap();
         let session = &mut *session;
         session.instance = None;
@@ -699,7 +709,11 @@ impl Document {
         session.engine.programs_mut().retain(keep.into_iter().chain([id]));
 
         let mut instance = session.engine.instantiate(id);
-        self.nodes_run = session.engine.plan([&mut instance]);
+        // What was planned for before the edit is of no use anymore.
+        session.engine.discard();
+        session.engine.plan([&mut instance]);
+        session.ran = 0;
+        session.overflows.clear();
 
         // What can be shown of the outputs: a value which can be drawn as
         // it is if there is one, a mesh otherwise.
@@ -744,6 +758,19 @@ impl Document {
 
     /// One line about the state of the preview.
     pub fn status(&self) -> String {
+        // What is planned runs here if the preview did not get to it yet,
+        // so what is said is what happened.
+        let (ran, overflows) = {
+            let mut session = self.session.lock().unwrap();
+            session.run();
+            (session.ran, session.overflows.clone())
+        };
+        if let Some(overflow) = overflows.first() {
+            return format!(
+                "`{}` ran for {} of {} elements, the rest is left out",
+                overflow.program, overflow.max, overflow.elements
+            );
+        }
         if let Some(error) = &self.error {
             // A graph which is used here and broken itself says more
             // than that it could not be found.
@@ -759,11 +786,36 @@ impl Document {
         match (self.shown(), self.graph().display) {
             (Shown::Drawn { drawable, .. }, _) => format!(
                 "`{}` drawn as it is, {} nodes ran",
-                drawable.ty.name, self.nodes_run
+                drawable.ty.name, ran
             ),
-            (Shown::Mesh { .. }, _) => format!("a mesh, {} nodes ran", self.nodes_run),
+            (Shown::Mesh { .. }, _) => format!("a mesh, {ran} nodes ran"),
             (Shown::Nothing, Some(_)) => "the displayed node has nothing to show".into(),
             (Shown::Nothing, None) => "no node is displayed".into(),
+        }
+    }
+
+    /// Whether a node runs for each element of what is linked to `input`.
+    pub fn is_each(&self, node: NodeId, input: &str) -> bool {
+        matches!(
+            self.graph().input_of(node, input),
+            Some(Input::Link { each: true, .. })
+        )
+    }
+
+    /// Whether a node can run for each element of an input: it is another
+    /// graph and something is linked there.
+    pub fn can_be_each(&self, node: NodeId, input: &str) -> bool {
+        let graph = matches!(self.graph().node(node).map(|n| &n.kind), Some(NodeKind::Graph(_)));
+        graph && matches!(self.graph().input_of(node, input), Some(Input::Link { .. }))
+    }
+
+    /// Lets a node which is another graph run for each element of what is
+    /// linked to `input`, or once for all of it again.
+    pub fn toggle_each(&mut self, node: NodeId, input: &str) {
+        if self.can_be_each(node, input) {
+            let each = !self.is_each(node, input);
+            self.graph_mut().set_each(node, input, each);
+            self.refresh();
         }
     }
 
@@ -860,6 +912,8 @@ mod tests {
     fn meshed() -> (Document, [NodeId; 4]) {
         let mut document = Document::example();
         let nodes = nodes(&document);
+        // The surface was looked at before, so it is there already.
+        document.status();
         document.set_display(Some(nodes[3]));
         (document, nodes)
     }
@@ -879,10 +933,10 @@ mod tests {
         assert_eq!(document.status(), "`tube_patch` drawn as it is, 3 nodes ran");
         assert!(document.mesh().is_none() && document.error().is_none());
 
-        // Running happens in the session, wherever that is called from.
+        // Saying how many nodes ran runs them, if the preview did not.
         let session = document.session();
         let mut session = session.lock().unwrap();
-        assert_eq!(session.run(), 3);
+        assert_eq!(session.run(), 0);
         // One patch for each of the 5 segments of the curve.
         let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 28;
         assert_eq!(patches, 5);
@@ -972,11 +1026,12 @@ mod tests {
         let mut document = Document::example();
         let [curve, circle, sweep, mesh] = nodes(&document);
 
-        // A curve and a circle are shown as the lines they are.
+        // A curve and a circle are shown as the lines they are. The sweep
+        // was never looked at, so only the curve had to run.
         document.set_display(Some(curve));
         assert_eq!(
             document.status(),
-            "`cubic_nurbs_segment` drawn as it is, 0 nodes ran"
+            "`cubic_nurbs_segment` drawn as it is, 1 nodes ran"
         );
         document.set_display(Some(circle));
         assert!(matches!(document.shown(), Shown::Drawn { .. }));
@@ -1028,7 +1083,10 @@ mod tests {
                 "curve.nurbs",
                 "curve.sample",
                 "curve.sweep",
-                "surface.tessellate"
+                "curve.translate",
+                "surface.tessellate",
+                "value.f32",
+                "value.vec3"
             ]
         );
 
@@ -1104,6 +1162,58 @@ mod tests {
         let mut loaded = loaded;
         loaded.open("tube");
         assert!(radius(&loaded) > thick);
+    }
+
+    #[test]
+    fn a_graph_can_run_for_each_element() {
+        let mut document = Document::example();
+        let [curve, circle, sweep, mesh] = nodes(&document);
+        document.remove_nodes(&[mesh]);
+
+        // A graph which sweeps a circle of any radius along the curve.
+        let name = document.new_graph();
+        let inner_curve = document.add_node("curve.nurbs", [0.0, 0.0]);
+        let points: Vec<String> = (0..8)
+            .flat_map(|i| [((i % 2) as f32).to_string(), i.to_string(), "0".into(), "1".into()])
+            .collect();
+        assert!(document.set_input(inner_curve, "points", &points.join(",")));
+        let knots: Vec<_> = clamped_uniform_knots(8).iter().map(f32::to_string).collect();
+        assert!(document.set_input(inner_curve, "knots", &knots.join(",")));
+        let inner_circle = document.add_node("curve.circle", [0.0, 0.0]);
+        document.toggle_exposed(inner_circle, "radius");
+        let inner_sweep = document.add_node("curve.sweep", [0.0, 0.0]);
+        assert!(document.connect(inner_curve, "segments", inner_sweep, "spine"));
+        assert!(document.connect(inner_circle, "circle", inner_sweep, "profile"));
+        document.toggle_output(inner_sweep, "surface");
+
+        // Back in the first graph, three tubes of three radii.
+        document.open("tube");
+        let radii = document.add_node("value.f32", [0.0, 0.0]);
+        assert!(document.set_input(radii, "values", "0.1, 0.2, 0.3"));
+        let tubes = document.add(NodeKind::Graph(name), [0.0, 0.0]);
+        assert!(document.connect(radii, "values", tubes, "radius"));
+        assert!(document.can_be_each(tubes, "radius") && !document.can_be_each(sweep, "spine"));
+        document.toggle_each(tubes, "radius");
+        assert!(document.is_each(tubes, "radius"));
+        assert_eq!(document.input_text(tubes, "radius").unwrap().0, "each element");
+
+        document.set_display(Some(tubes));
+        let Shown::Drawn { key, drawable } = document.shown() else {
+            panic!("the tubes are a surface");
+        };
+        assert_eq!(drawable.ty.name, "tube_patch");
+        // The numbers, the curve once, and a circle and a sweep for each.
+        assert_eq!(document.status(), "`tube_patch` drawn as it is, 8 nodes ran");
+        let session = document.session();
+        let patches = session.lock().unwrap().engine_mut().fetch_key::<u32>(key).unwrap().len() / 28;
+        // Three tubes, each of the five segments of the curve.
+        assert_eq!(patches, 3 * 5);
+        drop(session);
+
+        // Once for all of it again, which is one tube of the first radius.
+        document.toggle_each(tubes, "radius");
+        assert!(!document.is_each(tubes, "radius"));
+        let _ = (curve, circle);
     }
 
     #[test]

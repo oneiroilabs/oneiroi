@@ -317,6 +317,100 @@ fn a_broken_graph_does_not_stop_the_others() {
     assert_eq!(single.len(), 1);
 }
 
+/// A tube along a curve, moved by its parameter `offset`.
+fn moved_tube() -> Graph {
+    let mut graph = Graph::new("moved tube");
+    let curve = graph.add("curve.nurbs");
+    graph
+        .set(curve, "points", Value::F32(POINTS.as_flattened().to_vec()))
+        .unwrap();
+    graph
+        .set(curve, "knots", Value::F32(clamped_uniform_knots(5)))
+        .unwrap();
+    let moved = graph.add("curve.translate");
+    graph.connect(curve, "segments", moved, "segments").unwrap();
+    graph.expose(moved, "offset", "offset", None).unwrap();
+    let circle = graph.add("curve.circle");
+    graph.expose(circle, "radius", "radius", Some(0.2.into())).unwrap();
+    let sweep = graph.add("curve.sweep");
+    graph.connect(moved, "segments", sweep, "spine").unwrap();
+    graph.connect(circle, "circle", sweep, "profile").unwrap();
+    graph.add_output("surface", sweep, "surface").unwrap();
+    graph
+}
+
+/// The moved tube once for each of three offsets.
+fn row_of_tubes() -> (Graph, NodeId, NodeId) {
+    let mut graph = Graph::new("row");
+    let offsets = graph.add("value.vec3");
+    graph
+        .set(offsets, "values", Value::F32(vec![0., 0., 0., 3., 0., 0., 6., 0., 0.]))
+        .unwrap();
+    let tubes = graph.add_graph("moved tube");
+    graph.connect(offsets, "values", tubes, "offset").unwrap();
+    assert!(graph.set_each(tubes, "offset", true));
+    graph.add_output("surface", tubes, "surface").unwrap();
+    (graph, offsets, tubes)
+}
+
+#[test]
+fn a_graph_can_run_for_each_element() {
+    let (row, offsets, tubes) = row_of_tubes();
+    let mut library = Library::new();
+    library.insert(moved_tube());
+    library.insert(row.clone());
+
+    let mut engine = Engine::default();
+    let registry = registry();
+    let programs = library.lower_into(&registry, engine.programs_mut()).unwrap();
+    let mut instance = engine.instantiate(programs["row"]);
+    engine.evaluate([&mut instance]);
+
+    // Three tubes of two segments each, one after the other, and each
+    // moved by its own offset.
+    let patches = engine
+        .read::<oneiroi_nodes::curve::TubePatch>(&instance, "surface")
+        .unwrap();
+    assert_eq!(patches.len(), 3 * 2);
+    use oneiroi_nodes::surface::Surface;
+    let start = |patch: usize| patches[patch].point(0.0, 0.0).0;
+    assert!((start(2) - start(0) - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-4);
+    assert!((start(4) - start(0) - Vec3::new(6.0, 0.0, 0.0)).length() < 1e-4);
+    assert!(engine.overflows().is_empty());
+
+    // It survives its file.
+    assert_eq!(Graph::from_json(&row.to_json()).unwrap(), row);
+    assert!(row.to_json().contains("\"each\": true"));
+
+    // Only a graph can run for each element, and of one input only.
+    let mut broken = row.clone();
+    let circle = broken.add("curve.circle");
+    let numbers = broken.add("value.f32");
+    broken.connect(numbers, "values", circle, "radius").unwrap();
+    assert!(broken.set_each(circle, "radius", true));
+    broken.add_output("circle", circle, "circle").unwrap();
+    let error = |graph: Graph| {
+        let mut library = Library::new();
+        library.insert(moved_tube());
+        library.insert(graph);
+        match library.lower_into(&registry, Engine::default().programs_mut()) {
+            Err(LibraryError::Lower { error, .. }) => error.kind,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(error(broken), LowerErrorKind::EachOnNode);
+
+    let mut broken = row.clone();
+    let numbers = broken.add("value.f32");
+    broken.connect(numbers, "values", tubes, "radius").unwrap();
+    assert!(broken.set_each(tubes, "radius", true));
+    assert_eq!(error(broken), LowerErrorKind::EachTwice);
+
+    // Only a link can be for each element.
+    let mut graph = row.clone();
+    assert!(!graph.set_each(offsets, "values", true));
+}
+
 #[test]
 fn graphs_can_not_use_themselves() {
     let mut a = Graph::new("a");

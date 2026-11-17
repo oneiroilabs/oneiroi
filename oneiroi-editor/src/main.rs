@@ -6,7 +6,8 @@ use iced::widget::{
 };
 use iced::{Center, Color, Element, Fill, Point, Theme, Vector};
 use iced_nodegraph::{
-    ColorQuad, Keymap, NodeGraph, NodeStyle, PinDirection, PinRef, default_can_connect,
+    ColorQuad, EdgeStyle, Keymap, NodeGraph, NodeStyle, Pattern, PinDirection, PinRef,
+    default_can_connect, default_edge_style,
     default_node_style, edge, node, node_header, pin,
 };
 use oneiroi_editor::document::{Document, PaletteEntry, PinType};
@@ -46,6 +47,7 @@ enum Message {
     NewGraph,
     Expose(u32, String),
     Export(u32, String),
+    Each(u32, String),
     Display(u32),
     Edited(u32, String, String),
     Committed(u32, String),
@@ -181,6 +183,9 @@ impl Editor {
             }
             Message::Export(node, output) => {
                 self.document.toggle_output(node.into(), &output);
+            }
+            Message::Each(node, input) => {
+                self.document.toggle_each(node.into(), &input);
             }
             Message::Display(node) => {
                 // Another node is another thing to look at, which can be
@@ -394,12 +399,21 @@ impl Editor {
             );
 
             for (name, input) in &data.inputs {
-                if let Input::Link { node, output } = input {
-                    graph.push_edge(edge!(
+                if let Input::Link { node, output, each } = input {
+                    let edge = edge!(
                         PinRef::new(node.raw(), output_pin(output)),
                         PinRef::new(id.raw(), input_pin(name)),
                         format!("{}:{name}", id.raw()),
-                    ));
+                    );
+                    // A link a graph runs for each element of is dashed.
+                    let edge = match each {
+                        true => edge.style(|theme, status, _, _| EdgeStyle {
+                            pattern: Pattern::dashed(2.5, 8.0, 5.0),
+                            ..default_edge_style(theme, status)
+                        }),
+                        false => edge,
+                    };
+                    graph.push_edge(edge);
                 }
             }
         }
@@ -450,7 +464,18 @@ impl Editor {
                 Message::Expose(node.raw(), port.name.clone()),
             );
             let reset = small("reset", Message::Reset(node.raw(), port.name.clone()));
-            rows = rows.push(row![label, field, expose, reset].spacing(6).align_y(Center));
+            // A graph can run once for each element of what is linked.
+            let middle: Element<'_, Message> = if self.document.can_be_each(node, &port.name) {
+                let each = self.document.is_each(node, &port.name);
+                small(
+                    if each { "each element" } else { "all at once" },
+                    Message::Each(node.raw(), port.name.clone()),
+                )
+                .into()
+            } else {
+                expose.into()
+            };
+            rows = rows.push(row![label, field, middle, reset].spacing(6).align_y(Center));
         }
         for port in &view.outputs {
             let label = text(format!("{} ({})", port.name, port.ty.name()))
