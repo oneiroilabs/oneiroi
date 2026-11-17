@@ -428,7 +428,12 @@ impl<E: Executor> Engine<E> {
     /// backend has it. That can take a while, so do it for what the CPU
     /// really needs to see and not for everything.
     pub fn fetch<T: DataType>(&mut self, instance: &Instance, name: &str) -> Option<&[T]> {
-        let key = self.output_key(instance, name)?;
+        self.fetch_key(self.output_key(instance, name)?)
+    }
+
+    /// [`Engine::fetch`] for a value which is known by its key. With `u32`
+    /// as type this gives the plain words of any value.
+    pub fn fetch_key<T: DataType>(&mut self, key: ContentKey) -> Option<&[T]> {
         if self.store.contains(key) && !self.store.is_resident(key) {
             self.executor.download(&mut self.store, &[key]);
         }

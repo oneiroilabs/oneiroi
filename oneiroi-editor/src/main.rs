@@ -8,9 +8,12 @@ use iced_nodegraph::{
     ColorQuad, Keymap, NodeGraph, NodeStyle, PinDirection, PinRef, default_can_connect,
     default_node_style, edge, node, node_header, pin,
 };
-use oneiroi_editor::document::{Document, PinType};
+use oneiroi_editor::document::{Document, PinType, Shown};
 use oneiroi_editor::preview::Preview;
 use oneiroi_graph::{Input, NodeId};
+
+/// How finely a surface is drawn: steps along and across each patch.
+const DETAIL: (u32, u32) = (16, 24);
 
 /// Where a graph is saved to and loaded from, next to where the editor runs.
 const FILE: &str = "graph.json";
@@ -151,9 +154,11 @@ impl Editor {
                 self.selected = vec![node];
             }
             Message::Display(node) => {
-                let had_mesh = self.document.mesh().is_some();
+                // Aim the camera again when something shows up where
+                // nothing was, and leave it alone otherwise.
+                let empty = self.document.shown() == Shown::Nothing;
                 self.document.set_display(Some(node.into()));
-                if !had_mesh {
+                if empty {
                     self.frame += 1;
                 }
             }
@@ -211,8 +216,9 @@ impl Editor {
         .align_y(Center);
 
         let preview = shader(Preview {
-            mesh: self.document.mesh().cloned(),
+            session: self.document.session(),
             frame: self.frame,
+            detail: DETAIL,
         })
         .width(Fill)
         .height(Fill);

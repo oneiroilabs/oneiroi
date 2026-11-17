@@ -3,15 +3,19 @@
 //! Nothing in here knows about the user interface, so all of it can be
 //! tested without opening a window.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use glam::Vec3;
 use oneiroi_core::{
     exec::{Engine, Instance},
-    node::{NodeRegistry, PortType},
+    node::{Drawable, NodeRegistry, PortType},
     store::ContentKey,
     types::{DataType, Scalar, Trait, TypeInfo},
 };
+use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
 use oneiroi_graph::{Context, Graph, Input, LowerError, NodeId, NodeKind, Value};
 use oneiroi_nodes::curve::nurbs::clamped_uniform_knots;
 
@@ -64,16 +68,137 @@ pub struct NodeView {
     pub known: bool,
 }
 
-/// The mesh of the displayed node.
+/// What the preview shows of the displayed node.
+#[derive(Debug, Clone, Copy)]
+pub enum Shown {
+    Nothing,
+    /// A value the GPU draws as it is, without a mesh in between.
+    Drawn { key: ContentKey, drawable: Drawable },
+    /// A triangle mesh somebody made on purpose.
+    Mesh {
+        positions: ContentKey,
+        indices: ContentKey,
+        normals: Option<ContentKey>,
+    },
+}
+
+impl PartialEq for Shown {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Nothing, Self::Nothing) => true,
+            (Self::Drawn { key: a, drawable: x }, Self::Drawn { key: b, drawable: y }) => {
+                a == b && x.ty == y.ty
+            }
+            (
+                Self::Mesh { positions: a, indices: b, normals: c },
+                Self::Mesh { positions: x, indices: y, normals: z },
+            ) => (a, b, c) == (x, y, z),
+            _ => false,
+        }
+    }
+}
+
+/// A triangle mesh of the displayed node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewMesh {
-    /// Different for every mesh this document ever had.
-    pub generation: u64,
     pub positions: Vec<Vec3>,
     pub normals: Option<Vec<Vec3>>,
     pub indices: Vec<u32>,
-    pub center: Vec3,
-    pub radius: f32,
+}
+
+/// The part of a document which computes: the engine and what it is asked
+/// to show.
+///
+/// It is shared between the application, which plans, and the preview,
+/// which has the graphics device and therefore is where things run.
+pub struct Session {
+    engine: Engine<DeferredExecutor>,
+    instance: Option<Instance>,
+    shown: Shown,
+    /// Counts up every time something else is shown.
+    generation: u64,
+    /// The camera which was aimed at what is shown, and the request it
+    /// was aimed for.
+    pub framed: Option<(u64, OrbitCamera)>,
+}
+
+impl Session {
+    fn new() -> Self {
+        Self {
+            engine: Engine::new(DeferredExecutor::default()),
+            instance: None,
+            shown: Shown::Nothing,
+            generation: 0,
+            framed: None,
+        }
+    }
+
+    pub fn engine_mut(&mut self) -> &mut Engine<DeferredExecutor> {
+        &mut self.engine
+    }
+
+    pub fn shown(&self) -> Shown {
+        self.shown
+    }
+
+    /// Different whenever something else is shown.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn show(&mut self, shown: Shown) {
+        if self.shown != shown {
+            self.shown = shown;
+            self.generation += 1;
+        }
+    }
+
+    /// Runs what was planned. On the GPU once a device is attached to the
+    /// executor, on the CPU before that.
+    pub fn run(&mut self) -> usize {
+        let ran = self.engine.flush();
+        if ran > 0 {
+            self.engine.end_frame(BUDGET_WORDS);
+        }
+        ran
+    }
+
+    /// The mesh which is shown, brought over from the GPU if need be.
+    pub fn mesh(&mut self) -> Option<PreviewMesh> {
+        let Shown::Mesh { positions, indices, normals } = self.shown else {
+            return None;
+        };
+        self.run();
+        let positions = self.engine.fetch_key::<Vec3>(positions)?.to_vec();
+        let indices = self.engine.fetch_key::<u32>(indices)?.to_vec();
+        let normals = normals
+            .and_then(|key| self.engine.fetch_key::<Vec3>(key))
+            .map(<[Vec3]>::to_vec);
+        (!positions.is_empty() && !indices.is_empty()).then_some(PreviewMesh {
+            positions,
+            normals,
+            indices,
+        })
+    }
+
+    /// Center and radius of a sphere around what is shown.
+    pub fn bounds(&mut self) -> Option<(Vec3, f32)> {
+        self.run();
+        match self.shown {
+            Shown::Nothing => None,
+            Shown::Drawn { key, drawable } => {
+                let (center, radius) = (drawable.bounds)(self.engine.fetch_key::<u32>(key)?)?;
+                Some((center.into(), radius))
+            }
+            Shown::Mesh { positions, .. } => {
+                let positions = self.engine.fetch_key::<Vec3>(positions)?;
+                let (min, max) = positions
+                    .iter()
+                    .fold((Vec3::MAX, Vec3::MIN), |(min, max), p| (min.min(*p), max.max(*p)));
+                (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
+            }
+        }
+    }
 }
 
 pub fn format_value(value: &Value) -> String {
@@ -105,11 +230,7 @@ fn words_to_value(words: &[u32], scalar: Scalar) -> Value {
 pub struct Document {
     graph: Graph,
     registry: NodeRegistry,
-    engine: Engine,
-    instance: Option<Instance>,
-    mesh: Option<Arc<PreviewMesh>>,
-    mesh_key: Option<[Option<ContentKey>; 3]>,
-    generation: u64,
+    session: Arc<Mutex<Session>>,
     error: Option<LowerError>,
     nodes_run: usize,
 }
@@ -127,11 +248,7 @@ impl Document {
         let mut document = Self {
             graph,
             registry,
-            engine: Engine::default(),
-            instance: None,
-            mesh: None,
-            mesh_key: None,
-            generation: 0,
+            session: Arc::new(Mutex::new(Session::new())),
             error: None,
             nodes_run: 0,
         };
@@ -173,7 +290,9 @@ impl Document {
         for (node, position) in positions {
             graph.node_mut(node).unwrap().meta.position = position;
         }
-        graph.display = Some(mesh);
+        // The surface itself is shown. The mesh node is there for whoever
+        // wants triangles, the preview does not need it.
+        graph.display = Some(sweep);
         Self::new(graph)
     }
 
@@ -376,18 +495,26 @@ impl Document {
         true
     }
 
-    /// Lowers and evaluates the displayed node again. Everything which
-    /// did not change is found in the store and not computed twice.
+    /// The engine and what it shows, for the preview to run and draw.
+    pub fn session(&self) -> Arc<Mutex<Session>> {
+        self.session.clone()
+    }
+
+    /// Lowers the displayed node again and plans what has to run for it.
+    /// Everything which did not change is found in the store and is not
+    /// computed twice. Running happens in the [`Session`].
     fn refresh(&mut self) {
         self.error = None;
-        self.instance = None;
         self.nodes_run = 0;
+        let mut session = self.session.lock().unwrap();
+        let session = &mut *session;
+        session.instance = None;
 
         let lowered = self.graph.display.map(|display| {
             self.graph.lower_node(
                 Context {
                     registry: &self.registry,
-                    programs: self.engine.programs(),
+                    programs: session.engine.programs(),
                     graphs: &HashMap::new(),
                 },
                 display,
@@ -397,72 +524,56 @@ impl Document {
             Some(Ok(program)) => program,
             Some(Err(error)) => {
                 self.error = Some(error);
-                return self.show(None);
+                return session.show(Shown::Nothing);
             }
-            None => return self.show(None),
+            None => return session.show(Shown::Nothing),
         };
 
-        let id = match self.engine.programs().find(program.hash) {
+        let id = match session.engine.programs().find(program.hash) {
             Some(id) => id,
-            None => self.engine.add_program(program),
+            None => session.engine.add_program(program),
         };
         // Whatever the graph lowered to before the edit is of no use now.
-        self.engine.programs_mut().retain([id]);
-        let mut instance = self.engine.instantiate(id);
-        self.nodes_run = self.engine.evaluate([&mut instance]);
-        self.instance = Some(instance);
-        self.show(self.instance.as_ref().map(|_| ()));
-        self.engine.end_frame(BUDGET_WORDS);
-    }
+        session.engine.programs_mut().retain([id]);
 
-    /// Takes the mesh out of the evaluated instance, if it has one.
-    fn show(&mut self, evaluated: Option<()>) {
-        let Some(instance) = self.instance.as_ref().filter(|_| evaluated.is_some()) else {
-            self.mesh = None;
-            self.mesh_key = None;
-            return;
-        };
+        let mut instance = session.engine.instantiate(id);
+        self.nodes_run = session.engine.plan([&mut instance]);
 
-        let program = self.engine.programs().get(instance.program());
-        let typed = |name: &str, ty: TypeInfo| {
+        // What can be shown of the outputs: a value which can be drawn as
+        // it is if there is one, a mesh otherwise.
+        let program = session.engine.programs().get(id);
+        let output = |name: &str, ty: TypeInfo| {
             let output = &program.outputs[program.output_index(name)?];
             (program.slot(output.slot).ty == ty)
-                .then(|| self.engine.output_key(instance, name))
+                .then(|| session.engine.output_key(&instance, name))
                 .flatten()
         };
-        let key = [
-            typed("positions", Vec3::INFO),
-            typed("indices", u32::INFO),
-            typed("normals", Vec3::INFO),
-        ];
-        if self.mesh_key == Some(key) {
-            return;
-        }
-        self.mesh_key = Some(key);
-
-        let read = |key: Option<ContentKey>| key.and_then(|key| self.engine.store().read::<Vec3>(key));
-        let indices = key[1].and_then(|key| self.engine.store().read::<u32>(key));
-        self.mesh = match (read(key[0]), indices) {
-            (Some(positions), Some(indices)) if !positions.is_empty() && !indices.is_empty() => {
-                let (min, max) = positions
-                    .iter()
-                    .fold((Vec3::MAX, Vec3::MIN), |(min, max), p| (min.min(*p), max.max(*p)));
-                self.generation += 1;
-                Some(Arc::new(PreviewMesh {
-                    generation: self.generation,
-                    positions: positions.to_vec(),
-                    normals: read(key[2]).map(<[Vec3]>::to_vec),
-                    indices: indices.to_vec(),
-                    center: (min + max) * 0.5,
-                    radius: (max - min).length() * 0.5,
-                }))
-            }
-            _ => None,
+        let drawn = program.outputs.iter().find_map(|output| {
+            let drawable = *self.registry.drawable(&program.slot(output.slot).ty)?;
+            let key = session.engine.output_key(&instance, &output.name)?;
+            Some(Shown::Drawn { key, drawable })
+        });
+        let mesh = || {
+            Some(Shown::Mesh {
+                positions: output("positions", Vec3::INFO)?,
+                indices: output("indices", u32::INFO)?,
+                normals: output("normals", Vec3::INFO),
+            })
         };
+        let shown = drawn.or_else(mesh).unwrap_or(Shown::Nothing);
+
+        session.instance = Some(instance);
+        session.show(shown);
     }
 
-    pub fn mesh(&self) -> Option<&Arc<PreviewMesh>> {
-        self.mesh.as_ref()
+    /// The mesh of the displayed node, if it has one. This runs whatever
+    /// is still planned.
+    pub fn mesh(&self) -> Option<PreviewMesh> {
+        self.session.lock().unwrap().mesh()
+    }
+
+    pub fn shown(&self) -> Shown {
+        self.session.lock().unwrap().shown()
     }
 
     pub fn error(&self) -> Option<&LowerError> {
@@ -474,15 +585,14 @@ impl Document {
         if let Some(error) = &self.error {
             return error.to_string();
         }
-        match (&self.mesh, self.graph.display) {
-            (Some(mesh), _) => format!(
-                "{} vertices, {} triangles, {} nodes ran",
-                mesh.positions.len(),
-                mesh.indices.len() / 3,
-                self.nodes_run
+        match (self.shown(), self.graph.display) {
+            (Shown::Drawn { drawable, .. }, _) => format!(
+                "`{}` drawn as it is, {} nodes ran",
+                drawable.ty.name, self.nodes_run
             ),
-            (None, Some(_)) => "the displayed node has no mesh".into(),
-            (None, None) => "no node is displayed".into(),
+            (Shown::Mesh { .. }, _) => format!("a mesh, {} nodes ran", self.nodes_run),
+            (Shown::Nothing, Some(_)) => "the displayed node has nothing to show".into(),
+            (Shown::Nothing, None) => "no node is displayed".into(),
         }
     }
 
@@ -516,36 +626,70 @@ mod tests {
         ]
     }
 
+    /// The example with its mesh node shown.
+    fn meshed() -> (Document, [NodeId; 4]) {
+        let mut document = Document::example();
+        let nodes = nodes(&document);
+        document.set_display(Some(nodes[3]));
+        (document, nodes)
+    }
+
     #[test]
-    fn the_example_has_a_mesh() {
+    fn the_example_shows_its_surface() {
         let document = Document::example();
+        let [_, _, sweep, _] = nodes(&document);
+        assert_eq!(document.graph().display, Some(sweep));
+
+        // The sweep is drawn as it is: only the curve, the circle and the
+        // sweep run, and nobody makes a mesh.
+        let Shown::Drawn { key, drawable } = document.shown() else {
+            panic!("a surface can be drawn");
+        };
+        assert_eq!(drawable.ty.name, "tube_patch");
+        assert_eq!(document.status(), "`tube_patch` drawn as it is, 3 nodes ran");
+        assert!(document.mesh().is_none() && document.error().is_none());
+
+        // Running happens in the session, wherever that is called from.
+        let session = document.session();
+        let mut session = session.lock().unwrap();
+        assert_eq!(session.run(), 3);
+        // One patch for each of the 5 segments of the curve.
+        let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 28;
+        assert_eq!(patches, 5);
+        let (center, radius) = session.bounds().unwrap();
+        assert!(radius > 3.0 && (center.y - 3.5).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_mesh_node_shows_its_mesh() {
+        let (document, _) = meshed();
         let mesh = document.mesh().unwrap();
         // 5 segments, each a grid of 16 rings and 24 sides.
         assert_eq!(mesh.positions.len(), 5 * 17 * 25);
-        assert!(mesh.normals.is_some() && mesh.radius > 1.0);
-        assert!(document.error().is_none());
-        assert!(document.status().contains("4 nodes ran"));
+        assert!(mesh.normals.is_some());
+        // Only the mesh was new, the surface was there from before.
+        assert_eq!(document.status(), "a mesh, 1 nodes ran");
+        assert!(document.session().lock().unwrap().bounds().unwrap().1 > 3.0);
     }
 
     #[test]
     fn edits_show_up_in_the_preview() {
-        let mut document = Document::example();
-        let [curve, circle, sweep, mesh] = nodes(&document);
-        let before = document.mesh().unwrap().clone();
+        let (mut document, [curve, circle, sweep, mesh]) = meshed();
+        let before = document.session().lock().unwrap().generation();
 
         assert!(document.set_input(mesh, "sides", "6"));
-        let after = document.mesh().unwrap().clone();
-        assert_ne!(before.generation, after.generation);
-        assert_eq!(after.positions.len(), 5 * 17 * 7);
+        assert_ne!(before, document.session().lock().unwrap().generation());
+        assert_eq!(document.mesh().unwrap().positions.len(), 5 * 17 * 7);
         // The surface is what it was, only its mesh had to be made again.
         assert!(document.status().contains("1 nodes ran"));
 
         // Text which is not a value of the input changes nothing.
+        let after = document.session().lock().unwrap().generation();
         assert!(!document.set_input(mesh, "sides", "six"));
         assert!(!document.set_input(mesh, "sides", "1.5"));
         assert!(!document.set_input(curve, "points", "1, 2, 3"));
         assert!(!document.set_input(sweep, "profile", "1"));
-        assert_eq!(document.mesh().unwrap().generation, after.generation);
+        assert_eq!(document.session().lock().unwrap().generation(), after);
 
         assert_eq!(document.input_text(circle, "radius").unwrap(), ("0.25".into(), true));
         assert_eq!(document.input_text(mesh, "rings").unwrap(), ("16".into(), true));
@@ -560,12 +704,12 @@ mod tests {
 
     #[test]
     fn edits_do_not_pile_up_programs() {
-        let mut document = Document::example();
-        let [_, _, _, mesh] = nodes(&document);
+        let (mut document, [_, _, _, mesh]) = meshed();
         for sides in 3..20 {
             assert!(document.set_input(mesh, "sides", &sides.to_string()));
         }
-        assert_eq!(document.engine.programs().len(), 1);
+        let session = document.session();
+        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 1);
     }
 
     #[test]
@@ -584,27 +728,29 @@ mod tests {
         assert!(!document.connect(mesh, "indices", mesh, "rings"));
 
         document.disconnect(circle, "circle", sweep, "profile");
-        assert!(document.mesh().is_none());
+        assert_eq!(document.shown(), Shown::Nothing);
         assert!(document.status().contains("something has to be connected"));
         assert_eq!(document.error().unwrap().node, Some(sweep));
 
         assert!(document.connect(circle, "circle", sweep, "profile"));
-        assert!(document.mesh().is_some() && document.error().is_none());
+        assert!(matches!(document.shown(), Shown::Drawn { .. }) && document.error().is_none());
     }
 
     #[test]
     fn any_node_can_be_displayed() {
         let mut document = Document::example();
-        let [curve, _, _, mesh] = nodes(&document);
+        let [curve, _, sweep, mesh] = nodes(&document);
 
         document.set_display(Some(curve));
-        assert!(document.mesh().is_none());
-        assert_eq!(document.status(), "the displayed node has no mesh");
+        assert_eq!(document.shown(), Shown::Nothing);
+        assert_eq!(document.status(), "the displayed node has nothing to show");
 
         document.set_display(Some(mesh));
-        assert!(document.mesh().is_some());
+        assert!(matches!(document.shown(), Shown::Mesh { .. }));
+        document.set_display(Some(sweep));
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
 
-        document.remove_nodes(&[mesh]);
+        document.remove_nodes(&[sweep]);
         assert_eq!(document.graph().display, None);
         assert_eq!(document.status(), "no node is displayed");
     }
@@ -652,10 +798,8 @@ mod tests {
         let document = Document::example();
         let loaded = Document::from_json(&document.to_json()).unwrap();
         assert_eq!(loaded.graph(), document.graph());
-        assert_eq!(
-            loaded.mesh().unwrap().positions,
-            document.mesh().unwrap().positions
-        );
+        // The same graph is the same work, so it shows the very same value.
+        assert_eq!(loaded.shown(), document.shown());
 
         // A node nobody knows is still shown with its links.
         let mut graph = document.graph().clone();

@@ -1,22 +1,29 @@
-//! The mesh of the displayed node, to orbit around.
+//! The displayed node, to orbit around.
+//!
+//! This is where the graph actually runs: the user interface hands out its
+//! graphics device only while it draws, so what the application planned is
+//! executed here, on that device, right before it is shown.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 use iced::{
     Event, Rectangle, mouse,
     widget::shader::{self, Action, Pipeline, Primitive},
 };
-use oneiroi_wgpu::{MeshData, MeshPreview, orbit::OrbitCamera};
+use oneiroi_wgpu::{DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera};
 
-use crate::document::PreviewMesh;
+use crate::document::{Session, Shown};
 
-/// Draws a mesh. Drag with the middle mouse button to orbit, scroll to zoom.
-#[derive(Debug, Clone, Default)]
+/// Shows what a [`Session`] shows. Drag with the middle mouse button to
+/// orbit, scroll to zoom.
+#[derive(Clone)]
 pub struct Preview {
-    pub mesh: Option<Arc<PreviewMesh>>,
-    /// The camera is aimed at the mesh again whenever this changes.
+    pub session: Arc<Mutex<Session>>,
+    /// The camera is aimed at what is shown again whenever this changes.
     pub frame: u64,
+    /// Steps along and across every patch of a surface.
+    pub detail: (u32, u32),
 }
 
 pub struct CameraState {
@@ -39,23 +46,17 @@ impl Default for CameraState {
 }
 
 impl Preview {
-    /// The camera to draw with: the one the user moved, or one aimed at the
-    /// mesh if that was asked for since.
-    fn camera(&self, state: &CameraState) -> (OrbitCamera, bool) {
-        let mut camera = state.camera;
-        match &self.mesh {
-            Some(mesh) if state.framed != Some(self.frame) => {
-                camera.frame(mesh.center, (mesh.radius * 3.0).max(0.1));
-                (camera, true)
-            }
-            _ => (camera, false),
-        }
+    /// The camera which was aimed for the current request, once drawing
+    /// has found out where to aim it.
+    fn aimed(&self) -> Option<OrbitCamera> {
+        let (request, camera) = self.session.lock().unwrap().framed?;
+        (request == self.frame).then_some(camera)
     }
 }
 
 impl<Message> shader::Program<Message> for Preview {
     type State = CameraState;
-    type Primitive = MeshPrimitive;
+    type Primitive = Shot;
 
     fn update(
         &self,
@@ -64,9 +65,12 @@ impl<Message> shader::Program<Message> for Preview {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
-        let (camera, aimed) = self.camera(state);
-        if aimed {
+        if state.framed != Some(self.frame)
+            && let Some(camera) = self.aimed()
+        {
+            let dragging = state.camera.dragging();
             state.camera = camera;
+            state.camera.set_dragging(dragging);
             state.framed = Some(self.frame);
         }
 
@@ -110,23 +114,54 @@ impl<Message> shader::Program<Message> for Preview {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        MeshPrimitive {
-            mesh: self.mesh.clone(),
-            camera: self.camera(state).0,
+        // Where to aim is only known once things ran, which is while
+        // drawing. Until then the request is passed along.
+        let (camera, frame) = if state.framed == Some(self.frame) {
+            (state.camera, None)
+        } else {
+            match self.aimed() {
+                Some(camera) => (camera, None),
+                None => (state.camera, Some(self.frame)),
+            }
+        };
+        Shot {
+            session: self.session.clone(),
+            camera,
+            frame,
+            detail: self.detail,
         }
     }
 }
 
-#[derive(Debug)]
-pub struct MeshPrimitive {
-    mesh: Option<Arc<PreviewMesh>>,
+/// One frame of the preview.
+pub struct Shot {
+    session: Arc<Mutex<Session>>,
     camera: OrbitCamera,
+    /// A request to aim the camera which nobody answered yet.
+    frame: Option<u64>,
+    detail: (u32, u32),
+}
+
+impl std::fmt::Debug for Shot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shot").field("camera", &self.camera).finish()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Drawing {
+    Nothing,
+    /// Straight from the store, by the [`DrawStage`].
+    Value,
+    Mesh,
 }
 
 pub struct PreviewPipeline {
-    preview: MeshPreview,
-    /// The generation of the mesh which is uploaded.
-    shown: Option<u64>,
+    stage: DrawStage,
+    mesh: MeshPreview,
+    drawing: Drawing,
+    /// The generation of the session the mesh was uploaded for.
+    uploaded: Option<u64>,
     /// Where the widget is, in pixels of the target.
     bounds: (f32, f32, f32, f32),
 }
@@ -138,14 +173,16 @@ impl Pipeline for PreviewPipeline {
         format: iced::wgpu::TextureFormat,
     ) -> Self {
         Self {
-            preview: MeshPreview::new(device, format),
-            shown: None,
+            stage: DrawStage::new(device, format),
+            mesh: MeshPreview::new(device, format),
+            drawing: Drawing::Nothing,
+            uploaded: None,
             bounds: (0.0, 0.0, 1.0, 1.0),
         }
     }
 }
 
-impl Primitive for MeshPrimitive {
+impl Primitive for Shot {
     type Pipeline = PreviewPipeline;
 
     fn prepare(
@@ -156,15 +193,24 @@ impl Primitive for MeshPrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        let generation = self.mesh.as_ref().map(|mesh| mesh.generation);
-        if pipeline.shown != generation {
-            pipeline.shown = generation;
-            let mesh = self.mesh.as_ref().map(|mesh| MeshData {
-                positions: &mesh.positions,
-                normals: mesh.normals.as_deref(),
-                indices: &mesh.indices,
-            });
-            pipeline.preview.set_mesh(device, mesh);
+        let mut session = self.session.lock().unwrap();
+        let session = &mut *session;
+
+        // From here on the graph runs on the device the interface draws with.
+        if session.engine_mut().executor().gpu().is_none() {
+            session
+                .engine_mut()
+                .executor_mut()
+                .attach(device.clone(), queue.clone());
+        }
+        session.run();
+
+        let mut camera = self.camera;
+        if let Some(request) = self.frame
+            && let Some((center, radius)) = session.bounds()
+        {
+            camera.frame(center, (radius * 3.0).max(0.1));
+            session.framed = Some((request, camera));
         }
 
         let scale = viewport.scale_factor();
@@ -174,16 +220,51 @@ impl Primitive for MeshPrimitive {
             bounds.width * scale,
             bounds.height * scale,
         );
-
         let size = viewport.physical_size();
-        let aspect = bounds.width / bounds.height.max(1.0);
-        pipeline.preview.prepare(
-            device,
-            queue,
-            (size.width, size.height),
-            self.camera.view_projection(aspect),
-            self.camera.position() - self.camera.target(),
-        );
+        let size = (size.width, size.height);
+        let view = DrawView {
+            view_projection: camera.view_projection(bounds.width / bounds.height.max(1.0)),
+            light: camera.position() - camera.target(),
+            color: Vec3::new(0.8, 0.7, 0.6),
+            rings: self.detail.0,
+            sides: self.detail.1,
+        };
+
+        pipeline.drawing = Drawing::Nothing;
+        match session.shown() {
+            Shown::Nothing => {}
+            Shown::Drawn { key, drawable } => {
+                let (store, executor) = session.engine_mut().parts_mut();
+                let Some(gpu) = executor.gpu_mut() else {
+                    return;
+                };
+                gpu.sync(store);
+                if let Some(handle) = store.get(key)
+                    && let Some(page) = gpu.page(handle.page)
+                {
+                    pipeline
+                        .stage
+                        .prepare(device, queue, size, &drawable, page, handle, &view);
+                    pipeline.drawing = Drawing::Value;
+                }
+            }
+            Shown::Mesh { .. } => {
+                if pipeline.uploaded != Some(session.generation()) {
+                    pipeline.uploaded = Some(session.generation());
+                    let mesh = session.mesh();
+                    let mesh = mesh.as_ref().map(|mesh| MeshData {
+                        positions: &mesh.positions,
+                        normals: mesh.normals.as_deref(),
+                        indices: &mesh.indices,
+                    });
+                    pipeline.mesh.set_mesh(device, mesh);
+                }
+                pipeline
+                    .mesh
+                    .prepare(device, queue, size, view.view_projection, view.light);
+                pipeline.drawing = Drawing::Mesh;
+            }
+        }
     }
 
     fn render(
@@ -193,8 +274,10 @@ impl Primitive for MeshPrimitive {
         target: &iced::wgpu::TextureView,
         _clip_bounds: &Rectangle<u32>,
     ) {
-        pipeline
-            .preview
-            .render(encoder, target, Some(pipeline.bounds));
+        match pipeline.drawing {
+            Drawing::Nothing => {}
+            Drawing::Value => pipeline.stage.render(encoder, target, Some(pipeline.bounds)),
+            Drawing::Mesh => pipeline.mesh.render(encoder, target, Some(pipeline.bounds)),
+        }
     }
 }
