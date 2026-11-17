@@ -11,7 +11,7 @@ use std::{
 use glam::Vec3;
 use oneiroi_core::{
     exec::{Engine, Instance, Overflow},
-    node::{Drawable, NodeRegistry, PortType, Topology},
+    node::{Card, Drawable, NodeRegistry, PortType, Topology},
     store::ContentKey,
     types::{DataType, Scalar, Trait, TypeInfo},
 };
@@ -58,6 +58,8 @@ impl From<PortType> for PinType {
 pub struct PortView {
     pub name: String,
     pub ty: PinType,
+    /// How many elements it carries.
+    pub card: Card,
     /// The value of an input nothing is set on.
     pub default: Vec<u32>,
 }
@@ -326,8 +328,7 @@ impl Document {
         document
     }
 
-    /// A circle swept along a curve and turned into a mesh, to have
-    /// something to look at.
+    /// A circle swept along a curve, to have something to look at.
     pub fn example() -> Self {
         let mut graph = Graph::new("tube");
         let points: Vec<f32> = (0..8)
@@ -340,14 +341,12 @@ impl Document {
         let curve = graph.add("curve.nurbs");
         let circle = graph.add("curve.circle");
         let sweep = graph.add("curve.sweep");
-        let mesh = graph.add("surface.tessellate");
         let edits = [
             graph.set(curve, "points", Value::F32(points)),
             graph.set(curve, "knots", Value::F32(clamped_uniform_knots(8))),
             graph.set(circle, "radius", 0.25f32),
             graph.connect(curve, "segments", sweep, "spine"),
             graph.connect(circle, "circle", sweep, "profile"),
-            graph.connect(sweep, "surface", mesh, "surface"),
         ];
         debug_assert!(edits.iter().all(Result::is_ok));
 
@@ -355,13 +354,11 @@ impl Document {
             (curve, [40., 40.]),
             (circle, [40., 220.]),
             (sweep, [300., 110.]),
-            (mesh, [540., 110.]),
         ];
         for (node, position) in positions {
             graph.node_mut(node).unwrap().meta.position = position;
         }
-        // The surface itself is shown. The mesh node is there for whoever
-        // wants triangles, the preview does not need it.
+        // The surface is drawn as it is, it never has to become a mesh.
         graph.display = Some(sweep);
         Self::new(graph)
     }
@@ -415,16 +412,7 @@ impl Document {
     /// the nodes of the registry, and the other graphs of the document
     /// as long as they do not use this one themselves.
     pub fn palette(&self) -> Vec<PaletteEntry> {
-        let generic = self.registry.generics().map(|node| node.id);
-        // The versions of a generic node are picked by lowering, never by hand.
-        let plain = self
-            .registry
-            .iter()
-            .filter(|node| !self.registry.generics().any(|g| self.registry.instances(g).iter().any(|i| std::ptr::eq(*i, *node))))
-            .map(|node| node.id);
-        let mut ids: Vec<_> = generic.chain(plain).collect();
-        ids.sort_unstable();
-
+        let ids = self.registry.palette();
         let nodes = ids.into_iter().map(|id| PaletteEntry {
             label: id.into(),
             kind: NodeKind::Node(id.into()),
@@ -460,6 +448,7 @@ impl Document {
                     .map(|param| PortView {
                         name: param.name.clone(),
                         ty: PinType::Exact(program.slot(param.slot).ty),
+                        card: program.slot(param.slot).card,
                         default: param.default.to_vec(),
                     })
                     .collect(),
@@ -469,6 +458,7 @@ impl Document {
                     .map(|output| PortView {
                         name: output.name.clone(),
                         ty: PinType::Exact(program.slot(output.slot).ty),
+                        card: program.slot(output.slot).card,
                         default: Vec::new(),
                     })
                     .collect(),
@@ -481,6 +471,7 @@ impl Document {
             let port = |port: &oneiroi_core::node::GenericPort| PortView {
                 name: port.name.into(),
                 ty: port.ty.into(),
+                card: port.card,
                 default: port.default.words().into(),
             };
             return Some(NodeView {
@@ -494,6 +485,7 @@ impl Document {
             let port = |port: &oneiroi_core::node::PortDecl| PortView {
                 name: port.name.into(),
                 ty: PinType::Exact(port.ty),
+                card: port.card,
                 default: port.default.words().into(),
             };
             return Some(NodeView {
@@ -509,6 +501,7 @@ impl Document {
         let unknown = |name: &str| PortView {
             name: name.into(),
             ty: PinType::Unknown,
+            card: Card::Many,
             default: Vec::new(),
         };
         let mut outputs: Vec<String> = self
@@ -635,14 +628,14 @@ impl Document {
     /// Sets an input from text. Returns whether the text was a value of
     /// the type of the input.
     pub fn set_input(&mut self, node: NodeId, input: &str, text: &str) -> bool {
-        let ty = self.view(node).and_then(|view| {
+        let port = self.view(node).and_then(|view| {
             let port = view.inputs.into_iter().find(|port| port.name == input)?;
             match port.ty {
-                PinType::Exact(ty) => Some(ty),
+                PinType::Exact(ty) => Some((ty, port.card)),
                 _ => None,
             }
         });
-        let Some(ty) = ty else {
+        let Some((ty, card)) = port else {
             return false;
         };
         let Some(value) = parse_value(text, ty.scalar) else {
@@ -652,7 +645,7 @@ impl Document {
             Value::F32(values) => values.len(),
             Value::U32(values) => values.len(),
         };
-        if len % ty.words as usize != 0 {
+        if len % ty.words as usize != 0 || (card == Card::One && len != ty.words as usize) {
             return false;
         }
         // A parameter stays one, the value is what it starts with.
@@ -927,7 +920,7 @@ impl Document {
 mod tests {
     use super::*;
 
-    fn nodes(document: &Document) -> [NodeId; 4] {
+    fn nodes(document: &Document) -> [NodeId; 3] {
         let find = |id: &str| {
             document
                 .graph()
@@ -936,28 +929,33 @@ mod tests {
                 .unwrap()
                 .0
         };
-        [
-            find("curve.nurbs"),
-            find("curve.circle"),
-            find("curve.sweep"),
-            find("surface.tessellate"),
-        ]
+        [find("curve.nurbs"), find("curve.circle"), find("curve.sweep")]
     }
 
-    /// The example with its mesh node shown.
+    /// A mesh of the sweep of the example. It is in no palette, but a
+    /// file can still name it.
+    fn add_mesh(document: &mut Document) -> NodeId {
+        let [_, _, sweep] = nodes(document);
+        let mesh = document.add_node("surface.mesh", [540.0, 110.0]);
+        assert!(document.connect(sweep, "surface", mesh, "surface"));
+        mesh
+    }
+
+    /// The example with a mesh node shown.
     fn meshed() -> (Document, [NodeId; 4]) {
         let mut document = Document::example();
-        let nodes = nodes(&document);
+        let [curve, circle, sweep] = nodes(&document);
         // The surface was looked at before, so it is there already.
         document.status();
-        document.set_display(Some(nodes[3]));
-        (document, nodes)
+        let mesh = add_mesh(&mut document);
+        document.set_display(Some(mesh));
+        (document, [curve, circle, sweep, mesh])
     }
 
     #[test]
     fn the_example_shows_its_surface() {
         let document = Document::example();
-        let [_, _, sweep, _] = nodes(&document);
+        let [_, _, sweep] = nodes(&document);
         assert_eq!(document.graph().display, Some(sweep));
 
         // The sweep is drawn as it is: only the curve, the circle and the
@@ -984,8 +982,8 @@ mod tests {
     fn a_mesh_node_shows_its_mesh() {
         let (document, _) = meshed();
         let mesh = document.mesh().unwrap();
-        // 5 segments, each a grid of 16 rings and 24 sides.
-        assert_eq!(mesh.positions.len(), 5 * 17 * 25);
+        // 5 segments, each a grid of the same size.
+        assert!(!mesh.positions.is_empty() && mesh.positions.len() % 5 == 0);
         assert!(mesh.normals.is_some());
         // Only the mesh was new, the surface was there from before.
         assert_eq!(document.status(), "a mesh, 1 nodes ran");
@@ -997,22 +995,24 @@ mod tests {
         let (mut document, [curve, circle, sweep, mesh]) = meshed();
         let before = document.session().lock().unwrap().generation();
 
-        assert!(document.set_input(mesh, "sides", "6"));
+        let fine = document.mesh().unwrap().positions.len();
+        assert!(document.set_input(mesh, "tolerance", "0.05"));
         assert_ne!(before, document.session().lock().unwrap().generation());
-        assert_eq!(document.mesh().unwrap().positions.len(), 5 * 17 * 7);
+        assert!(document.mesh().unwrap().positions.len() < fine);
         // The surface is what it was, only its mesh had to be made again.
         assert!(document.status().contains("1 nodes ran"));
 
         // Text which is not a value of the input changes nothing.
         let after = document.session().lock().unwrap().generation();
-        assert!(!document.set_input(mesh, "sides", "six"));
-        assert!(!document.set_input(mesh, "sides", "1.5"));
+        assert!(!document.set_input(mesh, "tolerance", "tiny"));
+        // A single value, not a list.
+        assert!(!document.set_input(mesh, "tolerance", "0.1, 0.2"));
         assert!(!document.set_input(curve, "points", "1, 2, 3"));
         assert!(!document.set_input(sweep, "profile", "1"));
         assert_eq!(document.session().lock().unwrap().generation(), after);
 
         assert_eq!(document.input_text(circle, "radius").unwrap(), ("0.25".into(), true));
-        assert_eq!(document.input_text(mesh, "rings").unwrap(), ("16".into(), true));
+        assert_eq!(document.input_text(mesh, "tolerance").unwrap(), ("0.05".into(), true));
         assert_eq!(document.input_text(sweep, "spine").unwrap(), ("linked".into(), false));
         assert_eq!(document.input_text(sweep, "profile").unwrap(), ("linked".into(), false));
         document.reset(sweep, "profile");
@@ -1025,8 +1025,8 @@ mod tests {
     #[test]
     fn edits_do_not_pile_up_programs() {
         let (mut document, [_, _, _, mesh]) = meshed();
-        for sides in 3..20 {
-            assert!(document.set_input(mesh, "sides", &sides.to_string()));
+        for step in 1..20 {
+            assert!(document.set_input(mesh, "tolerance", &(step as f32 * 0.01).to_string()));
         }
         // The one of the graph itself and the one of its preview.
         let session = document.session();
@@ -1036,7 +1036,8 @@ mod tests {
     #[test]
     fn links_are_checked_and_can_be_undone() {
         let mut document = Document::example();
-        let [curve, circle, sweep, mesh] = nodes(&document);
+        let [curve, circle, sweep] = nodes(&document);
+        let mesh = add_mesh(&mut document);
 
         // A radius is not a profile and a curve is not a number.
         assert!(!document.connect(curve, "segments", circle, "radius"));
@@ -1046,7 +1047,7 @@ mod tests {
         assert!(document.accepts(sweep, "surface", mesh, "surface"));
         assert!(!document.accepts(curve, "segments", mesh, "surface"));
         // A link back would be a cycle.
-        assert!(!document.connect(mesh, "indices", mesh, "rings"));
+        assert!(!document.connect(mesh, "positions", mesh, "surface"));
 
         document.disconnect(circle, "circle", sweep, "profile");
         assert_eq!(document.shown(), Shown::Nothing);
@@ -1060,7 +1061,8 @@ mod tests {
     #[test]
     fn any_node_can_be_displayed() {
         let mut document = Document::example();
-        let [curve, circle, sweep, mesh] = nodes(&document);
+        let [curve, circle, sweep] = nodes(&document);
+        let mesh = add_mesh(&mut document);
 
         // A curve and a circle are shown as the lines they are. The sweep
         // was never looked at, so only the curve had to run.
@@ -1093,7 +1095,8 @@ mod tests {
     #[test]
     fn nodes_are_shown_as_the_registry_describes_them() {
         let mut document = Document::example();
-        let [_, _, sweep, mesh] = nodes(&document);
+        let [_, _, sweep] = nodes(&document);
+        let mesh = add_mesh(&mut document);
 
         let view = document.view(sweep).unwrap();
         assert_eq!(view.title, "Sweep");
@@ -1119,7 +1122,6 @@ mod tests {
                 "curve.sample",
                 "curve.sweep",
                 "curve.translate",
-                "surface.tessellate",
                 "value.f32",
                 "value.vec3"
             ]
@@ -1138,7 +1140,7 @@ mod tests {
     #[test]
     fn graphs_are_nodes_in_other_graphs() {
         let mut document = Document::example();
-        let [_, _, sweep, _] = nodes(&document);
+        let [_, _, sweep] = nodes(&document);
         let thin = radius(&document);
 
         // A graph of its own for the profile: a circle whose radius is a
@@ -1202,8 +1204,7 @@ mod tests {
     #[test]
     fn a_graph_can_run_for_each_element() {
         let mut document = Document::example();
-        let [curve, circle, sweep, mesh] = nodes(&document);
-        document.remove_nodes(&[mesh]);
+        let [curve, circle, sweep] = nodes(&document);
 
         // A graph which sweeps a circle of any radius along the curve.
         let name = document.new_graph();
@@ -1254,7 +1255,7 @@ mod tests {
     #[test]
     fn a_broken_graph_says_what_is_wrong_where_it_is_used() {
         let mut document = Document::example();
-        let [_, _, sweep, _] = nodes(&document);
+        let [_, _, sweep] = nodes(&document);
 
         let name = document.new_graph();
         let inner = document.add_node("curve.sweep", [0.0, 0.0]);
@@ -1275,7 +1276,7 @@ mod tests {
     #[test]
     fn outputs_and_parameters_can_be_taken_back() {
         let mut document = Document::example();
-        let [_, circle, sweep, _] = nodes(&document);
+        let [_, circle, sweep] = nodes(&document);
 
         document.toggle_output(sweep, "surface");
         document.toggle_output(circle, "circle");
@@ -1305,7 +1306,7 @@ mod tests {
 
         // A node nobody knows is still shown with its links.
         let mut graph = document.graph().clone();
-        let [curve, _, _, _] = nodes(&document);
+        let [curve, _, _] = nodes(&document);
         let unknown = graph.add("someone_elses.node");
         graph.connect(curve, "segments", unknown, "curve").unwrap();
         let loaded = Document::new(graph);

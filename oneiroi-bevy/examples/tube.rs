@@ -16,7 +16,7 @@ use oneiroi_bevy::{Oneiroi, OneiroiInstance, OneiroiPlugin};
 use oneiroi_core::program::{ProgramBuilder, ProgramId};
 use oneiroi_nodes::{
     curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube},
-    surface::TESSELLATE,
+    surface,
 };
 
 fn main() {
@@ -53,12 +53,13 @@ fn tube_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let radius = b.param::<f32>("radius", &[0.2]);
     let knots = b.constant(&clamped_uniform_knots(8));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
-    // `rings` and `sides` keep the defaults of the tube.
-    let mesh = b
-        .call(oneiroi.programs(), tube, &[Some(spine), Some(radius), None, None])
+    // The mesh keeps the default tolerance of the tube.
+    let outputs = b
+        .call(oneiroi.programs(), tube, &[Some(spine), Some(radius), None])
         .unwrap();
-    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-        b.output(port.name, slot);
+    let names: Vec<_> = oneiroi.programs().get(tube).outputs.iter().map(|o| o.name.clone()).collect();
+    for (name, slot) in names.into_iter().zip(outputs) {
+        b.output(name, slot);
     }
     oneiroi.add_program(b.finish())
 }
@@ -91,14 +92,11 @@ fn beam_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let surface = b
         .generic(oneiroi.registry(), &SWEEP, &[spine, profile])
         .unwrap()[0];
-    // Each edge of the square is flat, so one step across it is enough.
-    let rings = b.constant::<u32>(&[16]);
-    let sides = b.constant::<u32>(&[1]);
-    let mesh = b
-        .generic(oneiroi.registry(), &TESSELLATE, &[surface, rings, sides])
-        .unwrap();
-    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-        b.output(port.name, slot);
+    // Each edge of the square is flat, so the mesh takes a single step
+    // across it by itself.
+    let tolerance = b.constant::<f32>(&[surface::TOLERANCE]);
+    for (name, slot) in surface::mesh(&mut b, oneiroi.registry(), surface, tolerance).unwrap() {
+        b.output(name, slot);
     }
     oneiroi.add_program(b.finish())
 }

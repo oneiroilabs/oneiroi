@@ -404,6 +404,8 @@ pub struct NodeRegistry {
     generics: HashMap<&'static str, Generic>,
     /// By the name of the data type.
     drawables: HashMap<&'static str, Drawable>,
+    /// Nodes which are never placed by hand, by id.
+    hidden: std::collections::HashSet<&'static str>,
 }
 
 impl NodeRegistry {
@@ -489,6 +491,33 @@ impl NodeRegistry {
 
     pub fn generics(&self) -> impl Iterator<Item = &'static GenericNode> {
         self.generics.values().map(|generic| generic.node)
+    }
+
+    /// Keeps the node or generic node with this id out of the
+    /// [palette](NodeRegistry::palette). It can still be used, by lowering
+    /// or by a host which inserts it where it is needed, and it is still
+    /// found by its id when a file names it.
+    pub fn hide(&mut self, id: &'static str) {
+        self.hidden.insert(id);
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.contains(id)
+    }
+
+    /// The ids of everything an artist places by hand, sorted: the generic
+    /// nodes, and the nodes which are no version of one, unless hidden.
+    pub fn palette(&self) -> Vec<&'static str> {
+        let versions: std::collections::HashSet<_> = self
+            .generics
+            .values()
+            .flat_map(|generic| generic.instances.iter().map(|node| node.id))
+            .collect();
+        let generics = self.generics.keys().copied();
+        let plain = self.nodes.keys().copied().filter(|id| !versions.contains(id));
+        let mut ids: Vec<_> = generics.chain(plain).filter(|id| !self.is_hidden(id)).collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Every registered version of a generic node.

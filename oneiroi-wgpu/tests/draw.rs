@@ -11,9 +11,9 @@ use oneiroi_core::{
     program::{ProgramBuilder, SlotId},
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots},
+    curve::{NURBS, SWEEP, SweptPatch, TubePatch, nurbs::clamped_uniform_knots},
     primitive::CIRCLE,
-    surface::TESSELLATE,
+    surface,
 };
 use oneiroi_wgpu::{
     AutoDetail, DeferredExecutor, DrawStage, DrawView, GpuExecutor, MeshData, MeshPreview,
@@ -23,7 +23,8 @@ use oneiroi_wgpu::{
 const SIZE: u32 = 128;
 const BACKGROUND: [u8; 4] = [0, 0, 255, 255];
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-const DETAIL: (u32, u32) = (12, 10);
+/// How close the mesh of a surface is to it.
+const TOLERANCE: f32 = 0.005;
 
 /// A device, with mesh shaders if the adapter has them.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -100,16 +101,13 @@ fn program_along(
         square(&mut b)
     };
     let surface = b.generic(registry, &SWEEP, &[spine, profile]).unwrap()[0];
-    let rings = b.constant::<u32>(&[DETAIL.0]);
-    let sides = b.constant::<u32>(&[DETAIL.1]);
-    let mesh = b
-        .generic(registry, &TESSELLATE, &[surface, rings, sides])
-        .unwrap();
+    let tolerance = b.constant::<f32>(&[TOLERANCE]);
+    let mesh = surface::mesh(&mut b, registry, surface, tolerance).unwrap();
     b.output("surface", surface);
     b.output("spine", spine);
     b.output("profile", profile);
-    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-        b.output(port.name, slot);
+    for (name, slot) in mesh {
+        b.output(name, slot);
     }
     b.finish()
 }
@@ -286,6 +284,21 @@ impl Scene {
         })
     }
 
+    /// How fine the CPU made the mesh of the surface.
+    fn detail(&mut self, circle: bool) -> (u32, u32) {
+        let (rings, sides) = match circle {
+            true => {
+                let patches = self.engine.fetch::<TubePatch>(&self.instance, "surface").unwrap();
+                surface::detail(patches, TOLERANCE)
+            }
+            false => {
+                let patches = self.engine.fetch::<SweptPatch>(&self.instance, "surface").unwrap();
+                surface::detail(patches, TOLERANCE)
+            }
+        };
+        (rings as u32, sides as u32)
+    }
+
     /// The mesh the CPU made of the same surface.
     fn meshed(&mut self) -> Vec<[u8; 4]> {
         let positions = self.engine.fetch::<Vec3>(&self.instance, "positions").unwrap().to_vec();
@@ -317,7 +330,9 @@ fn a_surface_drawn_from_its_patches_looks_like_its_mesh() {
             return;
         };
         let mut stage = DrawStage::new(&scene.device, FORMAT);
-        let drawn = scene.drawn(&mut stage, scene.view(DETAIL.0, DETAIL.1));
+        // As fine as the mesh is, so both are the same triangles.
+        let (rings, sides) = scene.detail(circle);
+        let drawn = scene.drawn(&mut stage, scene.view(rings, sides));
         let meshed = scene.meshed();
         assert!(stage.errors().is_empty(), "{:?}", stage.errors());
 

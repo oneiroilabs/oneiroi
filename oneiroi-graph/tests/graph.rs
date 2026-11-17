@@ -13,7 +13,7 @@ use oneiroi_graph::{
 use oneiroi_nodes::{
     curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots},
     primitive::CIRCLE,
-    surface::TESSELLATE,
+    surface,
 };
 
 const POINTS: [[f32; 4]; 5] = [
@@ -58,9 +58,9 @@ fn tube() -> (Graph, Nodes) {
     graph.connect(curve, "segments", sweep, "spine").unwrap();
     graph.connect(circle, "circle", sweep, "profile").unwrap();
 
-    let mesh = graph.add("surface.tessellate");
+    let mesh = graph.add("surface.mesh");
     graph.connect(sweep, "surface", mesh, "surface").unwrap();
-    graph.set(mesh, "sides", 6u32).unwrap();
+    graph.set(mesh, "tolerance", 0.01f32).unwrap();
 
     graph.add_output("positions", mesh, "positions").unwrap();
     graph.add_output("indices", mesh, "indices").unwrap();
@@ -108,15 +108,12 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let points = b.constant(&POINTS);
     let knots = b.constant(&clamped_uniform_knots(5));
     let radius = b.param::<f32>("radius", &[0.25]);
-    let rings = b.constant::<u32>(&[16]);
-    let sides = b.constant::<u32>(&[6]);
+    let tolerance = b.constant::<f32>(&[0.01]);
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
     let surface = b.generic(&registry(), &SWEEP, &[spine, circle]).unwrap()[0];
-    let mesh = b
-        .generic(&registry(), &TESSELLATE, &[surface, rings, sides])
-        .unwrap();
-    b.output("positions", mesh[0]);
+    let mesh = surface::mesh(&mut b, &registry(), surface, tolerance).unwrap();
+    b.output("positions", mesh[0].1);
     let by_hand = engine.add_program(b.finish());
 
     let mut a = engine.instantiate(lowered);
@@ -129,9 +126,7 @@ fn a_graph_runs_like_the_program_written_by_hand() {
         engine.output_key(&b, "positions")
     );
 
-    // 2 segments, each a grid with the default of 16 rings and 6 sides.
-    let positions = engine.read::<Vec3>(&a, "positions").unwrap();
-    assert_eq!(positions.len(), 2 * 17 * 7);
+    assert!(!engine.read::<Vec3>(&a, "positions").unwrap().is_empty());
 
     engine.set_param(&mut a, "radius", &[0.5f32]).unwrap();
     assert_eq!(engine.evaluate([&mut a]), 3);
@@ -182,7 +177,7 @@ fn metadata_does_not_change_the_program() {
     let moved = hash(&graph, &mut engine);
     assert_eq!(before, moved);
 
-    graph.set(nodes.mesh, "sides", 8u32).unwrap();
+    graph.set(nodes.mesh, "tolerance", 0.02f32).unwrap();
     let changed = hash(&graph, &mut engine);
     assert_ne!(before, changed);
 }
@@ -221,9 +216,9 @@ fn graphs_use_each_other() {
     let sweep = pipe.add("curve.sweep");
     pipe.expose(sweep, "spine", "spine", None).unwrap();
     pipe.connect(circle, "circle", sweep, "profile").unwrap();
-    let mesh = pipe.add("surface.tessellate");
+    let mesh = pipe.add("surface.mesh");
     pipe.connect(sweep, "surface", mesh, "surface").unwrap();
-    pipe.set(mesh, "sides", 6u32).unwrap();
+    pipe.set(mesh, "tolerance", 0.01f32).unwrap();
     pipe.add_output("positions", mesh, "positions").unwrap();
 
     let mut scene = Graph::new("scene");
@@ -259,8 +254,9 @@ fn graphs_use_each_other() {
     assert_eq!(engine.evaluate([&mut instance]), 7);
     let thin = engine.read::<Vec3>(&instance, "thin").unwrap();
     let thick = engine.read::<Vec3>(&instance, "thick").unwrap();
-    assert_eq!(thin.len(), thick.len());
-    assert_ne!(thin, thick);
+    // The thicker one bends more around, so it needs more of the same
+    // tolerance.
+    assert!(thin.len() < thick.len());
 
     // Lowering again without a change adds nothing, an edit adds only the
     // graphs which do something else now.
@@ -492,10 +488,10 @@ fn broken_graphs_say_where_they_are_broken() {
 
     // Values have to be whole elements of the right kind of number.
     let mut broken = graph.clone();
-    broken.set(nodes.mesh, "sides", 6.0f32).unwrap();
+    broken.set(nodes.mesh, "tolerance", 6u32).unwrap();
     assert_eq!(
         error(&broken).2,
-        LowerErrorKind::Value { expected: "u32" }
+        LowerErrorKind::Value { expected: "f32" }
     );
     let mut broken = graph.clone();
     broken.set(nodes.curve, "points", Value::F32(vec![1.0; 7])).unwrap();
@@ -506,10 +502,10 @@ fn broken_graphs_say_where_they_are_broken() {
 
     // A port of a single value takes no list.
     let mut broken = graph.clone();
-    broken.set(nodes.mesh, "sides", Value::U32(vec![6, 8])).unwrap();
+    broken.set(nodes.mesh, "tolerance", Value::F32(vec![0.1, 0.2])).unwrap();
     assert_eq!(
         error(&broken),
-        (Some(nodes.mesh), Some("sides".into()), LowerErrorKind::NotOne)
+        (Some(nodes.mesh), Some("tolerance".into()), LowerErrorKind::NotOne)
     );
 
     let mut broken = graph.clone();
@@ -531,7 +527,10 @@ fn broken_graphs_say_where_they_are_broken() {
     ));
 
     let mut broken = graph.clone();
-    broken.expose(nodes.mesh, "sides", "radius", None).unwrap();
+    let frames = broken.add("curve.sample");
+    broken.connect(nodes.curve, "segments", frames, "segments").unwrap();
+    broken.expose(frames, "count", "radius", None).unwrap();
+    broken.add_output("frames", frames, "frames").unwrap();
     assert_eq!(
         error(&broken).2,
         LowerErrorKind::ExposedTwice("radius".into())
@@ -603,22 +602,22 @@ fn inputs_exposed_under_one_name_are_one_parameter() {
 fn exposed_inputs_keep_what_they_carry() {
     let (mut graph, nodes) = tube();
     graph.expose(nodes.curve, "points", "points", None).unwrap();
-    graph.expose(nodes.mesh, "sides", "sides", None).unwrap();
+    graph.expose(nodes.mesh, "tolerance", "tolerance", None).unwrap();
 
     let mut engine = Engine::default();
     let id = lower(&graph, &mut engine);
     let program = engine.programs().get(id);
     // The points of several curves keep their groups in a parameter which
-    // is not shown, and the sides are a single number.
+    // is not shown, and the tolerance is a single number.
     let names: Vec<_> = program.visible_params().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["points", "radius", "sides"]);
+    assert_eq!(names, ["points", "radius", "tolerance"]);
     assert_eq!(program.params.len(), 4);
     let card = |name: &str| {
         let param = program.params.iter().find(|p| p.name == name).unwrap();
         program.slot(param.slot).card
     };
     assert_eq!(card("points"), Card::Grouped);
-    assert_eq!(card("sides"), Card::One);
+    assert_eq!(card("tolerance"), Card::One);
 
     // A graph used as a node shows only those three.
     let mut outer = Graph::new("outer");

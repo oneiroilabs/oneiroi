@@ -222,10 +222,7 @@ fn build_mesh(engine: &Engine, instance: &Instance) -> Option<Mesh> {
 #[cfg(test)]
 mod tests {
     use oneiroi_core::program::ProgramBuilder;
-    use oneiroi_nodes::{
-        curve::{NURBS, nurbs::clamped_uniform_knots},
-        surface::TESSELLATE,
-    };
+    use oneiroi_nodes::curve::{NURBS, nurbs::clamped_uniform_knots};
 
     use super::*;
 
@@ -242,18 +239,19 @@ mod tests {
         ]);
         let knots = b.constant(&clamped_uniform_knots(4));
         let radius = b.param::<f32>("radius", &[0.25]);
-        let rings = b.constant::<u32>(&[4]);
-        let sides = b.constant::<u32>(&[6]);
+        let tolerance = b.constant::<f32>(&[0.01]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let mesh = b
+        let outputs = b
             .call(
                 oneiroi.programs(),
                 tube,
-                &[Some(segments), Some(radius), Some(rings), Some(sides)],
+                &[Some(segments), Some(radius), Some(tolerance)],
             )
             .unwrap();
-        for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-            b.output(port.name, slot);
+        let program = oneiroi.programs().get(tube);
+        let names: Vec<_> = program.outputs.iter().map(|o| o.name.clone()).collect();
+        for (name, slot) in names.into_iter().zip(outputs) {
+            b.output(name, slot);
         }
         oneiroi.add_program(b.finish())
     }
@@ -303,7 +301,8 @@ mod tests {
 
         let meshes = app.world().resource::<Assets<Mesh>>();
         let tube = meshes.get(&mesh(&app, a)).unwrap();
-        assert_eq!(tube.count_vertices(), 5 * 7);
+        // A grid of as many rings and sides as the tolerance needs.
+        assert!(tube.count_vertices() > 5 * 7);
         assert!(tube.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
         assert!(tube.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
     }

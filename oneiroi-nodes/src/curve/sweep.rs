@@ -17,7 +17,7 @@ use super::{
 use crate::{
     generic::version,
     primitive::CIRCLE,
-    surface::{SURFACE, Surface, TESSELLATE, register_surface},
+    surface::{self, SURFACE, Surface, register_surface},
 };
 
 /// A circle swept along one segment of a curve.
@@ -192,24 +192,24 @@ fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
 }
 
 /// A tube is not a node of its own but this graph: a circle swept along
-/// the `spine` and turned into a mesh. Its parameters are `spine`,
-/// `radius`, `rings` and `sides`, its outputs the ones of [`TESSELLATE`].
+/// the `spine`, and a mesh of it for whoever needs triangles. Its
+/// parameters are `spine`, `radius` and the `tolerance` of the mesh, its
+/// outputs the `surface` and the ones of [`MESH`](surface::MESH).
 pub fn tube(registry: &NodeRegistry) -> Program {
     let mut b = ProgramBuilder::new("tube");
     let spine = b.param::<CubicNurbsSegmentCache>("spine", &[]);
     let radius = b.param::<f32>("radius", &[0.2]);
-    let rings = b.param_one_of::<u32>("rings", 16);
-    let sides = b.param_one_of::<u32>("sides", 24);
+    let tolerance = b.param_one_of::<f32>("tolerance", surface::TOLERANCE);
 
     let circle = b.node(&CIRCLE, &[radius]).expect("a radius is a f32")[0];
-    let surface = b
+    let swept = b
         .generic(registry, &SWEEP, &[spine, circle])
         .expect("circles are registered as profiles")[0];
-    let mesh = b
-        .generic(registry, &TESSELLATE, &[surface, rings, sides])
+    let mesh = surface::mesh(&mut b, registry, swept, tolerance)
         .expect("tubes are registered as surfaces");
-    for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-        b.output(port.name, slot);
+    b.output("surface", swept);
+    for (name, slot) in mesh {
+        b.output(name, slot);
     }
     b.finish()
 }
@@ -250,18 +250,18 @@ mod tests {
         let points = b.constant(spine);
         let knots = b.constant(&clamped_uniform_knots(spine.len()));
         let radius = b.param::<f32>("radius", &[0.25]);
-        let rings = b.constant::<u32>(&[4]);
-        let sides = b.param_one_of::<u32>("sides", 6);
+        let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let mesh = b
+        let outputs = b
             .call(
                 engine.programs(),
                 tube,
-                &[Some(segments), Some(radius), Some(rings), Some(sides)],
+                &[Some(segments), Some(radius), Some(tolerance)],
             )
             .unwrap();
-        for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-            b.output(port.name, slot);
+        let names = engine.programs().get(tube).outputs.iter().map(|o| o.name.clone());
+        for (name, slot) in names.collect::<Vec<_>>().into_iter().zip(outputs) {
+            b.output(name, slot);
         }
 
         let id = engine.add_program(b.finish());
@@ -303,6 +303,13 @@ mod tests {
         }
     }
 
+    /// How fine the mesh of the tube is.
+    fn tube_detail(engine: &Engine, instance: &Instance) -> (usize, usize) {
+        let patches = engine.read::<TubePatch>(instance, "surface").unwrap();
+        let tolerance = engine.read::<f32>(instance, "tolerance");
+        surface::detail(patches, tolerance.map_or(0.01, |t| t[0]))
+    }
+
     #[test]
     fn a_tube_is_a_grid_per_segment() {
         let (engine, instance) = tube_on(&BENT);
@@ -311,28 +318,60 @@ mod tests {
         let uvs = engine.read::<Vec2>(&instance, "uvs").unwrap();
         let indices = engine.read::<u32>(&instance, "indices").unwrap();
 
-        // 2 segments, each with 4 + 1 rings of 6 + 1 vertices.
-        assert_eq!(positions.len(), 2 * 5 * 7);
-        assert_eq!(indices.len(), 2 * 4 * 6 * 6);
+        // 2 segments, each with rings + 1 rings of sides + 1 vertices.
+        let (rings, sides) = tube_detail(&engine, &instance);
+        let ring = sides + 1;
+        assert!(rings > 1 && sides > 8, "{rings} {sides}");
+        assert_eq!(positions.len(), 2 * (rings + 1) * ring);
+        assert_eq!(indices.len(), 2 * rings * sides * 6);
         assert!(indices.iter().all(|i| (*i as usize) < positions.len()));
 
         // The seam closes and the texture runs once along and around.
-        for ring in positions.chunks_exact(7) {
-            assert!(ring[0].distance(ring[6]) < 1e-4);
+        for ring in positions.chunks_exact(ring) {
+            assert!(ring[0].distance(ring[sides]) < 1e-4);
         }
         assert_eq!(uvs[0], Vec2::ZERO);
         assert!(uvs[uvs.len() - 1].distance(Vec2::ONE) < 1e-4);
 
         // Where the two segments meet they agree on everything, so the
         // tube is smooth there although they share no vertices.
-        for side in 0..7 {
-            let (end, start) = (4 * 7 + side, 5 * 7 + side);
+        for side in 0..ring {
+            let (end, start) = (rings * ring + side, (rings + 1) * ring + side);
             assert!(positions[end].distance(positions[start]) < 1e-4);
             assert!(normals[end].distance(normals[start]) < 1e-3);
             assert!(uvs[end].distance(uvs[start]) < 1e-4);
         }
 
         assert_faces_outwards(&engine, &instance);
+    }
+
+    #[test]
+    fn the_mesh_stays_within_the_tolerance() {
+        for tolerance in [0.05, 0.01, 0.002] {
+            let (mut engine, mut instance) = tube_on(&BENT);
+            engine.set_param(&mut instance, "tolerance", &[tolerance]).unwrap();
+            engine.evaluate([&mut instance]);
+            let patches = engine.read::<TubePatch>(&instance, "surface").unwrap();
+            let (rings, sides) = surface::detail(patches, tolerance);
+            let positions = engine.read::<Vec3>(&instance, "positions").unwrap();
+
+            // The middle of every quad of the mesh against the surface.
+            let mut worst = 0.0f32;
+            for (index, patch) in patches.iter().enumerate() {
+                let grid = &positions[index * (rings + 1) * (sides + 1)..];
+                for ring in 0..rings {
+                    for side in 0..sides {
+                        let at = |r: usize, s: usize| grid[(ring + r) * (sides + 1) + side + s];
+                        // Both triangles share the diagonal between these.
+                        let diagonal = (at(0, 1) + at(1, 0)) * 0.5;
+                        let u = (ring as f32 + 0.5) / rings as f32;
+                        let v = (side as f32 + 0.5) / sides as f32;
+                        worst = worst.max(diagonal.distance(patch.point(u, v).0));
+                    }
+                }
+            }
+            assert!(worst <= tolerance, "{worst} is further than {tolerance}");
+        }
     }
 
     #[test]
@@ -353,12 +392,10 @@ mod tests {
         assert_eq!(engine.evaluate([&mut instance]), 3);
 
         // The surface is what it was, only its mesh gets finer.
-        engine.set_param(&mut instance, "sides", &[12u32]).unwrap();
+        let coarse = engine.read::<Vec3>(&instance, "positions").unwrap().len();
+        engine.set_param(&mut instance, "tolerance", &[0.001f32]).unwrap();
         assert_eq!(engine.evaluate([&mut instance]), 1);
-        assert_eq!(
-            engine.read::<Vec3>(&instance, "positions").unwrap().len(),
-            2 * 5 * 13
-        );
+        assert!(engine.read::<Vec3>(&instance, "positions").unwrap().len() > coarse);
     }
 
     #[test]
@@ -400,14 +437,10 @@ mod tests {
         let knots = b.constant(&square_knots);
         let profile = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let surface = b.generic(&registry, &SWEEP, &[spine, profile]).unwrap()[0];
-        let rings = b.constant::<u32>(&[4]);
-        let sides = b.constant::<u32>(&[2]);
-        let mesh = b
-            .generic(&registry, &TESSELLATE, &[surface, rings, sides])
-            .unwrap();
+        let tolerance = b.constant::<f32>(&[0.01]);
         b.output("surface", surface);
-        for (port, slot) in TESSELLATE.outputs.iter().zip(mesh) {
-            b.output(port.name, slot);
+        for (name, slot) in surface::mesh(&mut b, &registry, surface, tolerance).unwrap() {
+            b.output(name, slot);
         }
 
         let mut engine = Engine::default();
@@ -417,17 +450,22 @@ mod tests {
 
         // A patch for each of the 4 edges along each of the 2 segments.
         assert_eq!(engine.read::<SweptPatch>(&instance, "surface").unwrap().len(), 8);
+        let patches = engine.read::<SweptPatch>(&instance, "surface").unwrap();
+        let (rings, sides) = surface::detail(patches, 0.01);
         let positions = engine.read::<Vec3>(&instance, "positions").unwrap();
         let normals = engine.read::<Vec3>(&instance, "normals").unwrap();
-        assert_eq!(positions.len(), 8 * 5 * 3);
-        assert_eq!(engine.read::<u32>(&instance, "indices").unwrap().len(), 8 * 4 * 2 * 6);
+        // The edges are straight, so across them a single step is enough.
+        assert_eq!(sides, 1);
+        let per = (rings + 1) * (sides + 1);
+        assert_eq!(positions.len(), 8 * per);
+        assert_eq!(engine.read::<u32>(&instance, "indices").unwrap().len(), 8 * rings * 6);
 
         // A corner is one position with the normals of both edges: the
         // end of the first edge and the start of the second one.
-        assert!(positions[2].distance(positions[15]) < 1e-4);
-        assert!(normals[2].dot(normals[15]).abs() < 1e-3);
+        assert!(positions[sides].distance(positions[per]) < 1e-4);
+        assert!(normals[sides].dot(normals[per]).abs() < 1e-3);
         // Along an edge the normal does not change.
-        assert!(normals[0].distance(normals[1]) < 1e-3 && normals[1].distance(normals[2]) < 1e-3);
+        assert!(normals[0].distance(normals[sides]) < 1e-3);
 
         assert_faces_outwards(&engine, &instance);
     }
@@ -491,9 +529,9 @@ mod tests {
             })
         );
         // And only surfaces can be turned into a mesh.
-        let count = b.constant::<u32>(&[4]);
+        let tolerance = b.constant::<f32>(&[0.01]);
         assert!(matches!(
-            b.generic(&registry, &TESSELLATE, &[spine, count, count]),
+            surface::mesh(&mut b, &registry, spine, tolerance),
             Err(BuildError::Trait { .. })
         ));
 

@@ -478,7 +478,7 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 5 nodes of curves, a tessellation for each of the 2 surfaces
+        // 5 nodes of curves, a mesh for each of the 2 surfaces
         // and a sweep for each of the 2 profiles, and 2 values.
         assert_eq!(registry.iter().count(), 10);
         assert!(registry.get("curve.nurbs").is_some());
