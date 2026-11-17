@@ -5,8 +5,7 @@ use std::marker::PhantomData;
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
     node::{
-        Drawable, GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape,
-        Topology,
+        Drawable, GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Topology,
     },
     types::{DataType, PortDefault, Trait},
 };
@@ -70,8 +69,8 @@ pub static TESSELLATE: GenericNode = GenericNode {
     display_name: "Tessellate",
     inputs: &[
         GenericPort::implementing("surface", SURFACE),
-        GenericPort::exact::<u32>("rings").with_default(RINGS),
-        GenericPort::exact::<u32>("sides").with_default(SIDES),
+        GenericPort::exact::<u32>("rings").with_default(RINGS).one(),
+        GenericPort::exact::<u32>("sides").with_default(SIDES).one(),
     ],
     outputs: &[
         GenericPort::exact::<Vec3>("positions"),
@@ -86,8 +85,8 @@ struct Ports<S>(PhantomData<S>);
 impl<S: Surface> Ports<S> {
     const INPUTS: &'static [PortDecl] = &[
         PortDecl::new::<S>("surface"),
-        PortDecl::new::<u32>("rings").with_default(RINGS),
-        PortDecl::new::<u32>("sides").with_default(SIDES),
+        PortDecl::new::<u32>("rings").with_default(RINGS).one(),
+        PortDecl::new::<u32>("sides").with_default(SIDES).one(),
     ];
 }
 
@@ -106,7 +105,7 @@ pub fn register_surface<S: Surface>(registry: &mut NodeRegistry) {
         display_name: TESSELLATE.display_name,
         inputs: Ports::<S>::INPUTS,
         outputs: OUTPUTS,
-        shape: Shape::Expand,
+        version: 1,
         cpu: tessellate::<S>,
         gpu: &[],
     });

@@ -51,7 +51,7 @@ fn program<E: Executor>(engine: &mut Engine<E>, count: usize) -> ProgramId {
     let mut b = ProgramBuilder::new("frames");
     let points = b.param("points", &points(count));
     let knots = b.constant(&clamped_uniform_knots(count));
-    let samples = b.param::<u32>("samples", &[8]);
+    let samples = b.param_one_of::<u32>("samples", 8);
     let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
     b.output("frames", frames);
@@ -215,7 +215,7 @@ fn edge_cases_match_the_cpu() {
 
 mod staying_on_the_gpu {
     use glam::Vec3;
-    use oneiroi_core::node::{Caps, GpuKernel, Inputs, NodeDef, Outputs, PortDecl, Shape};
+    use oneiroi_core::node::{Caps, GpuKernel, Inputs, GpuOutput, NodeDef, Outputs, PortDecl};
     use oneiroi_nodes::curve::nurbs::MovingFrame;
 
     use super::*;
@@ -236,16 +236,19 @@ mod staying_on_the_gpu {
     static ON_GPU: NodeDef = NodeDef {
         id: "test.positions",
         display_name: "Positions",
+        version: 0,
         inputs: INPUTS,
         outputs: OUTPUTS,
-        shape: Shape::Map,
         cpu: positions,
         gpu: &[GpuKernel {
             wgsl: "fn positions(index: u32) -> vec3<f32> { return in_frames(index).position; }",
-            entry: "positions",
+            outputs: &[GpuOutput {
+                entry: "positions",
+                len: |inputs| inputs.len(0),
+            }],
             requires: Caps::NONE,
-            len: |inputs| inputs.len(0),
             reads: &[],
+            examples: &[],
         }],
     };
 
@@ -253,9 +256,9 @@ mod staying_on_the_gpu {
     static ON_CPU: NodeDef = NodeDef {
         id: "test.positions_cpu",
         display_name: "Positions",
+        version: 0,
         inputs: INPUTS,
         outputs: OUTPUTS,
-        shape: Shape::Map,
         cpu: positions,
         gpu: &[],
     };
@@ -402,27 +405,30 @@ mod staying_on_the_gpu {
 }
 
 mod for_each {
+    use oneiroi_core::types::DataType;
     use oneiroi_nodes::curve::nurbs::CubicNurbsSegmentCache;
 
     use super::*;
 
-    /// 16 frames of a single segment.
-    fn one_segment<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
-        let mut b = ProgramBuilder::new("one segment");
-        let segment = b.param::<CubicNurbsSegmentCache>("segment", &[]);
+    /// 16 frames of every segment of a curve.
+    fn one_curve<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
+        let mut b = ProgramBuilder::new("one curve");
+        let segments = b.param::<CubicNurbsSegmentCache>("segments", &[]);
         let samples = b.constant::<u32>(&[16]);
-        let frames = b.node(&FRAMES, &[segment, samples]).unwrap()[0];
+        let frames = b.node(&FRAMES, &[segments, samples]).unwrap()[0];
         b.output("frames", frames);
         engine.add_program(b.finish())
     }
 
-    /// The frames of a curve, made one segment at a time and gathered, and
-    /// the same frames made at once.
+    /// The frames of two curves, made one curve at a time and gathered,
+    /// and the same frames made at once.
     fn program<E: Executor>(engine: &mut Engine<E>) -> ProgramId {
-        let one = one_segment(engine);
-        let mut b = ProgramBuilder::new("each segment");
-        let points = b.param("points", &points(9));
-        let knots = b.constant(&clamped_uniform_knots(9));
+        let one = one_curve(engine);
+        let mut b = ProgramBuilder::new("each curve");
+        let mut both = points(9);
+        both.extend(points(7).iter().map(|[x, y, z, w]| [x + 5.0, *y, *z, *w]));
+        let points = b.param_grouped("points", <[f32; 4]>::INFO, bytemuck::cast_slice(&both));
+        let knots = b.constant::<f32>(&[]);
         let samples = b.constant::<u32>(&[16]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let each = b
@@ -440,29 +446,33 @@ mod for_each {
     }
 
     #[test]
-    fn calls_for_each_element_run_on_the_gpu_too() {
+    fn calls_for_each_group_run_on_the_gpu_too() {
         let Some(mut gpu) = gpu() else {
             return;
         };
         let mut cpu = Engine::default();
         let (on_gpu, on_cpu) = (program(&mut gpu), program(&mut cpu));
         let (mut a, mut b) = (gpu.instantiate(on_gpu), cpu.instantiate(on_cpu));
+        gpu.set_param(&mut a, "points#groups", &[0u32, 9, 16]).unwrap();
+        cpu.set_param(&mut b, "points#groups", &[0u32, 9, 16]).unwrap();
         gpu.evaluate([&mut a]);
         cpu.evaluate([&mut b]);
 
         let each = frames(&mut gpu, &a, "each");
-        assert_eq!(each.len(), 6 * 16 * 16);
+        assert_eq!(each.len(), (6 + 4) * 16 * 16);
         assert_close(&each, &frames(&mut cpu, &b, "each"));
-        // Segment by segment is the same as all at once.
+        // Curve by curve is the same as all at once, and the curves stay
+        // apart.
+        assert_eq!(gpu.groups(&a, "each"), Some(&[0, 6 * 16, 10 * 16][..]));
         assert_close(&each, &frames(&mut gpu, &a, "whole"));
 
-        // The curve on the CPU, then the frames of all six segments in a
-        // single pass and gathered on the device. Only what was asked for
-        // came back.
+        // The curves on the CPU, then the frames of both curves in a single
+        // pass and gathered on the device. Only what was asked for came
+        // back.
         let stats = gpu.executor().stats();
-        assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 7, 2), "{stats:?}");
-        // The frames of the segments, putting them together, and the
-        // frames of the whole curve.
+        assert_eq!((stats.cpu, stats.gpu, stats.downloads), (1, 3, 2), "{stats:?}");
+        // The frames of the curves, putting them together, and the frames
+        // of both at once.
         assert_eq!(stats.dispatches, 3, "{stats:?}");
     }
 }

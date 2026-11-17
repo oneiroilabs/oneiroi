@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 use oneiroi_core::{
     exec::Engine,
-    node::NodeRegistry,
+    node::{Card, NodeRegistry},
     program::{BuildError, ProgramBuilder, ProgramId},
 };
 use oneiroi_graph::{
@@ -504,6 +504,14 @@ fn broken_graphs_say_where_they_are_broken() {
         LowerErrorKind::Value { expected: "vec4" }
     );
 
+    // A port of a single value takes no list.
+    let mut broken = graph.clone();
+    broken.set(nodes.mesh, "sides", Value::U32(vec![6, 8])).unwrap();
+    assert_eq!(
+        error(&broken),
+        (Some(nodes.mesh), Some("sides".into()), LowerErrorKind::NotOne)
+    );
+
     let mut broken = graph.clone();
     broken.set(nodes.sweep, "nope", 1u32).unwrap();
     assert_eq!(
@@ -589,4 +597,41 @@ fn inputs_exposed_under_one_name_are_one_parameter() {
         graph.node(a).unwrap().inputs["radius"],
         Input::Exposed { .. }
     ));
+}
+
+#[test]
+fn exposed_inputs_keep_what_they_carry() {
+    let (mut graph, nodes) = tube();
+    graph.expose(nodes.curve, "points", "points", None).unwrap();
+    graph.expose(nodes.mesh, "sides", "sides", None).unwrap();
+
+    let mut engine = Engine::default();
+    let id = lower(&graph, &mut engine);
+    let program = engine.programs().get(id);
+    // The points of several curves keep their groups in a parameter which
+    // is not shown, and the sides are a single number.
+    let names: Vec<_> = program.visible_params().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["points", "radius", "sides"]);
+    assert_eq!(program.params.len(), 4);
+    let card = |name: &str| {
+        let param = program.params.iter().find(|p| p.name == name).unwrap();
+        program.slot(param.slot).card
+    };
+    assert_eq!(card("points"), Card::Grouped);
+    assert_eq!(card("sides"), Card::One);
+
+    // A graph used as a node shows only those three.
+    let mut outer = Graph::new("outer");
+    let tube = outer.add_graph("tube");
+    outer.set(tube, "points#groups", Value::U32(vec![0, 5])).unwrap();
+    outer.add_output("positions", tube, "positions").unwrap();
+    let graphs = HashMap::from([("tube".to_string(), id)]);
+    let error = outer
+        .lower(Context {
+            registry: &registry(),
+            programs: engine.programs(),
+            graphs: &graphs,
+        })
+        .unwrap_err();
+    assert_eq!(error.kind, LowerErrorKind::UnknownInput);
 }

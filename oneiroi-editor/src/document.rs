@@ -456,8 +456,7 @@ impl Document {
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| graph.clone()),
                 inputs: program
-                    .params
-                    .iter()
+                    .visible_params()
                     .map(|param| PortView {
                         name: param.name.clone(),
                         ty: PinType::Exact(program.slot(param.slot).ty),

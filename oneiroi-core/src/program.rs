@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    node::{GenericNode, NodeDef, NodeRegistry, PortType},
+    node::{Card, GenericNode, Groups, NodeDef, NodeRegistry, PortType},
     store::ContentKey,
     types::{DataType, TypeInfo},
 };
@@ -37,6 +37,9 @@ pub enum SlotSource {
 pub struct SlotDecl {
     pub ty: TypeInfo,
     pub source: SlotSource,
+    pub card: Card,
+    /// The offsets of its groups, a `u32` slot, if it is grouped.
+    pub groups: Option<SlotId>,
 }
 
 #[derive(Debug)]
@@ -44,6 +47,9 @@ pub struct ParamDecl {
     pub name: String,
     pub slot: SlotId,
     pub default: Box<[u32]>,
+    /// Holds the offsets of another parameter. Nobody sets it by name:
+    /// it comes along with what is passed for that one.
+    pub hidden: bool,
 }
 
 #[derive(Debug)]
@@ -52,15 +58,25 @@ pub struct OutputDecl {
     pub slot: SlotId,
 }
 
+/// The name of the hidden parameter which holds the groups of `param`.
+pub fn groups_param(param: &str) -> String {
+    format!("{param}#groups")
+}
+
 #[derive(Debug)]
 pub enum OpKind {
     Node(&'static NodeDef),
     /// Runs another program. `inputs` are its parameters, in order.
     Call(ProgramId),
     /// Runs another program once for every element of its parameter
-    /// `element`, with that element alone as the value of it. Every output
-    /// is what all of the runs gave, one after the other. At most `max`
-    /// elements are run, the rest is left out and reported.
+    /// `element`, with that element alone as the value of it, or once for
+    /// every group if what is passed for it is grouped. Every output is
+    /// what all of the runs gave, one group per run. At most `max` runs are
+    /// made, the rest is left out and reported.
+    ///
+    /// Its inputs are those of a call, and then the offsets of what the
+    /// elements are taken of. Its outputs are those of a call, and then
+    /// the offsets of every one of them.
     ForEach {
         callee: ProgramId,
         element: u32,
@@ -98,6 +114,30 @@ impl Program {
 
     pub fn slot(&self, slot: SlotId) -> &SlotDecl {
         &self.slots[slot.0 as usize]
+    }
+
+    /// The parameters somebody sets, without the hidden ones.
+    pub fn visible_params(&self) -> impl Iterator<Item = &ParamDecl> {
+        self.params.iter().filter(|param| !param.hidden)
+    }
+
+    /// The slot of the callee which output `index` of a call to it is: one
+    /// of its outputs, or behind those the offsets of a grouped one.
+    pub fn call_output_slot(&self, index: usize) -> SlotId {
+        match self.outputs.get(index) {
+            Some(output) => output.slot,
+            None => self
+                .outputs
+                .iter()
+                .filter_map(|output| self.slot(output.slot).groups)
+                .nth(index - self.outputs.len())
+                .expect("a call has outputs for the callee's outputs and their groups"),
+        }
+    }
+
+    /// The hidden parameter which holds the groups of `param`, if any.
+    pub fn groups_of_param(&self, param: usize) -> Option<usize> {
+        self.param_index(&groups_param(&self.params[param].name))
     }
 }
 
@@ -220,6 +260,8 @@ pub enum BuildError {
     /// A call for each element has to be given something to take the
     /// elements of.
     Element { target: String },
+    /// A port takes a single element and is given a list.
+    Card { target: String, port: String },
 }
 
 impl fmt::Display for BuildError {
@@ -250,6 +292,9 @@ impl fmt::Display for BuildError {
             }
             Self::Element { target } => {
                 write!(f, "`{target}` is called for each element of nothing")
+            }
+            Self::Card { target, port } => {
+                write!(f, "`{target}.{port}` takes a single value but is given a list")
             }
         }
     }
@@ -283,8 +328,26 @@ impl ProgramBuilder {
     }
 
     fn push_slot(&mut self, ty: TypeInfo, source: SlotSource) -> SlotId {
-        self.slots.push(SlotDecl { ty, source });
+        let card = match &source {
+            SlotSource::Const { words, .. } if words.len() == ty.words as usize => Card::One,
+            _ => Card::Many,
+        };
+        self.slots.push(SlotDecl {
+            ty,
+            source,
+            card,
+            groups: None,
+        });
         SlotId(self.slots.len() as u32 - 1)
+    }
+
+    fn slot_mut(&mut self, slot: SlotId) -> &mut SlotDecl {
+        &mut self.slots[slot.0 as usize]
+    }
+
+    /// Offsets which say: a single group of everything.
+    fn no_groups(&mut self) -> SlotId {
+        self.constant_words(u32::INFO, &[])
     }
 
     /// A value every instance can set. This is what an exposed property or
@@ -307,7 +370,40 @@ impl ProgramBuilder {
             name: name.into(),
             slot,
             default: default.into(),
+            hidden: false,
         });
+        slot
+    }
+
+    /// A parameter of a single element.
+    pub fn param_one_of<T: DataType>(&mut self, name: impl Into<String>, default: T) -> SlotId {
+        self.param_one(name, T::INFO, bytemuck::cast_slice(std::slice::from_ref(&default)))
+    }
+
+    /// [`ProgramBuilder::param_words`] for a parameter of a single element.
+    pub fn param_one(&mut self, name: impl Into<String>, ty: TypeInfo, default: &[u32]) -> SlotId {
+        let slot = self.param_words(name, ty, default);
+        self.slot_mut(slot).card = Card::One;
+        ("one", slot).hash(&mut self.hasher);
+        slot
+    }
+
+    /// [`ProgramBuilder::param_words`] for a parameter which keeps the
+    /// groups of what is passed for it, in a hidden parameter of its own.
+    pub fn param_grouped(
+        &mut self,
+        name: impl Into<String>,
+        ty: TypeInfo,
+        default: &[u32],
+    ) -> SlotId {
+        let name = name.into();
+        let slot = self.param_words(name.clone(), ty, default);
+        let groups = self.param_words(groups_param(&name), u32::INFO, &[]);
+        self.params.last_mut().unwrap().hidden = true;
+        let decl = self.slot_mut(slot);
+        decl.card = Card::Grouped;
+        decl.groups = Some(groups);
+        ("grouped", slot).hash(&mut self.hasher);
         slot
     }
 
@@ -345,11 +441,49 @@ impl ProgramBuilder {
         }
         for (port, slot) in node.inputs.iter().zip(inputs) {
             self.check(node.id, port.name, port.ty, *slot)?;
+            if !self.slot(*slot).card.fits(port.card) {
+                return Err(BuildError::Card {
+                    target: node.id.into(),
+                    port: port.name.into(),
+                });
+            }
         }
 
-        ("node", node.id, inputs).hash(&mut self.hasher);
-        let types = node.outputs.iter().map(|port| port.ty).collect();
-        Ok(self.push_op(OpKind::Node(node), inputs.into(), types))
+        // The offsets of every grouped input go along, behind the others.
+        let mut all = inputs.to_vec();
+        for index in node.hidden_inputs() {
+            let groups = match self.slot(inputs[index]).groups {
+                Some(groups) => groups,
+                None => self.no_groups(),
+            };
+            all.push(groups);
+        }
+
+        ("node", node.id, node.version, &all).hash(&mut self.hasher);
+        let types = node
+            .outputs
+            .iter()
+            .map(|port| port.ty)
+            .chain(node.hidden_outputs().map(|_| u32::INFO))
+            .collect();
+        let slots = self.push_op(OpKind::Node(node), all.clone(), types);
+
+        let visible = node.outputs.len();
+        let mut own = slots[visible..].iter();
+        for (port, slot) in node.outputs.iter().zip(&slots) {
+            let groups = match (port.card, port.groups) {
+                (Card::Grouped, Groups::Own) => own.next().copied(),
+                (Card::Grouped, Groups::Like(input)) => self.slot(inputs[input]).groups,
+                _ => None,
+            };
+            let decl = self.slot_mut(*slot);
+            decl.card = match (port.card, groups) {
+                (Card::Grouped, None) => Card::Many,
+                (card, _) => card,
+            };
+            decl.groups = groups;
+        }
+        Ok(slots[..visible].to_vec())
     }
 
     /// Adds the version of `generic` which fits the data types of `inputs`.
@@ -397,7 +531,8 @@ impl ProgramBuilder {
         }
     }
 
-    /// Calls `callee`. An argument which is `None` uses the default of the
+    /// Calls `callee`, with an argument for every parameter which is not
+    /// hidden. An argument which is `None` uses the default of the
     /// parameter it stands for.
     pub fn call(
         &mut self,
@@ -405,40 +540,108 @@ impl ProgramBuilder {
         callee: ProgramId,
         args: &[Option<SlotId>],
     ) -> Result<Vec<SlotId>, BuildError> {
+        let (inputs, types) = self.arguments(programs, callee, args)?;
         let program = programs.get(callee);
-        if args.len() != program.params.len() {
+        ("call", program.hash, &inputs).hash(&mut self.hasher);
+        let slots = self.push_op(OpKind::Call(callee), inputs, types);
+        Ok(self.call_outputs(program, &slots, false))
+    }
+
+    /// The inputs of a call, hidden parameters included, and the types of
+    /// its outputs: the outputs of the callee, and then the offsets of
+    /// every grouped one of them.
+    fn arguments(
+        &mut self,
+        programs: &ProgramSet,
+        callee: ProgramId,
+        args: &[Option<SlotId>],
+    ) -> Result<(Vec<SlotId>, Vec<TypeInfo>), BuildError> {
+        let program = programs.get(callee);
+        let visible = program.visible_params().count();
+        if args.len() != visible {
             return Err(BuildError::Arity {
                 target: program.name.clone(),
-                expected: program.params.len(),
+                expected: visible,
                 found: args.len(),
             });
         }
 
-        let mut inputs = Vec::with_capacity(args.len());
-        for (param, arg) in program.params.iter().zip(args) {
+        let mut given = args.iter();
+        let mut inputs = vec![None; program.params.len()];
+        for (index, param) in program.params.iter().enumerate() {
+            if param.hidden {
+                continue;
+            }
             let ty = program.slot(param.slot).ty;
-            inputs.push(match arg {
+            let arg = given.next().copied().flatten();
+            let slot = match arg {
                 Some(slot) => {
-                    self.check(&program.name, &param.name, ty, *slot)?;
-                    *slot
+                    self.check(&program.name, &param.name, ty, slot)?;
+                    if !self.slot(slot).card.fits(program.slot(param.slot).card) {
+                        return Err(BuildError::Card {
+                            target: program.name.clone(),
+                            port: param.name.clone(),
+                        });
+                    }
+                    slot
                 }
                 None => self.constant_words(ty, &param.default),
-            });
+            };
+            inputs[index] = Some(slot);
+            if let Some(hidden) = program.groups_of_param(index) {
+                let groups = match self.slot(slot).groups {
+                    Some(groups) => groups,
+                    None => self.no_groups(),
+                };
+                inputs[hidden] = Some(groups);
+            }
         }
+        let inputs = inputs
+            .into_iter()
+            .map(|slot| slot.expect("every hidden parameter belongs to one"))
+            .collect();
 
-        ("call", program.hash, &inputs).hash(&mut self.hasher);
         let types = program
             .outputs
             .iter()
             .map(|output| program.slot(output.slot).ty)
+            .chain(
+                program
+                    .outputs
+                    .iter()
+                    .filter(|output| program.slot(output.slot).groups.is_some())
+                    .map(|_| u32::INFO),
+            )
             .collect();
-        Ok(self.push_op(OpKind::Call(callee), inputs, types))
+        Ok((inputs, types))
+    }
+
+    /// Hands the groups of the outputs of a call to the slots they are in,
+    /// and returns the slots which are not offsets. Every output of a call
+    /// for each element is grouped, one group per call.
+    fn call_outputs(&mut self, program: &Program, slots: &[SlotId], each: bool) -> Vec<SlotId> {
+        let visible = program.outputs.len();
+        let mut hidden = slots[visible..].iter();
+        for (output, slot) in program.outputs.iter().zip(slots) {
+            let grouped = each || program.slot(output.slot).groups.is_some();
+            let groups = grouped.then(|| *hidden.next().unwrap());
+            let card = program.slot(output.slot).card;
+            let decl = self.slot_mut(*slot);
+            decl.groups = groups;
+            decl.card = match groups {
+                Some(_) => Card::Grouped,
+                None => card,
+            };
+        }
+        slots[..visible].to_vec()
     }
 
     /// Calls `callee` once for every element of the argument at `element`,
-    /// see [`OpKind::ForEach`]. The other arguments are the same for every
-    /// call. An argument which is `None` uses the default of the parameter
-    /// it stands for.
+    /// or once for every group if it is grouped, see [`OpKind::ForEach`].
+    /// The other arguments are the same for every call. An argument which
+    /// is `None` uses the default of the parameter it stands for.
+    ///
+    /// Every output is grouped: one group for what each call gave.
     pub fn for_each(
         &mut self,
         programs: &ProgramSet,
@@ -448,22 +651,47 @@ impl ProgramBuilder {
         max: u32,
     ) -> Result<Vec<SlotId>, BuildError> {
         let program = programs.get(callee);
-        if element >= args.len() || args[element].is_none() {
+        let Some(source) = args.get(element).copied().flatten() else {
             return Err(BuildError::Element {
                 target: program.name.clone(),
             });
-        }
-        let outputs = self.call(programs, callee, args)?;
+        };
+        let param = program
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| !param.hidden)
+            .nth(element)
+            .map(|(index, _)| index)
+            .unwrap();
 
-        // It was built as a call, which it is in everything but this.
-        let op = self.ops.last_mut().unwrap();
-        op.kind = OpKind::ForEach {
+        // Only the element goes in, so a single one can be passed for a
+        // parameter which takes a single one.
+        let card = self.slot(source).card;
+        self.slot_mut(source).card = Card::One;
+        let arguments = self.arguments(programs, callee, args);
+        self.slot_mut(source).card = card;
+        let (mut inputs, mut types) = arguments?;
+
+        // Behind the arguments: what the elements are taken in groups of.
+        let groups = match self.slot(source).groups {
+            Some(groups) => groups,
+            None => self.no_groups(),
+        };
+        inputs.push(groups);
+        // Every output is grouped, so it has offsets whether the callee's
+        // was grouped or not.
+        types.truncate(program.outputs.len());
+        types.extend(program.outputs.iter().map(|_| u32::INFO));
+
+        ("for_each", program.hash, &inputs, param, max).hash(&mut self.hasher);
+        let kind = OpKind::ForEach {
             callee,
-            element: element as u32,
+            element: param as u32,
             max,
         };
-        ("for_each", element, max).hash(&mut self.hasher);
-        Ok(outputs)
+        let slots = self.push_op(kind, inputs, types);
+        Ok(self.call_outputs(program, &slots, true))
     }
 
     fn check(
@@ -511,6 +739,10 @@ impl ProgramBuilder {
 
     pub fn slot_type(&self, slot: SlotId) -> TypeInfo {
         self.slots[slot.0 as usize].ty
+    }
+
+    pub fn slot(&self, slot: SlotId) -> &SlotDecl {
+        &self.slots[slot.0 as usize]
     }
 
     pub fn output(&mut self, name: impl Into<String>, slot: SlotId) {

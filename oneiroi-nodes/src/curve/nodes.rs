@@ -4,12 +4,13 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
     node::{
-        Caps, Drawable, GpuKernel, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape, Topology,
+        Caps, Drawable, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl,
+        Topology,
     },
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, extract_segments, locate};
+use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments, locate};
 
 /// A [`MovingFrame`] in the layout of the WGSL struct with the same name.
 #[repr(C)]
@@ -67,48 +68,87 @@ impl From<EvaluatedFrame> for MovingFrame {
 }
 
 /// Control points (weight in `w`) and knots to the segments of the curve.
+///
+/// Every group of points is a curve of its own, so are its segments. The
+/// knots of a curve are the group of knots with the same index, or the
+/// last group if there are fewer. Without any knots a curve starts at its
+/// first point, ends at its last, and its segments are spread evenly.
 pub static NURBS: NodeDef = NodeDef {
     id: "curve.nurbs",
     display_name: "NURBS Curve",
+    version: 1,
     inputs: &[
-        PortDecl::new::<[f32; 4]>("points"),
-        PortDecl::new::<f32>("knots"),
+        PortDecl::new::<[f32; 4]>("points").grouped(),
+        PortDecl::new::<f32>("knots").grouped(),
     ],
-    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments")],
-    // The frame of a segment continues the one of the segment before.
-    shape: Shape::Scan,
+    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped()],
     cpu: nurbs,
     gpu: &[],
 };
 
 fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let points: Vec<_> = inputs
-        .get::<[f32; 4]>(0)
-        .iter()
-        .map(|point| Vec4::from_array(*point))
-        .collect();
-    outputs.set(0, &extract_segments(&points, inputs.get(1)));
+    let points = inputs.get::<[f32; 4]>(0);
+    let knots = inputs.get::<f32>(1);
+    let knot_groups = inputs.groups(1);
+
+    let mut segments = Vec::new();
+    let mut offsets = vec![0];
+    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
+        let points: Vec<_> = points[curve].iter().map(|p| Vec4::from_array(*p)).collect();
+        let knots = match knots.is_empty() {
+            true => clamped_uniform_knots(points.len()),
+            false => knots[knot_groups[group.min(knot_groups.len() - 1)].clone()].to_vec(),
+        };
+        segments.extend(extract_segments(&points, &knots));
+        offsets.push(segments.len() as u32);
+    }
+    outputs.set(0, &segments);
+    outputs.set_groups(0, &offsets);
 }
 
 /// `samples` frames per segment, the first and last one at its ends.
 pub static FRAMES: NodeDef = NodeDef {
     id: "curve.frames",
     display_name: "Curve Frames",
+    version: 1,
     inputs: &[
         PortDecl::new::<CubicNurbsSegmentCache>("segments"),
-        PortDecl::new::<u32>("samples").with_default(PortDefault::U32(&[32])),
+        PortDecl::new::<u32>("samples").with_default(PortDefault::U32(&[32])).one(),
     ],
     outputs: &[PortDecl::new::<EvaluatedFrame>("frames")],
-    shape: Shape::Expand,
     cpu: frames,
     gpu: &[GpuKernel {
         wgsl: concat!(include_str!("curve.wgsl"), include_str!("frames.wgsl")),
-        entry: "curve_frames",
+        outputs: &[GpuOutput {
+            entry: "curve_frames",
+            len: frames_len,
+        }],
         requires: Caps::NONE,
-        len: frames_len,
         reads: &[1],
+        examples: &[
+            || frames_example(9, 8),
+            || frames_example(4, 2),
+            || frames_example(4, 1),
+            || frames_example(0, 5),
+        ],
     }],
 };
+
+/// A curve of `points` which bends in every direction, sampled `samples`
+/// times per segment.
+fn frames_example(points: usize, samples: u32) -> Vec<Vec<u32>> {
+    let points: Vec<_> = (0..points)
+        .map(|i| {
+            let t = i as f32;
+            Vec4::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0 + t * 0.1)
+        })
+        .collect();
+    let segments = match points.len() {
+        0 => Vec::new(),
+        len => extract_segments(&points, &clamped_uniform_knots(len)),
+    };
+    vec![bytemuck::cast_slice(&segments).to_vec(), vec![samples]]
+}
 
 fn frames_samples(inputs: &Inputs<'_>) -> usize {
     inputs.value::<u32>(1).max(2) as usize
@@ -130,16 +170,16 @@ fn frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     }
 }
 
-/// The curve moved by an offset. Only its first element is used.
+/// The curve moved by an offset.
 pub static TRANSLATE: NodeDef = NodeDef {
     id: "curve.translate",
     display_name: "Translate Curve",
+    version: 1,
     inputs: &[
-        PortDecl::new::<CubicNurbsSegmentCache>("segments"),
-        PortDecl::new::<Vec3>("offset").with_default(PortDefault::F32(&[0.0; 3])),
+        PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(),
+        PortDecl::new::<Vec3>("offset").with_default(PortDefault::F32(&[0.0; 3])).one(),
     ],
-    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments")],
-    shape: Shape::Map,
+    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped_like(0)],
     cpu: translate,
     gpu: &[],
 };
@@ -162,8 +202,8 @@ pub static SAMPLE: NodeDef = NodeDef {
         PortDecl::new::<CubicNurbsSegmentCache>("segments"),
         PortDecl::new::<f32>("t"),
     ],
+    version: 1,
     outputs: &[PortDecl::new::<Vec3>("positions")],
-    shape: Shape::Map,
     cpu: sample,
     gpu: &[],
 };
@@ -238,7 +278,7 @@ mod tests {
     fn program() -> oneiroi_core::program::Program {
         let mut b = ProgramBuilder::new("tube spine");
         let points = b.param("points", &points());
-        let samples = b.param::<u32>("samples", &[8]);
+        let samples = b.param_one_of::<u32>("samples", 8);
         let knots = b.constant(&clamped_uniform_knots(6));
         let ts = b.constant::<f32>(&[0.0, 0.5, 1.0]);
 

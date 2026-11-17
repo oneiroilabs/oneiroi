@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 use oneiroi_core::{
-    node::{Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
+    node::{Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     types::{DataType, PortDefault},
 };
 
@@ -16,7 +16,7 @@ pub static F32: NodeDef = NodeDef {
     display_name: "Numbers",
     inputs: &[PortDecl::new::<f32>("values").with_default(PortDefault::F32(&[0.0]))],
     outputs: &[PortDecl::new::<f32>("values")],
-    shape: Shape::Map,
+    version: 1,
     cpu: pass::<f32>,
     gpu: &[],
 };
@@ -27,7 +27,7 @@ pub static VEC3: NodeDef = NodeDef {
     display_name: "Vectors",
     inputs: &[PortDecl::new::<Vec3>("values").with_default(PortDefault::F32(&[0.0; 3]))],
     outputs: &[PortDecl::new::<Vec3>("values")],
-    shape: Shape::Map,
+    version: 1,
     cpu: pass::<Vec3>,
     gpu: &[],
 };

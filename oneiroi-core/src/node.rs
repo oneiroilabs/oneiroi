@@ -16,14 +16,20 @@ pub struct PortDecl {
     pub ty: TypeInfo,
     /// Only meaningful for inputs.
     pub default: PortDefault,
+    pub card: Card,
+    /// Only meaningful for grouped outputs.
+    pub groups: Groups,
 }
 
 impl PortDecl {
+    /// A port of many elements.
     pub const fn new<T: DataType>(name: &'static str) -> Self {
         Self {
             name,
             ty: T::INFO,
             default: PortDefault::Empty,
+            card: Card::Many,
+            groups: Groups::Own,
         }
     }
 
@@ -31,23 +37,62 @@ impl PortDecl {
         self.default = default;
         self
     }
+
+    /// A port of a single element.
+    pub const fn one(mut self) -> Self {
+        self.card = Card::One;
+        self
+    }
+
+    /// An input which gets the groups of what is linked to it, or an
+    /// output whose groups the node makes: see [`Outputs::set_groups`].
+    pub const fn grouped(mut self) -> Self {
+        self.card = Card::Grouped;
+        self.groups = Groups::Own;
+        self
+    }
+
+    /// An output which is grouped the same way as the input `input`: one
+    /// element for each of its elements, or as many in every group.
+    pub const fn grouped_like(mut self, input: usize) -> Self {
+        self.card = Card::Grouped;
+        self.groups = Groups::Like(input);
+        self
+    }
 }
 
-/// How the elements of a node's outputs depend on the elements of its
-/// inputs. This is what a GPU backend plans its passes with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shape {
-    /// One output element per input element, each independent of the others.
-    Map,
-    /// Several output elements per input element.
-    Expand,
-    /// An output element depends on the ones before it.
-    Scan,
-    /// Many input elements collapse into one output element.
-    Reduce,
+/// How many elements a port carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Card {
+    /// A single one. Only something which is single can be linked to it.
+    One,
+    /// A list. Groups of what is linked to it are dropped.
+    Many,
+    /// A list of groups: elements with the offsets where every group starts.
+    Grouped,
+}
+
+impl Card {
+    /// Whether a value of this card can go where `to` is wanted.
+    pub fn fits(self, to: Card) -> bool {
+        to != Card::One || self == Card::One
+    }
+}
+
+/// Where the groups of a grouped output come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Groups {
+    /// The node makes them, as an output of its own.
+    Own,
+    /// They are the groups of an input, and nothing has to be made.
+    Like(usize),
 }
 
 /// The inputs handed to a [`CpuKernel`], in the order of [`NodeDef::inputs`].
+///
+/// Grouped inputs come with their offsets: every group starts at an index
+/// of the elements, and the last offset is where the last group ends.
+/// No offsets at all means a single group of everything.
 pub struct Inputs<'a> {
     pub(crate) store: &'a Store,
     pub(crate) ports: &'static [PortDecl],
@@ -81,6 +126,41 @@ impl<'a> Inputs<'a> {
             .copied()
             .unwrap_or_else(T::zeroed)
     }
+
+    /// The offsets of a grouped input, if it has groups.
+    pub fn offsets(&self, index: usize) -> Option<&'a [u32]> {
+        let hidden = hidden_input(self.ports, index)?;
+        let offsets: &[u32] = self.store.slice(self.handles[hidden]);
+        (!offsets.is_empty()).then_some(offsets)
+    }
+
+    /// The groups of an input, as ranges of its elements. An input without
+    /// groups is a single one.
+    pub fn groups(&self, index: usize) -> Vec<std::ops::Range<usize>> {
+        let len = self.len(index);
+        match self.offsets(index) {
+            Some(offsets) => offsets
+                .windows(2)
+                .map(|pair| (pair[0] as usize).min(len)..(pair[1] as usize).min(len))
+                .collect(),
+            None => vec![0..len],
+        }
+    }
+}
+
+/// Where the offsets of grouped input `index` are handed over: behind all
+/// declared inputs, in the order of the grouped ones.
+pub(crate) fn hidden_input(ports: &[PortDecl], index: usize) -> Option<usize> {
+    (ports[index].card == Card::Grouped).then(|| {
+        ports.len() + ports[..index].iter().filter(|p| p.card == Card::Grouped).count()
+    })
+}
+
+/// Where the offsets of output `index` go, if the node makes them: behind
+/// all declared outputs, in the order of the outputs which have their own.
+pub(crate) fn hidden_output(ports: &[PortDecl], index: usize) -> Option<usize> {
+    let own = |port: &PortDecl| port.card == Card::Grouped && port.groups == Groups::Own;
+    own(&ports[index]).then(|| ports.len() + ports[..index].iter().filter(|p| own(p)).count())
 }
 
 /// The outputs a [`CpuKernel`] fills, in the order of [`NodeDef::outputs`].
@@ -102,6 +182,14 @@ impl Outputs {
         buffer.clear();
         buffer.resize(len * T::INFO.words as usize, 0);
         bytemuck::cast_slice_mut(buffer)
+    }
+
+    /// Where the groups of a grouped output start, and where the last one
+    /// ends. Leaving them out makes a single group of everything.
+    pub fn set_groups(&mut self, index: usize, offsets: &[u32]) {
+        let hidden = hidden_output(self.ports, index)
+            .expect("only an output which is grouped on its own has offsets to set");
+        self.buffers[hidden] = offsets.to_vec();
     }
 }
 
@@ -125,24 +213,40 @@ impl Caps {
     }
 }
 
-/// A premade shader function implementing a node with a single output.
+/// Premade shader functions implementing a node.
 ///
-/// `entry` names a function `fn entry(index: u32) -> Output` inside `wgsl`
-/// which computes one element of the output. It reads its inputs through
-/// functions which are generated around it, two per input port `name`:
-/// `in_name(index: u32) -> Type` and `in_name_len() -> u32`. See
-/// [`shader::compute`](crate::shader::compute).
+/// For every output there is a function `fn entry(index: u32) -> Type`
+/// inside `wgsl` which computes one element of it. An element of an output
+/// can be anything: one per input element (a map), several (an expansion),
+/// or one per group which walks through the group (a scan within groups).
+///
+/// The inputs are read through functions which are generated around it,
+/// per input port `name`: `in_name(index: u32) -> Type` and
+/// `in_name_len() -> u32`, and for a grouped one also `in_name_groups()`,
+/// `in_name_start(group)`, `in_name_end(group)` and `in_name_group_of(index)`.
+/// See [`shader::compute`](crate::shader::compute).
 #[derive(Debug, Clone, Copy)]
 pub struct GpuKernel {
     pub wgsl: &'static str,
-    pub entry: &'static str,
+    /// One per output, in the order of the outputs, and then one per
+    /// output which makes its own groups: the offsets of those, as `u32`.
+    pub outputs: &'static [GpuOutput],
     pub requires: Caps,
-    /// How many elements the output will have. This is asked before the
-    /// kernel runs, to make room for them.
-    pub len: fn(&Inputs<'_>) -> usize,
     /// The inputs `len` reads the values of. Of every other input it may
     /// only ask how long it is, since its values can be on the GPU only.
     pub reads: &'static [usize],
+    /// Inputs to run both kernels with, which every test of a backend
+    /// compares the results of. As words, for every input and then the
+    /// offsets of every grouped one.
+    pub examples: &'static [fn() -> Vec<Vec<u32>>],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GpuOutput {
+    pub entry: &'static str,
+    /// How many elements the output will have. This is asked before the
+    /// kernel runs, to make room for them.
+    pub len: fn(&Inputs<'_>) -> usize,
 }
 
 pub struct NodeDef {
@@ -152,9 +256,11 @@ pub struct NodeDef {
     /// [`ContentKey`]: crate::store::ContentKey
     pub id: &'static str,
     pub display_name: &'static str,
+    /// Counts up whenever what the node computes changes. Results of an
+    /// older version are never mistaken for ones of the newer.
+    pub version: u32,
     pub inputs: &'static [PortDecl],
     pub outputs: &'static [PortDecl],
-    pub shape: Shape,
     pub cpu: CpuKernel,
     /// Variants of the same kernel, the first one the device satisfies wins.
     pub gpu: &'static [GpuKernel],
@@ -163,6 +269,18 @@ pub struct NodeDef {
 impl NodeDef {
     pub fn gpu_kernel(&self, caps: Caps) -> Option<&'static GpuKernel> {
         self.gpu.iter().find(|kernel| caps.satisfies(kernel.requires))
+    }
+
+    /// The offsets which are handed over behind the declared inputs: one
+    /// for every grouped input, by its index.
+    pub fn hidden_inputs(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.inputs.len()).filter(|index| hidden_input(self.inputs, *index).is_some())
+    }
+
+    /// The offsets which are made behind the declared outputs: one for
+    /// every output which makes its own groups, by its index.
+    pub fn hidden_outputs(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.outputs.len()).filter(|index| hidden_output(self.outputs, *index).is_some())
     }
 }
 
@@ -187,6 +305,9 @@ pub struct GenericPort {
     pub ty: PortType,
     /// Only meaningful for inputs with an exact type.
     pub default: PortDefault,
+    /// Every version has the same. Where the groups of an output come
+    /// from can differ between the versions.
+    pub card: Card,
 }
 
 impl GenericPort {
@@ -195,6 +316,7 @@ impl GenericPort {
             name,
             ty: PortType::Exact(T::INFO),
             default: PortDefault::Empty,
+            card: Card::Many,
         }
     }
 
@@ -203,11 +325,22 @@ impl GenericPort {
             name,
             ty: PortType::Trait(tr),
             default: PortDefault::Empty,
+            card: Card::Many,
         }
     }
 
     pub const fn with_default(mut self, default: PortDefault) -> Self {
         self.default = default;
+        self
+    }
+
+    pub const fn one(mut self) -> Self {
+        self.card = Card::One;
+        self
+    }
+
+    pub const fn grouped(mut self) -> Self {
+        self.card = Card::Grouped;
         self
     }
 }
@@ -293,6 +426,7 @@ impl NodeRegistry {
             generic.len() == node.len()
                 && generic.iter().zip(node).all(|(generic, port)| {
                     generic.name == port.name
+                        && generic.card == port.card
                         && match generic.ty {
                             PortType::Exact(ty) => ty == port.ty,
                             PortType::Trait(_) => true,

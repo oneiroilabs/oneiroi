@@ -3,7 +3,7 @@ use std::f32::consts::TAU;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
-    node::{Drawable, Inputs, NodeDef, Outputs, PortDecl, Shape, Topology},
+    node::{Drawable, Inputs, NodeDef, Outputs, PortDecl, Topology},
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
@@ -63,6 +63,15 @@ impl Curve<Vec2> for Circle {
 impl Profile for Circle {
     type Patch = TubePatch;
 
+    /// A circle per curve: the circle of the curve's group, or the last
+    /// one if there are fewer circles than curves.
+    fn select(profile: &[Self], group: usize) -> &[Self] {
+        match profile.len() {
+            0 => profile,
+            len => std::slice::from_ref(&profile[group.min(len - 1)]),
+        }
+    }
+
     fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<TubePatch> {
         let Some(circle) = profile.first() else {
             return Vec::new();
@@ -93,7 +102,7 @@ pub static CIRCLE: NodeDef = NodeDef {
     display_name: "Circle",
     inputs: &[PortDecl::new::<f32>("radius").with_default(PortDefault::F32(&[1.0]))],
     outputs: &[PortDecl::new::<Circle>("circle")],
-    shape: Shape::Map,
+    version: 1,
     cpu: circle,
     gpu: &[],
 };

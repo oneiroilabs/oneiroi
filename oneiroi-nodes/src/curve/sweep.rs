@@ -5,7 +5,7 @@ use std::{f32::consts::TAU, marker::PhantomData};
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use oneiroi_core::{
-    node::{GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
+    node::{GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     program::{Program, ProgramBuilder},
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
@@ -144,20 +144,20 @@ pub static SWEEP: GenericNode = GenericNode {
     id: "curve.sweep",
     display_name: "Sweep",
     inputs: &[
-        GenericPort::exact::<CubicNurbsSegmentCache>("spine"),
+        GenericPort::exact::<CubicNurbsSegmentCache>("spine").grouped(),
         GenericPort::implementing("profile", PROFILE),
     ],
-    outputs: &[GenericPort::implementing("surface", SURFACE)],
+    outputs: &[GenericPort::implementing("surface", SURFACE).grouped()],
 };
 
 struct Ports<P>(PhantomData<P>);
 
 impl<P: Profile> Ports<P> {
     const INPUTS: &'static [PortDecl] = &[
-        PortDecl::new::<CubicNurbsSegmentCache>("spine"),
+        PortDecl::new::<CubicNurbsSegmentCache>("spine").grouped(),
         PortDecl::new::<P>("profile"),
     ];
-    const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<P::Patch>("surface")];
+    const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<P::Patch>("surface").grouped()];
 }
 
 /// Makes `P` usable wherever a profile is asked for, by registering the
@@ -169,7 +169,7 @@ pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
         display_name: SWEEP.display_name,
         inputs: Ports::<P>::INPUTS,
         outputs: Ports::<P>::OUTPUTS,
-        shape: Shape::Expand,
+        version: 1,
         cpu: sweep::<P>,
         gpu: &[],
     });
@@ -177,9 +177,18 @@ pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
     register_surface::<P::Patch>(registry);
 }
 
+/// Every curve of the spine is swept on its own, into a group of patches.
 fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let patches = P::sweep(inputs.get(0), inputs.get::<P>(1));
+    let spine = inputs.get::<CubicNurbsSegmentCache>(0);
+    let profile = inputs.get::<P>(1);
+    let mut patches = Vec::new();
+    let mut offsets = vec![0];
+    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
+        patches.extend(P::sweep(&spine[curve], P::select(profile, group)));
+        offsets.push(patches.len() as u32);
+    }
     outputs.set(0, &patches);
+    outputs.set_groups(0, &offsets);
 }
 
 /// A tube is not a node of its own but this graph: a circle swept along
@@ -189,8 +198,8 @@ pub fn tube(registry: &NodeRegistry) -> Program {
     let mut b = ProgramBuilder::new("tube");
     let spine = b.param::<CubicNurbsSegmentCache>("spine", &[]);
     let radius = b.param::<f32>("radius", &[0.2]);
-    let rings = b.param::<u32>("rings", &[16]);
-    let sides = b.param::<u32>("sides", &[24]);
+    let rings = b.param_one_of::<u32>("rings", 16);
+    let sides = b.param_one_of::<u32>("sides", 24);
 
     let circle = b.node(&CIRCLE, &[radius]).expect("a radius is a f32")[0];
     let surface = b
@@ -212,6 +221,8 @@ mod tests {
         exec::{Engine, Instance},
         program::BuildError,
     };
+
+    use oneiroi_core::types::DataType;
 
     use super::*;
     use crate::curve::{NURBS, nurbs::clamped_uniform_knots};
@@ -240,7 +251,7 @@ mod tests {
         let knots = b.constant(&clamped_uniform_knots(spine.len()));
         let radius = b.param::<f32>("radius", &[0.25]);
         let rings = b.constant::<u32>(&[4]);
-        let sides = b.param::<u32>("sides", &[6]);
+        let sides = b.param_one_of::<u32>("sides", 6);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let mesh = b
             .call(
@@ -419,6 +430,49 @@ mod tests {
         assert!(normals[0].distance(normals[1]) < 1e-3 && normals[1].distance(normals[2]) < 1e-3);
 
         assert_faces_outwards(&engine, &instance);
+    }
+
+    #[test]
+    fn every_curve_is_swept_on_its_own() {
+        // Two curves in one list of points, told apart by their groups:
+        // a straight one along x, and the bent one far away from it.
+        let mut points: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0., 0., 1.]).collect();
+        points.extend(BENT.iter().map(|[x, y, z, w]| [*x, y + 10.0, *z, *w]));
+
+        let mut b = ProgramBuilder::new("two curves");
+        let points = b.param_grouped("points", <[f32; 4]>::INFO, bytemuck::cast_slice(&points));
+        let knots = b.constant::<f32>(&[]);
+        let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let radius = b.constant::<f32>(&[0.25, 0.5]);
+        let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+        let surface = b.generic(&registry(), &SWEEP, &[spine, circle]).unwrap()[0];
+        b.output("spine", spine);
+        b.output("surface", surface);
+
+        let mut engine = Engine::default();
+        let id = engine.add_program(b.finish());
+        let mut instance = engine.instantiate(id);
+        engine.set_param(&mut instance, "points#groups", &[0u32, 4, 9]).unwrap();
+        engine.evaluate([&mut instance]);
+
+        // A segment for the first curve and two for the second, each
+        // curve a group of its own all the way through.
+        assert_eq!(engine.groups(&instance, "spine"), Some(&[0, 1, 3][..]));
+        assert_eq!(engine.groups(&instance, "surface"), Some(&[0, 1, 3][..]));
+        let patches = engine.read::<TubePatch>(&instance, "surface").unwrap();
+        assert_eq!(patches.len(), 3);
+
+        // Each curve gets its own circle, and the texture runs along each
+        // curve from its start to its end.
+        let radius = |patch: &TubePatch| {
+            let (position, _) = patch.point(0.5, 0.0);
+            position.distance(patch.point(0.5, 0.5).0) / 2.0
+        };
+        assert!((radius(&patches[0]) - 0.25).abs() < 1e-3);
+        assert!((radius(&patches[1]) - 0.5).abs() < 1e-3);
+        assert_eq!(patches[0].uv(1.0, 0.0).y, 1.0);
+        assert_eq!(patches[1].uv(0.0, 0.0).y, 0.0);
+        assert!((patches[2].uv(1.0, 0.0).y - 1.0).abs() < 1e-5);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::{
 };
 
 use oneiroi_core::{
-    node::{GenericNode, NodeDef, NodeRegistry, PortType},
+    node::{Card, GenericNode, NodeDef, NodeRegistry, PortType},
     program::{BuildError, Program, ProgramBuilder, ProgramId, ProgramSet, SlotId},
     types::{Scalar, TypeInfo},
 };
@@ -48,6 +48,8 @@ pub enum LowerErrorKind {
     NeedsLink,
     /// A written out value does not fit the type of the port.
     Value { expected: &'static str },
+    /// The port takes a single value, and a list was written out for it.
+    NotOne,
     /// Two inputs of different types are exposed under one name.
     ExposedTwice(String),
     /// Only a node which is another graph can run for each element.
@@ -82,6 +84,7 @@ impl fmt::Display for LowerError {
             LowerErrorKind::Value { expected } => {
                 write!(f, "the value is not a list of `{expected}`")
             }
+            LowerErrorKind::NotOne => write!(f, "only a single value can go here"),
             LowerErrorKind::ExposedTwice(name) => {
                 write!(f, "`{name}` is exposed with two different types")
             }
@@ -124,6 +127,7 @@ enum Target<'a> {
 struct Port {
     name: String,
     ty: PortType,
+    card: Card,
     default: Vec<u32>,
 }
 
@@ -136,6 +140,7 @@ impl Target<'_> {
                 .map(|port| Port {
                     name: port.name.into(),
                     ty: PortType::Exact(port.ty),
+                    card: port.card,
                     default: port.default.words().into(),
                 })
                 .collect(),
@@ -145,15 +150,18 @@ impl Target<'_> {
                 .map(|port| Port {
                     name: port.name.into(),
                     ty: port.ty,
+                    card: port.card,
                     default: port.default.words().into(),
                 })
                 .collect(),
+            // The offsets of grouped parameters go along with them, and
+            // are no ports of their own.
             Self::Graph(_, program) => program
-                .params
-                .iter()
+                .visible_params()
                 .map(|param| Port {
                     name: param.name.clone(),
                     ty: PortType::Exact(program.slot(param.slot).ty),
+                    card: program.slot(param.slot).card,
                     default: param.default.to_vec(),
                 })
                 .collect(),
@@ -237,9 +245,13 @@ impl<'a> Lowerer<'a> {
                 PortType::Trait(_) => Err(at(Some(&port.name), kind)),
             };
             let words = |value: &'a Value, ty: &TypeInfo| {
-                value
-                    .words(ty)
-                    .ok_or_else(|| at(Some(&port.name), LowerErrorKind::Value { expected: ty.name }))
+                let words = value.words(ty).ok_or_else(|| {
+                    at(Some(&port.name), LowerErrorKind::Value { expected: ty.name })
+                })?;
+                match port.card == Card::One && words.len() != ty.words as usize {
+                    true => Err(at(Some(&port.name), LowerErrorKind::NotOne)),
+                    false => Ok(words),
+                }
             };
 
             let slot = match node.inputs.get(&port.name) {
@@ -266,7 +278,14 @@ impl<'a> Lowerer<'a> {
                             return Err(at(Some(&port.name), kind));
                         }
                         None => {
-                            let slot = self.builder.param_words(name.clone(), ty, default);
+                            let name = name.clone();
+                            let slot = match port.card {
+                                Card::One => self.builder.param_one(name.clone(), ty, default),
+                                Card::Many => self.builder.param_words(name.clone(), ty, default),
+                                Card::Grouped => {
+                                    self.builder.param_grouped(name.clone(), ty, default)
+                                }
+                            };
                             self.exposed.insert(name.clone(), slot);
                             Some(slot)
                         }
@@ -329,7 +348,9 @@ impl<'a> Lowerer<'a> {
         }
         .map_err(|error| {
             let port = match &error {
-                BuildError::Type { port, .. } | BuildError::Trait { port, .. } => Some(port.clone()),
+                BuildError::Type { port, .. }
+                | BuildError::Trait { port, .. }
+                | BuildError::Card { port, .. } => Some(port.clone()),
                 _ => None,
             };
             at(port.as_deref(), LowerErrorKind::Build(error))

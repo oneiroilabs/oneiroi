@@ -9,7 +9,7 @@ use std::fmt::{self, Write};
 
 use crate::{
     node::{Drawable, GpuKernel, NodeDef, Topology},
-    types::{Field, FieldType, Layout, TypeInfo},
+    types::{DataType, Field, FieldType, Layout, TypeInfo},
 };
 
 /// How many elements one workgroup of a generated compute shader covers.
@@ -31,8 +31,11 @@ pub const WORKGROUP_SIZE: u32 = 64;
 ///   length in words of every input, then page and offset of its output
 ///   and how many elements that gets.
 ///
-/// Its entry point is `main`. Dispatch `(ceil(elements / WORKGROUP_SIZE),
-/// calls, 1)` workgroups, with the elements of the call which has the most.
+/// There is an entry point `main_k` for every output `k` of the kernel,
+/// which fills that output. The inputs of a call are the declared inputs
+/// of the node and then the offsets of every grouped one. Dispatch
+/// `(ceil(elements / WORKGROUP_SIZE), calls, 1)` workgroups per output,
+/// with the elements of the call which has the most.
 #[derive(Debug, Clone)]
 pub struct ComputeShader {
     pub wgsl: String,
@@ -89,7 +92,7 @@ pub const GATHER_CALL_WORDS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShaderError {
-    /// Only nodes with exactly one output can be generated for.
+    /// A kernel needs an entry for every output, offsets included.
     Outputs { node: &'static str, found: usize },
     /// The shader does not compile. This is a bug in the kernel of the node.
     Invalid { node: &'static str, message: String },
@@ -99,7 +102,7 @@ impl fmt::Display for ShaderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Outputs { node, found } => {
-                write!(f, "`{node}` has {found} outputs, a kernel fills exactly one")
+                write!(f, "the kernel of `{node}` has {found} outputs, not one for each")
             }
             Self::Invalid { node, message } => {
                 write!(f, "the shader of `{node}` is invalid:\n{message}")
@@ -230,20 +233,28 @@ pub(crate) fn declare(out: &mut String, declared: &mut Vec<&'static str>, ty: &T
 /// Writes the compute shader which runs `kernel` for `node`, and checks
 /// that it compiles.
 pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, ShaderError> {
-    let [output_port] = node.outputs else {
+    // The declared outputs, then the offsets of those with their own groups.
+    let outputs: Vec<TypeInfo> = node
+        .outputs
+        .iter()
+        .map(|port| port.ty)
+        .chain(node.hidden_outputs().map(|_| u32::INFO))
+        .collect();
+    if kernel.outputs.len() != outputs.len() {
         return Err(ShaderError::Outputs {
             node: node.id,
-            found: node.outputs.len(),
+            found: kernel.outputs.len(),
         });
-    };
-    let inputs = node.inputs.len();
+    }
+    let hidden: Vec<usize> = node.hidden_inputs().collect();
+    let inputs = node.inputs.len() + hidden.len();
     let mut wgsl = String::new();
     let out = &mut wgsl;
 
     let _ = writeln!(out, "enable wgpu_binding_array;\n");
     let _ = writeln!(out, "// Generated for `{}`.\n", node.id);
     let mut declared = Vec::new();
-    for ty in node.inputs.iter().map(|port| &port.ty).chain([&output_port.ty]) {
+    for ty in node.inputs.iter().map(|port| &port.ty).chain(&outputs) {
         declare(out, &mut declared, ty);
     }
 
@@ -266,29 +277,87 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         );
     }
 
+    // The groups of grouped inputs, from their offsets. No offsets at all
+    // are a single group of everything.
+    for (place, index) in hidden.iter().enumerate() {
+        let name = node.inputs[*index].name;
+        let at = (node.inputs.len() + place) * 3;
+        let _ = writeln!(
+            out,
+            "fn in_{name}_offset(group: u32) -> u32 {{
+    return pages[calls[call + {at}u]].words[calls[call + {}u] + group];
+}}
+
+fn in_{name}_groups() -> u32 {{
+    let offsets = calls[call + {}u];
+    if (offsets == 0u) {{
+        return 1u;
+    }}
+    return offsets - 1u;
+}}
+
+fn in_{name}_start(group: u32) -> u32 {{
+    if (calls[call + {}u] == 0u) {{
+        return 0u;
+    }}
+    return min(in_{name}_offset(group), in_{name}_len());
+}}
+
+fn in_{name}_end(group: u32) -> u32 {{
+    if (calls[call + {}u] == 0u) {{
+        return in_{name}_len();
+    }}
+    return min(in_{name}_offset(group + 1u), in_{name}_len());
+}}
+
+// The group an element is in, by a binary search through the offsets.
+fn in_{name}_group_of(index: u32) -> u32 {{
+    var low = 0u;
+    var high = in_{name}_groups();
+    while (high - low > 1u) {{
+        let middle = (low + high) / 2u;
+        if (in_{name}_start(middle) <= index) {{
+            low = middle;
+        }} else {{
+            high = middle;
+        }}
+    }}
+    return low;
+}}
+",
+            at + 1,
+            at + 2,
+            at + 2,
+            at + 2,
+        );
+    }
+
     let _ = writeln!(out, "{}\n", kernel.wgsl.trim());
 
-    let _ = writeln!(
-        out,
-        "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main(\n    @builtin(global_invocation_id) id: vec3<u32>,\n    @builtin(workgroup_id) group: vec3<u32>,\n) {{"
-    );
-    let _ = writeln!(out, "    call = group.y * {call_words}u;");
+    // An entry point for every output, which fills one element of it.
     let output = inputs * 3;
-    let _ = writeln!(
-        out,
-        "    if (id.x >= calls[call + {}u]) {{\n        return;\n    }}",
-        output + 2
-    );
-    let _ = writeln!(out, "    let value = {}(id.x);", kernel.entry);
-    let _ = writeln!(out, "    let page = calls[call + {output}u];");
-    let _ = writeln!(
-        out,
-        "    let base = calls[call + {}u] + id.x * {}u;",
-        output + 1,
-        output_port.ty.words
-    );
-    write_element(out, &output_port.ty, "value", "pages[page].words", "base");
-    let _ = writeln!(out, "}}");
+    for (index, (ty, entry)) in outputs.iter().zip(kernel.outputs).enumerate() {
+        let _ = writeln!(
+            out,
+            "@compute @workgroup_size({WORKGROUP_SIZE})\nfn main_{index}(\n    @builtin(global_invocation_id) id: vec3<u32>,\n    @builtin(workgroup_id) group: vec3<u32>,\n) {{"
+        );
+        let _ = writeln!(out, "    call = group.y * {call_words}u;");
+        let _ = writeln!(
+            out,
+            "    if (id.x >= calls[call + {}u]) {{\n        return;\n    }}",
+            output + 2
+        );
+        let _ = writeln!(out, "    let value = {}(id.x);", entry.entry);
+        let _ = writeln!(out, "    let page = calls[call + {output}u];");
+        let _ = writeln!(
+            out,
+            "    let base = calls[call + {}u] + id.x * {}u;",
+            output + 1,
+            ty.words
+        );
+        write_element(out, ty, "value", "pages[page].words", "base");
+        let _ = writeln!(out, "}}\n");
+    }
 
     validate_with(node.id, &wgsl, bindless())?;
     Ok(ComputeShader { wgsl, call_words })
@@ -975,7 +1044,7 @@ fn validate_with(
 mod tests {
     use super::*;
     use crate::{
-        node::{Caps, PortDecl, Shape},
+        node::{Caps, GpuOutput, PortDecl},
         types::{DataType, Scalar},
     };
 
@@ -1013,16 +1082,19 @@ mod tests {
             display_name: "Grow",
             inputs: INPUTS,
             outputs: OUTPUTS,
-            shape: Shape::Map,
+            version: 0,
             cpu: |_, _| {},
             gpu: &[],
         };
         let kernel = GpuKernel {
             wgsl,
-            entry: "grow",
+            outputs: &[GpuOutput {
+                entry: "grow",
+                len: |inputs| inputs.len(0),
+            }],
             requires: Caps::NONE,
-            len: |inputs| inputs.len(0),
             reads: &[],
+            examples: &[],
         };
         (node, kernel)
     }
@@ -1086,7 +1158,7 @@ mod tests {
             display_name: "Swap",
             inputs: INPUTS,
             outputs: OUTPUTS,
-            shape: Shape::Map,
+            version: 0,
             cpu: |_, _| {},
             gpu: &[],
         };
@@ -1095,10 +1167,13 @@ mod tests {
                 let pair = in_pairs(index);
                 return Pair(pair.second, pair.weight, pair.first);
             }",
-            entry: "swap",
+            outputs: &[GpuOutput {
+                entry: "swap",
+                len: |inputs| inputs.len(0),
+            }],
             requires: Caps::NONE,
-            len: |inputs| inputs.len(0),
             reads: &[],
+            examples: &[],
         };
         let shader = compute(&node, &kernel).unwrap().wgsl;
 
@@ -1134,15 +1209,58 @@ mod tests {
     }
 
     #[test]
-    fn kernels_fill_exactly_one_output() {
+    fn every_output_needs_an_entry() {
         let (mut node, kernel) = node(GROW);
         node.outputs = &[];
         assert_eq!(
             compute(&node, &kernel).unwrap_err(),
             ShaderError::Outputs {
                 node: "test.grow",
-                found: 0
+                found: 1
             }
         );
+    }
+
+    #[test]
+    fn groups_can_be_read_and_made() {
+        // The length of every group, as many groups as the input has.
+        const INPUTS: &[PortDecl] = &[PortDecl::new::<f32>("values").grouped()];
+        const OUTPUTS: &[PortDecl] = &[PortDecl::new::<u32>("lengths").grouped()];
+        let node = NodeDef {
+            id: "test.lengths",
+            display_name: "Lengths",
+            version: 0,
+            inputs: INPUTS,
+            outputs: OUTPUTS,
+            cpu: |_, _| {},
+            gpu: &[],
+        };
+        let kernel = GpuKernel {
+            wgsl: "
+                fn length_of(group: u32) -> u32 {
+                    return in_values_end(group) - in_values_start(group);
+                }
+                fn one_each(group: u32) -> u32 {
+                    return group + in_values_group_of(0u) * 0u;
+                }",
+            outputs: &[
+                GpuOutput {
+                    entry: "length_of",
+                    len: |_| 0,
+                },
+                GpuOutput {
+                    entry: "one_each",
+                    len: |_| 0,
+                },
+            ],
+            requires: Caps::NONE,
+            reads: &[],
+            examples: &[],
+        };
+        let shader = compute(&node, &kernel).unwrap();
+        // The values and their offsets, and where the output goes.
+        assert_eq!(shader.call_words, 9);
+        assert!(shader.wgsl.contains("fn main_0(") && shader.wgsl.contains("fn main_1("));
+        assert!(shader.wgsl.contains("fn in_values_group_of(index: u32) -> u32"));
     }
 }

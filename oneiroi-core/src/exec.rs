@@ -95,7 +95,8 @@ impl Executor for CpuExecutor {
 
             let mut buffers = std::mem::take(&mut self.buffers);
             buffers.iter_mut().for_each(Vec::clear);
-            buffers.resize_with(item.node.outputs.len().max(buffers.len()), Vec::new);
+            // The declared outputs and the offsets of the grouped ones.
+            buffers.resize_with(item.outputs.len().max(buffers.len()), Vec::new);
             let mut outputs = Outputs {
                 ports: item.node.outputs,
                 buffers,
@@ -146,14 +147,15 @@ impl Keys {
                 OpKind::Node(node) => {
                     for (output, slot) in op.outputs.iter().enumerate() {
                         slots[slot.0 as usize] =
-                            ContentKey::derive(node.id, output as u32, &inputs);
+                            ContentKey::derive_node(node.id, node.version, output as u32, &inputs);
                     }
                 }
                 OpKind::Call(callee) => {
                     let callee = programs.get(callee);
                     let keys = Keys::derive(programs, callee, &inputs);
-                    for (slot, output) in op.outputs.iter().zip(&callee.outputs) {
-                        slots[slot.0 as usize] = keys.slots[output.slot.0 as usize];
+                    for (index, slot) in op.outputs.iter().enumerate() {
+                        let inner = callee.call_output_slot(index);
+                        slots[slot.0 as usize] = keys.slots[inner.0 as usize];
                     }
                     calls.push((index as u32, keys));
                 }
@@ -273,7 +275,7 @@ impl Planner<'_> {
                             keys: scope.keys.call(op_index),
                             caller: Some((scope, &op.inputs)),
                         };
-                        self.ensure(&callee, program.outputs[*output as usize].slot);
+                        self.ensure(&callee, program.call_output_slot(*output as usize));
                     }
                 }
             }
@@ -289,6 +291,11 @@ pub enum ParamError {
         expected: &'static str,
         found: &'static str,
     },
+    /// The words are not whole elements of the type of the parameter.
+    Words {
+        param: String,
+        expected: &'static str,
+    },
 }
 
 impl fmt::Display for ParamError {
@@ -300,6 +307,9 @@ impl fmt::Display for ParamError {
                 expected,
                 found,
             } => write!(f, "`{param}` expects `{expected}` but got `{found}`"),
+            Self::Words { param, expected } => {
+                write!(f, "`{param}` expects whole elements of `{expected}`")
+            }
         }
     }
 }
@@ -421,8 +431,28 @@ impl<E: Executor> Engine<E> {
                 found: T::NAME,
             });
         }
+        self.set_param_words(instance, name, bytemuck::cast_slice(value))
+    }
 
-        let words: &[u32] = bytemuck::cast_slice(value);
+    /// [`Engine::set_param`] for a value which is only known by its words.
+    pub fn set_param_words(
+        &self,
+        instance: &mut Instance,
+        name: &str,
+        words: &[u32],
+    ) -> Result<(), ParamError> {
+        let program = self.programs.get(instance.program);
+        let index = program
+            .param_index(name)
+            .ok_or_else(|| ParamError::Unknown(name.into()))?;
+        let ty = program.slot(program.params[index].slot).ty;
+        if words.len() % ty.words as usize != 0 {
+            return Err(ParamError::Words {
+                param: name.into(),
+                expected: ty.name,
+            });
+        }
+
         let key = ContentKey::of_data(&ty, words);
         if key != instance.param_keys[index] {
             instance.params[index] = words.into();
@@ -526,40 +556,60 @@ impl<E: Executor> Engine<E> {
         let program = self.programs.get(callee);
         let ty = program.slot(program.params[element as usize].slot).ty;
         let source = inputs[element as usize];
-        let count = self
+        let len = self
             .store
             .touch(source)
             .map_or(0, |handle| handle.len / ty.words);
-        if count > max {
+
+        // A run for every group of what the elements are taken of, or for
+        // every element if it has no groups.
+        let groups = inputs[inputs.len() - 1];
+        self.executor.download(&mut self.store, &[groups]);
+        let runs: Vec<(u32, u32)> = match self.store.read::<u32>(groups) {
+            Some(offsets) if !offsets.is_empty() => offsets
+                .windows(2)
+                .map(|pair| (pair[0].min(len), pair[1].min(len).max(pair[0].min(len))))
+                .collect(),
+            _ => (0..len).map(|index| (index, index + 1)).collect(),
+        };
+        if runs.len() > max as usize {
             self.overflows.push(Overflow {
                 program: program.name.clone(),
-                elements: count,
+                elements: runs.len() as u32,
                 max,
             });
         }
 
+        // A single group of everything, for the groups of the element.
+        let no_groups = ContentKey::of_data(&u32::INFO, &[]);
+        self.store.insert(no_groups, &[]);
+        let hidden = program.groups_of_param(element as usize);
+
         let mut steps = Vec::new();
         let mut scheduled = HashSet::new();
         let mut parts = vec![Vec::new(); program.outputs.len()];
-        let mut params = inputs.to_vec();
+        let mut params = inputs[..inputs.len() - 1].to_vec();
         let resident = self.store.is_resident(source);
-        for index in 0..count.min(max) {
+        for (index, (start, end)) in runs.iter().take(max as usize).enumerate() {
             // Where the values are at hand an element is known by what it
             // is: elements which did not change, or which are the same as
             // another one, find their results. Otherwise it is known by
             // where it is, which needs nothing from the backend.
-            let (start, words) = (index * ty.words, ty.words as usize);
+            let (from, words) = (start * ty.words, (end - start) * ty.words);
             let key = match resident {
                 true => {
                     let all = self.store.words(self.store.get(source).unwrap());
-                    ContentKey::of_data(&ty, &all[start as usize..][..words])
+                    ContentKey::of_data(&ty, &all[from as usize..][..words as usize])
                 }
-                false => ContentKey::derive("element", index, &[source]),
+                false => ContentKey::derive("element", index as u32, &[source, groups]),
             };
             // An element is a part of what it is an element of, so it needs
             // no copy on any backend.
-            self.store.alias(key, source, start, ty.words);
+            self.store.alias(key, source, from, words);
             params[element as usize] = key;
+            if let Some(hidden) = hidden {
+                params[hidden] = no_groups;
+            }
 
             let keys = Keys::derive(&self.programs, program, &params);
             let scope = Scope {
@@ -581,9 +631,24 @@ impl<E: Executor> Engine<E> {
             }
         }
 
+        let words: Vec<u32> = program
+            .outputs
+            .iter()
+            .map(|output| program.slot(output.slot).ty.words)
+            .collect();
         let ran = self.run(steps);
-        for (parts, output) in parts.iter().zip(outputs.iter()) {
-            self.executor.gather(&mut self.store, parts, *output);
+        let count = words.len();
+        for (index, parts) in parts.iter().enumerate() {
+            self.executor.gather(&mut self.store, parts, outputs[index]);
+
+            // One group for what every run gave.
+            let words = words[index];
+            let mut offsets = vec![0u32];
+            for part in parts {
+                let len = self.store.get(*part).map_or(0, |handle| handle.len / words);
+                offsets.push(offsets.last().unwrap() + len);
+            }
+            self.store.insert(outputs[count + index], &offsets);
         }
         ran
     }
@@ -614,6 +679,25 @@ impl<E: Executor> Engine<E> {
         self.store.read(self.output_key(instance, name)?)
     }
 
+    /// The offsets of the groups of an output, if it is grouped. `None` if
+    /// there is no such output, it is not grouped, or only the backend has
+    /// the offsets so far.
+    pub fn groups(&self, instance: &Instance, name: &str) -> Option<&[u32]> {
+        self.store.read(self.groups_key(instance, name)?)
+    }
+
+    fn groups_key(&self, instance: &Instance, name: &str) -> Option<ContentKey> {
+        let program = self.programs.get(instance.program);
+        let slot = program.outputs[program.output_index(name)?].slot;
+        let groups = program.slot(slot).groups?;
+        Some(instance.keys.as_ref()?.slots[groups.0 as usize])
+    }
+
+    /// Like [`Engine::groups`], but downloads the offsets first if need be.
+    pub fn fetch_groups(&mut self, instance: &Instance, name: &str) -> Option<&[u32]> {
+        self.fetch_key(self.groups_key(instance, name)?)
+    }
+
     /// Like [`Engine::read`], but downloads the output first if only the
     /// backend has it. That can take a while, so do it for what the CPU
     /// really needs to see and not for everything.
@@ -642,7 +726,7 @@ impl<E: Executor> Engine<E> {
 mod tests {
     use super::*;
     use crate::{
-        node::{PortDecl, Shape},
+        node::PortDecl,
         program::{BuildError, ProgramBuilder},
     };
 
@@ -663,7 +747,7 @@ mod tests {
             display_name: id,
             inputs: BINARY_IN,
             outputs: BINARY_OUT,
-            shape: Shape::Map,
+            version: 0,
             cpu,
             gpu: &[],
         }
@@ -676,7 +760,7 @@ mod tests {
         display_name: "Sum",
         inputs: &[PortDecl::new::<f32>("a"), PortDecl::new::<f32>("b")],
         outputs: &[PortDecl::new::<f32>("sum"), PortDecl::new::<u32>("count")],
-        shape: Shape::Map,
+        version: 0,
         cpu: |inputs, outputs| {
             let (a, b) = (inputs.get::<f32>(0), inputs.get::<f32>(1));
             let sum: Vec<_> = a.iter().zip(b).map(|(a, b)| a + b).collect();
@@ -836,7 +920,7 @@ mod tests {
             display_name: "Double",
             inputs: &[PortDecl::new::<f32>("values")],
             outputs: &[PortDecl::new::<f32>("values")],
-            shape: Shape::Map,
+            version: 0,
             cpu: |i, o| o.set(0, &i.get::<f32>(0).iter().map(|v| v * 2.).collect::<Vec<_>>()),
             gpu: &[],
         };
@@ -845,7 +929,7 @@ mod tests {
             display_name: "Double",
             inputs: &[PortDecl::new::<u32>("values")],
             outputs: &[PortDecl::new::<u32>("values")],
-            shape: Shape::Map,
+            version: 0,
             cpu: |i, o| o.set(0, &i.get::<u32>(0).iter().map(|v| v * 2).collect::<Vec<_>>()),
             gpu: &[],
         };
@@ -1065,6 +1149,178 @@ mod tests {
                 b.for_each(engine.programs(), inner, &[None], 3, 1),
                 Err(BuildError::Element { .. })
             ));
+        }
+    }
+
+    mod groups {
+        use super::*;
+        use crate::node::Card;
+
+        /// The sum of every group, and how many elements each had.
+        static SUMS: NodeDef = NodeDef {
+            id: "test.sums",
+            display_name: "Sums",
+            version: 0,
+            inputs: &[PortDecl::new::<f32>("values").grouped()],
+            outputs: &[
+                PortDecl::new::<f32>("sums"),
+                PortDecl::new::<u32>("lengths"),
+            ],
+            cpu: |inputs, outputs| {
+                let values = inputs.get::<f32>(0);
+                let groups = inputs.groups(0);
+                let sums: Vec<f32> = groups.iter().map(|g| values[g.clone()].iter().sum()).collect();
+                let lengths: Vec<u32> = groups.iter().map(|g| g.len() as u32).collect();
+                outputs.set(0, &sums);
+                outputs.set(1, &lengths);
+            },
+            gpu: &[],
+        };
+
+        /// Splits a list into groups of `size` elements.
+        static SPLIT: NodeDef = NodeDef {
+            id: "test.split",
+            display_name: "Split",
+            version: 0,
+            inputs: &[
+                PortDecl::new::<f32>("values"),
+                PortDecl::new::<u32>("size").one(),
+            ],
+            outputs: &[PortDecl::new::<f32>("values").grouped()],
+            cpu: |inputs, outputs| {
+                let values = inputs.get::<f32>(0);
+                let size = inputs.value::<u32>(1).max(1) as usize;
+                outputs.set(0, values);
+                let offsets: Vec<u32> = (0..values.len().div_ceil(size))
+                    .map(|group| (group * size) as u32)
+                    .chain([values.len() as u32])
+                    .collect();
+                outputs.set_groups(0, &offsets);
+            },
+            gpu: &[],
+        };
+
+        /// Doubles every element and keeps the groups as they are.
+        static DOUBLE: NodeDef = NodeDef {
+            id: "test.double_grouped",
+            display_name: "Double",
+            version: 0,
+            inputs: &[PortDecl::new::<f32>("values").grouped()],
+            outputs: &[PortDecl::new::<f32>("values").grouped_like(0)],
+            cpu: |inputs, outputs| {
+                let doubled: Vec<f32> = inputs.get::<f32>(0).iter().map(|v| v * 2.0).collect();
+                outputs.set(0, &doubled);
+            },
+            gpu: &[],
+        };
+
+        fn split(b: &mut ProgramBuilder, values: &[f32], size: u32) -> SlotId {
+            let values = b.constant(values);
+            let size = b.constant(&[size]);
+            b.node(&SPLIT, &[values, size]).unwrap()[0]
+        }
+
+        #[test]
+        fn groups_go_from_node_to_node() {
+            let mut b = ProgramBuilder::new("groups");
+            let split = split(&mut b, &[1., 2., 3., 4., 5.], 2);
+            assert_eq!(b.slot(split).card, Card::Grouped);
+            let doubled = b.node(&DOUBLE, &[split]).unwrap()[0];
+            // Groups which are passed along are the very same slot.
+            assert_eq!(b.slot(doubled).groups, b.slot(split).groups);
+            let sums = b.node(&SUMS, &[doubled]).unwrap();
+            b.output("doubled", doubled);
+            b.output("sums", sums[0]);
+            b.output("lengths", sums[1]);
+
+            let mut engine = Engine::default();
+            let id = engine.add_program(b.finish());
+            let mut instance = engine.instantiate(id);
+            assert_eq!(engine.evaluate([&mut instance]), 3);
+            assert_eq!(engine.read::<f32>(&instance, "sums"), Some(&[6., 14., 10.][..]));
+            assert_eq!(engine.read::<u32>(&instance, "lengths"), Some(&[2, 2, 1][..]));
+            assert_eq!(engine.groups(&instance, "doubled"), Some(&[0, 2, 4, 5][..]));
+            assert_eq!(engine.groups(&instance, "sums"), None);
+        }
+
+        #[test]
+        fn a_list_without_groups_is_a_single_group() {
+            let mut b = ProgramBuilder::new("one group");
+            let values = b.constant::<f32>(&[1., 2., 3.]);
+            let sums = b.node(&SUMS, &[values]).unwrap();
+            b.output("sums", sums[0]);
+            let mut engine = Engine::default();
+            let id = engine.add_program(b.finish());
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+            assert_eq!(engine.read::<f32>(&instance, "sums"), Some(&[6.][..]));
+        }
+
+        #[test]
+        fn a_single_value_is_not_a_list() {
+            let mut b = ProgramBuilder::new("cards");
+            let values = b.constant::<f32>(&[1., 2.]);
+            let sizes = b.constant::<u32>(&[1, 2]);
+            assert_eq!(
+                b.node(&SPLIT, &[values, sizes]),
+                Err(BuildError::Card {
+                    target: "test.split".into(),
+                    port: "size".into()
+                })
+            );
+            // A parameter can be single too.
+            let size = b.param_one("size", u32::INFO, &[2]);
+            assert!(b.node(&SPLIT, &[values, size]).is_ok());
+            let many = b.param::<u32>("many", &[2]);
+            assert!(b.node(&SPLIT, &[values, many]).is_err());
+        }
+
+        #[test]
+        fn a_program_runs_for_each_group() {
+            let mut engine = Engine::default();
+            let mut b = ProgramBuilder::new("sum of one group");
+            let values = b.param::<f32>("values", &[]);
+            let sums = b.node(&SUMS, &[values]).unwrap();
+            b.output("sum", sums[0]);
+            let inner = engine.add_program(b.finish());
+
+            let mut b = ProgramBuilder::new("each group");
+            let split = split(&mut b, &[1., 2., 3., 4., 5.], 2);
+            let each = b
+                .for_each(engine.programs(), inner, &[Some(split)], 0, 100)
+                .unwrap();
+            assert_eq!(b.slot(each[0]).card, Card::Grouped);
+            b.output("sums", each[0]);
+            let id = engine.add_program(b.finish());
+
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+            // One run per group, and every run is a group of its own.
+            assert_eq!(engine.read::<f32>(&instance, "sums"), Some(&[3., 7., 5.][..]));
+            assert_eq!(engine.groups(&instance, "sums"), Some(&[0, 1, 2, 3][..]));
+        }
+
+        #[test]
+        fn groups_go_into_and_out_of_programs() {
+            let mut engine = Engine::default();
+            // Doubles what it is given and keeps its groups.
+            let mut b = ProgramBuilder::new("double");
+            let values = b.param_grouped("values", f32::INFO, &[]);
+            let doubled = b.node(&DOUBLE, &[values]).unwrap()[0];
+            b.output("doubled", doubled);
+            let inner = engine.add_program(b.finish());
+            assert_eq!(engine.programs().get(inner).visible_params().count(), 1);
+
+            let mut b = ProgramBuilder::new("outer");
+            let split = split(&mut b, &[1., 2., 3.], 1);
+            let doubled = b.call(engine.programs(), inner, &[Some(split)]).unwrap()[0];
+            let sums = b.node(&SUMS, &[doubled]).unwrap();
+            b.output("sums", sums[0]);
+            let id = engine.add_program(b.finish());
+
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+            assert_eq!(engine.read::<f32>(&instance, "sums"), Some(&[2., 4., 6.][..]));
         }
     }
 

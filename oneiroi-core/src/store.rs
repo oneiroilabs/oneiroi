@@ -38,6 +38,17 @@ impl ContentKey {
         hasher.finish()
     }
 
+    /// [`ContentKey::derive`] for a node: its results change when its
+    /// version does.
+    pub fn derive_node(node: &str, version: u32, output: u32, inputs: &[ContentKey]) -> Self {
+        let mut hasher = KeyHasher::new(2);
+        hasher.write(node);
+        hasher.write(version);
+        hasher.write(output);
+        hasher.write(inputs);
+        hasher.finish()
+    }
+
     /// The key of the `output`-th result of running `node` on `inputs`.
     pub fn derive(node: &str, output: u32, inputs: &[ContentKey]) -> Self {
         let mut hasher = KeyHasher::new(1);

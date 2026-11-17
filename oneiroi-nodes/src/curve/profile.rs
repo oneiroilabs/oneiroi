@@ -16,8 +16,14 @@ pub trait Profile: DataType {
     /// What a piece of the surface it sweeps out is.
     type Patch: Surface;
 
+    /// What of `profile` is swept along the curve of group `group`. By
+    /// default all of it, the same for every curve.
+    fn select(profile: &[Self], _group: usize) -> &[Self] {
+        profile
+    }
+
     /// The surface this profile leaves behind when it is moved along
-    /// `spine`. Nothing gets sampled here: every patch is still the exact
+    /// `spine`, a single curve. Nothing gets sampled here: every patch is still the exact
     /// surface, only cut into pieces which are easy to evaluate.
     fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<Self::Patch>;
 }

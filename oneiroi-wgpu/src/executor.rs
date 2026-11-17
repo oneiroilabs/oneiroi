@@ -43,15 +43,18 @@ const RING_WORDS: u32 = 1 << 18;
 
 struct Pipeline {
     kernel: &'static GpuKernel,
-    pipeline: wgpu::ComputePipeline,
+    /// One per output, offsets included.
+    pipelines: Vec<wgpu::ComputePipeline>,
     call_words: usize,
 }
 
 /// One node to run on the GPU, with what is known before it does.
 struct Call<'a> {
     item: &'a Work,
+    /// Its inputs and the offsets of the grouped ones.
     inputs: Vec<Handle>,
-    elements: usize,
+    /// How many elements each of its outputs gets.
+    elements: Vec<usize>,
 }
 
 /// What is needed to run anything at all, if the device can.
@@ -198,7 +201,8 @@ impl GpuExecutor {
             bind_group_layouts: &[Some(&layout), Some(&calls_layout)],
             immediate_size: 0,
         });
-        let gather = Self::compute_pipeline(device, &pipeline_layout, "Oneiroi Gather", GATHER);
+        let gather =
+            Self::compute_pipeline(device, &pipeline_layout, "Oneiroi Gather", GATHER, "main");
         Bindless {
             layout,
             calls,
@@ -214,6 +218,7 @@ impl GpuExecutor {
         layout: &wgpu::PipelineLayout,
         label: &str,
         wgsl: &str,
+        entry: &str,
     ) -> wgpu::ComputePipeline {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(label),
@@ -223,7 +228,7 @@ impl GpuExecutor {
             label: Some(label),
             layout: Some(layout),
             module: &module,
-            entry_point: Some("main"),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
             cache: None,
         })
@@ -256,12 +261,17 @@ impl GpuExecutor {
                 .and_then(|(bindless, kernel)| match shader::compute(node, kernel) {
                     Ok(shader) => Some(Pipeline {
                         kernel,
-                        pipeline: Self::compute_pipeline(
-                            &self.device,
-                            &bindless.pipeline_layout,
-                            node.id,
-                            &shader.wgsl,
-                        ),
+                        pipelines: (0..kernel.outputs.len())
+                            .map(|index| {
+                                Self::compute_pipeline(
+                                    &self.device,
+                                    &bindless.pipeline_layout,
+                                    node.id,
+                                    &shader.wgsl,
+                                    &format!("main_{index}"),
+                                )
+                            })
+                            .collect(),
                         call_words: shader.call_words,
                     }),
                     Err(error) => {
@@ -422,7 +432,12 @@ impl GpuExecutor {
             return;
         };
         let (kernel, call_words) = (pipeline.kernel, pipeline.call_words);
-        let words = node.outputs[0].ty.words as u64;
+        let words: Vec<u64> = node
+            .outputs
+            .iter()
+            .map(|port| port.ty.words as u64)
+            .chain(node.hidden_outputs().map(|_| 1))
+            .collect();
         let limits = self.device.limits();
         let max_bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         let max_groups = limits.max_compute_workgroups_per_dimension as usize;
@@ -444,16 +459,15 @@ impl GpuExecutor {
                         .expect("planned inputs are stored before they are read")
                 })
                 .collect();
-            let elements = (kernel.len)(&Inputs::new(store, node, &inputs));
-            if elements == 0 {
-                store.insert(item.outputs[0], &[]);
-                self.stats.gpu += 1;
-                continue;
-            }
-            let bytes = elements as u64 * words * 4;
-            let fits = bytes <= max_bytes
-                && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups
-                && inputs.iter().all(|handle| self.reachable(handle));
+            let elements: Vec<usize> = kernel
+                .outputs
+                .iter()
+                .map(|output| (output.len)(&Inputs::new(store, node, &inputs)))
+                .collect();
+            let fits = elements.iter().zip(&words).all(|(elements, words)| {
+                *elements as u64 * words * 4 <= max_bytes
+                    && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups
+            }) && inputs.iter().all(|handle| self.reachable(handle));
             if !fits {
                 self.run_on_cpu(store, item);
                 continue;
@@ -471,41 +485,60 @@ impl GpuExecutor {
         self.dispatch(store, node, &batch);
     }
 
-    /// One compute pass for all of `batch`.
+    /// A compute pass per output for all of `batch`.
     fn dispatch(&mut self, store: &mut Store, node: &'static NodeDef, batch: &[Call<'_>]) {
         if batch.is_empty() {
             return;
         }
-        let words = node.outputs[0].ty.words as usize;
+        let words: Vec<usize> = node
+            .outputs
+            .iter()
+            .map(|port| port.ty.words as usize)
+            .chain(node.hidden_outputs().map(|_| 1))
+            .collect();
 
         // Make room for the results where they belong, then bring the
         // device up to date with what the CPU wrote and the new pages.
-        let targets: Vec<_> = batch
+        let targets: Vec<Vec<Handle>> = batch
             .iter()
-            .map(|call| store.reserve(call.item.outputs[0], (call.elements * words) as u32))
+            .map(|call| {
+                (0..words.len())
+                    .map(|output| {
+                        let len = (call.elements[output] * words[output]) as u32;
+                        store.reserve(call.item.outputs[output], len)
+                    })
+                    .collect()
+            })
             .collect();
         self.upload(store);
-        if !targets.iter().all(|target| self.reachable(target)) {
+        let reachable = targets.iter().flatten().all(|target| self.reachable(target));
+        if !reachable {
             for call in batch {
                 self.run_on_cpu(store, call.item);
             }
             return;
         }
 
-        let mut calls = Vec::new();
-        for (call, target) in batch.iter().zip(&targets) {
-            for input in &call.inputs {
-                calls.extend([input.page, input.offset, input.len]);
+        for output in 0..words.len() {
+            let mut calls = Vec::new();
+            for (call, targets) in batch.iter().zip(&targets) {
+                for input in &call.inputs {
+                    calls.extend([input.page, input.offset, input.len]);
+                }
+                let target = targets[output];
+                calls.extend([target.page, target.offset, call.elements[output] as u32]);
             }
-            calls.extend([target.page, target.offset, call.elements as u32]);
+            let most = batch.iter().map(|call| call.elements[output]).max().unwrap_or(0);
+            if most == 0 {
+                continue;
+            }
+            let groups = (
+                most.div_ceil(WORKGROUP_SIZE as usize) as u32,
+                batch.len() as u32,
+            );
+            let pipeline = self.pipelines[node.id].as_ref().unwrap().pipelines[output].clone();
+            self.record(node.id, &pipeline, &calls, groups);
         }
-        let most = batch.iter().map(|call| call.elements).max().unwrap_or(0);
-        let groups = (
-            most.div_ceil(WORKGROUP_SIZE as usize) as u32,
-            batch.len() as u32,
-        );
-        let pipeline = self.pipelines[node.id].as_ref().unwrap().pipeline.clone();
-        self.record(node.id, &pipeline, &calls, groups);
         self.stats.gpu += batch.len();
     }
 
