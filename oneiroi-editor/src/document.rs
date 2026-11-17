@@ -126,6 +126,11 @@ pub struct Session {
     pub framed: Option<(u64, OrbitCamera)>,
     /// How many nodes ran for what is shown since it was last planned.
     ran: usize,
+    /// How many triangles the preview drew the last time they were counted.
+    pub triangles: Option<u32>,
+    /// How many more frames the preview wants, to find the detail of its
+    /// budget of triangles.
+    pub settling: u32,
     /// The graphs which ran for fewer elements than they were given.
     overflows: Vec<Overflow>,
 }
@@ -139,6 +144,8 @@ impl Session {
             generation: 0,
             framed: None,
             ran: 0,
+            triangles: None,
+            settling: 0,
             overflows: Vec::new(),
         }
     }

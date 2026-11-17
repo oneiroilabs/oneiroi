@@ -12,9 +12,26 @@ use iced::{
     widget::shader::{self, Action, Pipeline, Primitive},
 };
 use oneiroi_core::node::Topology;
-use oneiroi_wgpu::{AutoDetail, DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera};
+use oneiroi_wgpu::{
+    AutoDetail, DetailBudget, DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera,
+};
 
 use crate::document::{Session, Shown};
+
+/// How finely surfaces are drawn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Detail {
+    /// Every step along a surface is about this long on screen, in pixels.
+    /// The finer it is, the more triangles everything gets.
+    Pixels(f32),
+    /// As fine as this many triangles allow, whatever is in view.
+    Triangles(u32),
+}
+
+/// How many frames are drawn after something changed, for a budget of
+/// triangles to find its detail. Triangles are counted a frame or two
+/// late, and the detail only changes by a little every frame.
+const SETTLE_FRAMES: u32 = 30;
 
 /// How many steps every piece of a line is drawn with.
 const LINE_STEPS: u32 = 64;
@@ -29,9 +46,8 @@ pub struct Preview {
     pub session: Arc<Mutex<Session>>,
     /// The camera is aimed at what is shown again whenever this changes.
     pub frame: u64,
-    /// How long a step along a surface should be on screen, in pixels.
-    /// The finer it is, the more triangles everything gets.
-    pub pixels: f32,
+    /// How finely surfaces are drawn.
+    pub detail: Detail,
     /// Colours every patch by how fine it is drawn.
     pub show_detail: bool,
 }
@@ -75,6 +91,20 @@ impl<Message> shader::Program<Message> for Preview {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<Message>> {
+        let budget = matches!(self.detail, Detail::Triangles(_));
+        if let Event::Window(iced::window::Event::RedrawRequested(_)) = event {
+            // Draw again while the detail of a budget is not found yet.
+            let mut session = self.session.lock().unwrap();
+            if budget && session.settling > 0 {
+                session.settling -= 1;
+                return Some(Action::request_redraw());
+            }
+            return None;
+        }
+        // Whatever moves the camera changes how many triangles it takes.
+        if budget && matches!(event, Event::Mouse(_)) && cursor.position_in(bounds).is_some() {
+            self.session.lock().unwrap().settling = SETTLE_FRAMES;
+        }
         if state.framed != Some(self.frame)
             && let Some(camera) = self.aimed()
         {
@@ -138,7 +168,7 @@ impl<Message> shader::Program<Message> for Preview {
             session: self.session.clone(),
             camera,
             frame,
-            pixels: self.pixels,
+            detail: self.detail,
             show_detail: self.show_detail,
         }
     }
@@ -150,7 +180,7 @@ pub struct Shot {
     camera: OrbitCamera,
     /// A request to aim the camera which nobody answered yet.
     frame: Option<u64>,
-    pixels: f32,
+    detail: Detail,
     show_detail: bool,
 }
 
@@ -176,6 +206,8 @@ pub struct PreviewPipeline {
     uploaded: Option<u64>,
     /// Where the widget is, in pixels of the target.
     bounds: (f32, f32, f32, f32),
+    /// Finds the detail of a budget of triangles, if there is one.
+    budget: DetailBudget,
 }
 
 impl Pipeline for PreviewPipeline {
@@ -190,6 +222,7 @@ impl Pipeline for PreviewPipeline {
             drawing: Drawing::Nothing,
             uploaded: None,
             bounds: (0.0, 0.0, 1.0, 1.0),
+            budget: DetailBudget::new(0, 8.0),
         }
     }
 }
@@ -242,10 +275,17 @@ impl Primitive for Shot {
             sides: 1,
             // A surface gets as much detail as there is to see of it.
             auto: Some(AutoDetail {
-                pixels: self.pixels,
+                pixels: match self.detail {
+                    Detail::Pixels(pixels) => pixels,
+                    Detail::Triangles(triangles) => {
+                        pipeline.budget.triangles = triangles;
+                        pipeline.budget.pixels()
+                    }
+                },
                 max_level: MAX_LEVEL,
                 viewport: (pipeline.bounds.2, pipeline.bounds.3),
                 debug: self.show_detail,
+                count: true,
             }),
         };
 
@@ -268,6 +308,18 @@ impl Primitive for Shot {
                         .stage
                         .prepare(device, queue, size, &drawable, page, handle, &view);
                     pipeline.drawing = Drawing::Value;
+                }
+
+                // What was counted arrives a few frames later, and the
+                // budget adjusts the detail a little every time.
+                session.triangles = pipeline.stage.triangles(device, 0);
+                if let (Detail::Triangles(_), Some(triangles)) = (self.detail, session.triangles)
+                    && drawable.topology == Topology::Surface
+                {
+                    pipeline.budget.update(triangles);
+                    if !pipeline.budget.settled(triangles) {
+                        session.settling = session.settling.max(SETTLE_FRAMES / 3);
+                    }
                 }
             }
             Shown::Mesh { .. } => {

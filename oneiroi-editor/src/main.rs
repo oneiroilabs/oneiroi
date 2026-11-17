@@ -11,12 +11,18 @@ use iced_nodegraph::{
     default_node_style, edge, node, node_header, pin,
 };
 use oneiroi_editor::document::{Document, PaletteEntry, PinType};
-use oneiroi_editor::preview::Preview;
+use oneiroi_editor::preview::{Detail, Preview};
 use oneiroi_graph::{Input, NodeId};
 
-/// How long a step along a surface is on screen, in pixels, from fine to
-/// coarse. The preview picks how many steps every patch needs from that.
-const DETAIL: [f32; 4] = [4.0, 8.0, 16.0, 32.0];
+/// How finely the preview draws surfaces, from fine to coarse, and last
+/// as fine as a budget of triangles allows.
+const DETAIL: [(&str, Detail); 5] = [
+    ("finest", Detail::Pixels(4.0)),
+    ("fine", Detail::Pixels(8.0)),
+    ("coarse", Detail::Pixels(16.0)),
+    ("coarsest", Detail::Pixels(32.0)),
+    ("20k triangles", Detail::Triangles(20_000)),
+];
 
 /// Where a graph is saved to and loaded from, next to where the editor runs.
 const FILE: &str = "graph.json";
@@ -211,7 +217,11 @@ impl Editor {
                 self.document.reset(node.into(), &input);
             }
             Message::Frame => self.frame += 1,
-            Message::Detail(detail) => self.detail = detail,
+            Message::Detail(detail) => {
+                self.detail = detail;
+                // A budget needs some frames to find its detail.
+                self.document.session().lock().unwrap().settling = 30;
+            }
             Message::ShowDetail(show) => self.show_detail = show,
             Message::Save => {
                 self.note = Some(match std::fs::write(FILE, self.document.to_json()) {
@@ -266,15 +276,14 @@ impl Editor {
         let preview = shader(Preview {
             session: self.document.session(),
             frame: self.frame,
-            pixels: DETAIL[self.detail],
+            detail: DETAIL[self.detail].1,
             show_detail: self.show_detail,
         })
         .width(Fill)
         .height(Fill);
 
-        let labels = ["finest", "fine", "coarse", "coarsest"];
         let mut detail = row![text("Detail").size(12)].spacing(4).align_y(Center);
-        for (index, label) in labels.into_iter().enumerate() {
+        for (index, (label, _)) in DETAIL.into_iter().enumerate() {
             let button = button(text(label).size(11)).padding([1, 6]);
             detail = detail.push(match index == self.detail {
                 true => button,
@@ -283,10 +292,11 @@ impl Editor {
         }
         let detail = detail.push(
             checkbox(self.show_detail)
-                .label("colour by detail")
+                .label("colours")
                 .text_size(11)
                 .on_toggle(Message::ShowDetail),
         );
+
         let preview = column![preview, detail].spacing(4);
 
         // The inspector has to come before the graph: a key typed into one
