@@ -202,9 +202,12 @@ impl DrawStage {
             format: surface_format.add_srgb_suffix(),
             pipelines: HashMap::new(),
             errors: Vec::new(),
+            // `ONEIROI_MESH_SHADERS=off` draws with vertex shaders anyway.
             mesh_shaders: device
                 .features()
-                .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER),
+                .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER)
+                && !std::env::var("ONEIROI_MESH_SHADERS")
+                    .is_ok_and(|value| value.eq_ignore_ascii_case("off")),
             views: Vec::new(),
             bind_groups: 0,
         }
