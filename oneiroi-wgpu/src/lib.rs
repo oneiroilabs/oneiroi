@@ -18,7 +18,7 @@ pub mod orbit;
 
 pub use budget::DetailBudget;
 pub use draw::{AutoDetail, DrawStage, DrawView};
-pub use executor::{DeferredExecutor, FEATURES, GpuExecutor, GpuStats, MAX_PAGES};
+pub use executor::{DeferredExecutor, FEATURES, GpuExecutor, GpuStats, MAX_PAGES, compute_disabled};
 pub use mesh::{MeshData, MeshPreview};
 
 pub const DEBUG: bool = true;

@@ -110,6 +110,12 @@ pub struct GpuExecutor {
     errors: Vec<ShaderError>,
 }
 
+/// Whether `ONEIROI_COMPUTE=cpu` asks for every node to run on the CPU.
+/// Values are still drawn from the device.
+pub fn compute_disabled() -> bool {
+    std::env::var("ONEIROI_COMPUTE").is_ok_and(|value| value.eq_ignore_ascii_case("cpu"))
+}
+
 impl GpuExecutor {
     /// Whether a device has what an executor needs to run anything on it.
     pub fn supports(device: &wgpu::Device) -> bool {
@@ -118,6 +124,11 @@ impl GpuExecutor {
     }
 
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        // Without it a lost device shows up only later, as some buffer
+        // which is invalid, far away from why.
+        device.set_device_lost_callback(|reason, message| {
+            eprintln!("oneiroi: the GPU device was lost ({reason:?}): {message}");
+        });
         let features = device.features();
         let caps = Caps {
             subgroups: features.contains(wgpu::Features::SUBGROUP),
@@ -129,7 +140,9 @@ impl GpuExecutor {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bindless = Self::supports(&device).then(|| Self::bindless(&device, &ring));
+        let bindless = (Self::supports(&device) && !compute_disabled())
+            .then(|| Self::bindless(&device, &ring))
+            .flatten();
         Self {
             ring_alignment: (device.limits().min_storage_buffer_offset_alignment / 4).max(1),
             device,
@@ -151,7 +164,7 @@ impl GpuExecutor {
         }
     }
 
-    fn bindless(device: &wgpu::Device, ring: &wgpu::Buffer) -> Bindless {
+    fn bindless(device: &wgpu::Device, ring: &wgpu::Buffer) -> Option<Bindless> {
         let max_pages = device
             .limits()
             .max_binding_array_elements_per_shader_stage
@@ -201,37 +214,49 @@ impl GpuExecutor {
             bind_group_layouts: &[Some(&layout), Some(&calls_layout)],
             immediate_size: 0,
         });
+        // Without it nothing runs on the device, since what is taken apart
+        // there has to be put together there as well.
         let gather =
-            Self::compute_pipeline(device, &pipeline_layout, "Oneiroi Gather", GATHER, "main");
-        Bindless {
+            Self::compute_pipeline(device, &pipeline_layout, "Oneiroi Gather", GATHER, "main")
+                .inspect_err(|error| eprintln!("oneiroi: no kernels on this device: {error}"))
+                .ok()?;
+        Some(Bindless {
             layout,
             calls,
             pipeline_layout,
             gather,
             max_pages,
             bind_group: None,
-        }
+        })
     }
 
+    /// A pipeline of one entry of `wgsl`, or the error the device gave.
+    /// A shader can be fine for naga and still be refused by the compiler
+    /// of the backend, which only shows here.
     fn compute_pipeline(
         device: &wgpu::Device,
         layout: &wgpu::PipelineLayout,
         label: &str,
         wgsl: &str,
         entry: &str,
-    ) -> wgpu::ComputePipeline {
+    ) -> Result<wgpu::ComputePipeline, String> {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(label),
             source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(label),
             layout: Some(layout),
             module: &module,
             entry_point: Some(entry),
             compilation_options: Default::default(),
             cache: None,
-        })
+        });
+        match pollster::block_on(scope.pop()) {
+            Some(error) => Err(error.to_string()),
+            None => Ok(pipeline),
+        }
     }
 
     /// What the device can do, which decides the kernels that are used.
@@ -258,10 +283,9 @@ impl GpuExecutor {
             let bindless = self.bindless.as_ref();
             let pipeline = bindless
                 .and_then(|bindless| Some((bindless, node.gpu_kernel(self.caps)?)))
-                .and_then(|(bindless, kernel)| match shader::compute(node, kernel) {
-                    Ok(shader) => Some(Pipeline {
-                        kernel,
-                        pipelines: (0..kernel.outputs.len())
+                .and_then(|(bindless, kernel)| {
+                    let shader = shader::compute(node, kernel).and_then(|shader| {
+                        let pipelines = (0..kernel.outputs.len())
                             .map(|index| {
                                 Self::compute_pipeline(
                                     &self.device,
@@ -271,12 +295,25 @@ impl GpuExecutor {
                                     &format!("main_{index}"),
                                 )
                             })
-                            .collect(),
-                        call_words: shader.call_words,
-                    }),
-                    Err(error) => {
-                        self.errors.push(error);
-                        None
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|message| ShaderError::Invalid {
+                                node: node.id,
+                                message,
+                            })?;
+                        Ok(Pipeline {
+                            kernel,
+                            pipelines,
+                            call_words: shader.call_words,
+                        })
+                    });
+                    match shader {
+                        Ok(pipeline) => Some(pipeline),
+                        // The node runs on the CPU instead.
+                        Err(error) => {
+                            eprintln!("oneiroi: {error}");
+                            self.errors.push(error);
+                            None
+                        }
                     }
                 });
             self.pipelines.insert(node.id, pipeline);

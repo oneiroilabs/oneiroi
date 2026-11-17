@@ -783,9 +783,10 @@ impl Document {
             let gpu = session.engine.executor().gpu();
             gpu.is_some_and(|gpu| !gpu.is_supported())
         };
-        let ran = match cpu_only {
-            true => format!("{ran} (all on the CPU, the device has no binding arrays)"),
-            false => ran.to_string(),
+        let ran = match (cpu_only, oneiroi_wgpu::compute_disabled()) {
+            (true, true) => format!("{ran} (all on the CPU, as ONEIROI_COMPUTE asks)"),
+            (true, false) => format!("{ran} (all on the CPU, the device can not run kernels)"),
+            (false, _) => ran.to_string(),
         };
         let ran = match on_gpu {
             0 => ran,
