@@ -286,6 +286,38 @@ fn graphs_use_each_other() {
 }
 
 #[test]
+fn a_broken_graph_does_not_stop_the_others() {
+    let (tube, _) = tube();
+    let mut broken = Graph::new("broken");
+    let node = broken.add("someone_elses.node");
+    broken.add_output("out", node, "out").unwrap();
+    let mut user = Graph::new("user of broken");
+    let used = user.add_graph("broken");
+    user.add_output("out", used, "out").unwrap();
+
+    let mut library = Library::new();
+    library.insert(tube);
+    library.insert(broken);
+    library.insert(user);
+    assert!(library.uses("user of broken", "broken") && !library.uses("broken", "tube"));
+    assert!(library.uses("tube", "tube"));
+
+    let mut engine = Engine::default();
+    let (programs, errors) = library.lower_all(&registry(), engine.programs_mut());
+    assert_eq!(programs.keys().collect::<Vec<_>>(), ["tube"]);
+    // What is wrong is said once, for the graph it is wrong in.
+    assert!(matches!(
+        &errors[..],
+        [LibraryError::Lower { graph, .. }] if graph == "broken"
+    ));
+
+    // A library survives its file, and so does a file of a single graph.
+    assert_eq!(Library::from_json(&library.to_json()).unwrap(), library);
+    let single = Library::from_json(&library.get("tube").unwrap().to_json()).unwrap();
+    assert_eq!(single.len(), 1);
+}
+
+#[test]
 fn graphs_can_not_use_themselves() {
     let mut a = Graph::new("a");
     a.add_graph("b");

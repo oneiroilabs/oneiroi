@@ -8,7 +8,7 @@ use iced_nodegraph::{
     ColorQuad, Keymap, NodeGraph, NodeStyle, PinDirection, PinRef, default_can_connect,
     default_node_style, edge, node, node_header, pin,
 };
-use oneiroi_editor::document::{Document, PinType};
+use oneiroi_editor::document::{Document, PaletteEntry, PinType};
 use oneiroi_editor::preview::Preview;
 use oneiroi_graph::{Input, NodeId};
 
@@ -39,7 +39,11 @@ enum Message {
     Selected(Vec<u32>),
     Panned(Point, f32),
     EdgesCut(Vec<String>),
-    Add(&'static str),
+    Add(PaletteEntry),
+    Open(String),
+    NewGraph,
+    Expose(u32, String),
+    Export(u32, String),
     Display(u32),
     Edited(u32, String, String),
     Committed(u32, String),
@@ -146,12 +150,28 @@ impl Editor {
                     }
                 }
             }
-            Message::Add(id) => {
+            Message::Add(entry) => {
                 // Roughly the middle of what is visible of the graph.
                 let (pan, zoom) = self.camera;
                 let position = [300.0 / zoom - pan.x, 200.0 / zoom - pan.y];
-                let node = self.document.add_node(id, position);
+                let node = self.document.add(entry.kind, position);
                 self.selected = vec![node];
+            }
+            Message::Open(name) => {
+                if self.document.open(&name) {
+                    self.switched();
+                }
+            }
+            Message::NewGraph => {
+                self.document.new_graph();
+                self.switched();
+            }
+            Message::Expose(node, input) => {
+                self.edits.remove(&(node.into(), input.clone()));
+                self.document.toggle_exposed(node.into(), &input);
+            }
+            Message::Export(node, output) => {
+                self.document.toggle_output(node.into(), &output);
             }
             Message::Display(node) => {
                 // Another node is another thing to look at, which can be
@@ -190,9 +210,7 @@ impl Editor {
                 self.note = Some(match loaded {
                     Ok(document) => {
                         self.document = document;
-                        self.selected.clear();
-                        self.edits.clear();
-                        self.frame += 1;
+                        self.switched();
                         format!("loaded {FILE}")
                     }
                     Err(error) => format!("could not load {FILE}: {error}"),
@@ -201,9 +219,24 @@ impl Editor {
         }
     }
 
+    /// Another graph is on the screen: nothing of the old one applies.
+    fn switched(&mut self) {
+        self.selected.clear();
+        self.edits.clear();
+        self.camera = (Point::ORIGIN, 1.0);
+        self.frame += 1;
+    }
+
     fn view(&self) -> Element<'_, Message> {
         let toolbar = row![
-            pick_list(None::<&'static str>, self.document.palette(), |id| id.to_string())
+            pick_list(
+                Some(self.document.current().to_string()),
+                self.document.graphs(),
+                |name| name.clone()
+            )
+            .on_select(Message::Open),
+            button("New graph").on_press(Message::NewGraph),
+            pick_list(None::<PaletteEntry>, self.document.palette(), |entry| entry.to_string())
                 .placeholder("Add node")
                 .on_select(Message::Add),
             button("Save").on_press(Message::Save),
@@ -377,10 +410,29 @@ impl Editor {
             } else {
                 text(stored).size(12).width(Fill).into()
             };
-            let reset = button(text("reset").size(11))
+            let small = |label: &'static str, message| {
+                button(text(label).size(11)).padding([1, 6]).on_press(message)
+            };
+            // An exposed input is a parameter of the graph, which is what
+            // another graph sees of it as an input.
+            let exposed = self.document.is_exposed(node, &port.name);
+            let expose = small(
+                if exposed { "exposed" } else { "expose" },
+                Message::Expose(node.raw(), port.name.clone()),
+            );
+            let reset = small("reset", Message::Reset(node.raw(), port.name.clone()));
+            rows = rows.push(row![label, field, expose, reset].spacing(6).align_y(Center));
+        }
+        for port in &view.outputs {
+            let label = text(format!("{} ({})", port.name, port.ty.name()))
+                .size(12)
+                .width(Fill);
+            // An exported output is one of the whole graph.
+            let exported = self.document.is_output(node, &port.name);
+            let export = button(text(if exported { "exported" } else { "export" }).size(11))
                 .padding([1, 6])
-                .on_press(Message::Reset(node.raw(), port.name.clone()));
-            rows = rows.push(row![label, field, reset].spacing(6).align_y(Center));
+                .on_press(Message::Export(node.raw(), port.name.clone()));
+            rows = rows.push(row![label, export].spacing(6).align_y(Center));
         }
         container(scrollable(rows)).height(260).into()
     }

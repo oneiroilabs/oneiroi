@@ -349,6 +349,11 @@ impl Graph {
         })
     }
 
+    /// The input a port of a node has right now, if anything is set on it.
+    pub fn input_of(&self, node: NodeId, port: &str) -> Option<&Input> {
+        self.nodes.get(&node)?.inputs.get(port)
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("a graph is plain data")
     }

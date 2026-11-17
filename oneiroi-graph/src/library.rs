@@ -31,7 +31,7 @@ impl fmt::Display for LibraryError {
 impl std::error::Error for LibraryError {}
 
 /// Graphs by their name.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Library {
     graphs: BTreeMap<String, Graph>,
 }
@@ -61,6 +61,72 @@ impl Library {
 
     pub fn iter(&self) -> impl Iterator<Item = &Graph> {
         self.graphs.values()
+    }
+
+    pub fn len(&self) -> usize {
+        self.graphs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.graphs.is_empty()
+    }
+
+    /// Whether the graph `name` uses the graph `other`, however indirect.
+    /// A graph also counts as using itself.
+    pub fn uses(&self, name: &str, other: &str) -> bool {
+        let mut seen = Vec::new();
+        let mut open = vec![name];
+        while let Some(name) = open.pop() {
+            if name == other {
+                return true;
+            }
+            if !seen.contains(&name) {
+                seen.push(name);
+                open.extend(self.graphs.get(name).into_iter().flat_map(Graph::dependencies));
+            }
+        }
+        false
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("a library is plain data")
+    }
+
+    /// Reads a library back. A file which holds a single graph is read as
+    /// a library of that one graph.
+    pub fn from_json(json: &str) -> Result<Self, crate::FormatError> {
+        if let Ok(graph) = Graph::from_json(json) {
+            let mut library = Self::new();
+            library.insert(graph);
+            return Ok(library);
+        }
+        let library: Self = serde_json::from_str(json).map_err(crate::FormatError::Syntax)?;
+        for graph in library.iter() {
+            // Checks the version of every graph in there.
+            Graph::from_json(&graph.to_json())?;
+        }
+        Ok(library)
+    }
+
+    /// Like [`Library::lower_into`], but a graph which is broken does not
+    /// stop the others: every graph that can be lowered is, and what is
+    /// wrong with the rest is returned next to them.
+    pub fn lower_all(
+        &self,
+        registry: &NodeRegistry,
+        programs: &mut ProgramSet,
+    ) -> (HashMap<String, ProgramId>, Vec<LibraryError>) {
+        let mut lowered = HashMap::new();
+        let mut errors = Vec::new();
+        for name in self.graphs.keys() {
+            let mut visiting = Vec::new();
+            if let Err(error) = self.lower_graph(name, registry, programs, &mut lowered, &mut visiting)
+                && !errors.contains(&error)
+            {
+                errors.push(error);
+            }
+        }
+        (lowered, errors)
     }
 
     /// Lowers every graph into `programs`, each one after the graphs it

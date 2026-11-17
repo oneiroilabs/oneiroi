@@ -16,7 +16,11 @@ use oneiroi_core::{
     types::{DataType, Scalar, Trait, TypeInfo},
 };
 use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
-use oneiroi_graph::{Context, Graph, Input, LowerError, NodeId, NodeKind, Value};
+use oneiroi_core::program::ProgramId;
+use oneiroi_graph::{
+    Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
+    Value,
+};
 use oneiroi_nodes::curve::nurbs::clamped_uniform_knots;
 
 /// How many 32-bit words of results the preview keeps around.
@@ -227,8 +231,27 @@ fn words_to_value(words: &[u32], scalar: Scalar) -> Value {
     }
 }
 
+/// Something which can be added to a graph as a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteEntry {
+    pub label: String,
+    pub kind: NodeKind,
+}
+
+impl std::fmt::Display for PaletteEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
 pub struct Document {
-    graph: Graph,
+    /// Every graph of the document. They can use each other as nodes.
+    library: Library,
+    /// The name of the graph which is being edited.
+    current: String,
+    /// What the graphs lowered to the last time, the ones which could be.
+    programs: HashMap<String, ProgramId>,
+    library_errors: Vec<LibraryError>,
     registry: NodeRegistry,
     session: Arc<Mutex<Session>>,
     error: Option<LowerError>,
@@ -243,10 +266,30 @@ impl Default for Document {
 
 impl Document {
     pub fn new(graph: Graph) -> Self {
+        let mut library = Library::new();
+        let current = graph.name.clone();
+        library.insert(graph);
+        Self::with_library(library, &current)
+    }
+
+    /// A document of several graphs, with `current` opened. An empty
+    /// library gets a graph to start with.
+    pub fn with_library(mut library: Library, current: &str) -> Self {
+        if library.is_empty() {
+            library.insert(Graph::new("untitled"));
+        }
+        let current = match library.get(current) {
+            Some(graph) => graph.name.clone(),
+            None => library.iter().next().unwrap().name.clone(),
+        };
+
         let mut registry = NodeRegistry::new();
         oneiroi_nodes::register(&mut registry);
         let mut document = Self {
-            graph,
+            library,
+            current,
+            programs: HashMap::new(),
+            library_errors: Vec::new(),
             registry,
             session: Arc::new(Mutex::new(Session::new())),
             error: None,
@@ -296,12 +339,55 @@ impl Document {
         Self::new(graph)
     }
 
+    /// The graph which is being edited.
     pub fn graph(&self) -> &Graph {
-        &self.graph
+        self.library.get(&self.current).expect("the current graph is in the library")
     }
 
-    /// The ids every node which can be added is known by.
-    pub fn palette(&self) -> Vec<&'static str> {
+    fn graph_mut(&mut self) -> &mut Graph {
+        self.library
+            .get_mut(&self.current)
+            .expect("the current graph is in the library")
+    }
+
+    /// The names of all graphs of the document.
+    pub fn graphs(&self) -> Vec<String> {
+        self.library.iter().map(|graph| graph.name.clone()).collect()
+    }
+
+    pub fn current(&self) -> &str {
+        &self.current
+    }
+
+    /// Switches to editing another graph. Returns whether there is one
+    /// with that name.
+    pub fn open(&mut self, name: &str) -> bool {
+        let known = self.library.get(name).is_some();
+        if known {
+            self.current = name.into();
+            self.refresh();
+        }
+        known
+    }
+
+    /// Adds an empty graph, opens it and returns its name.
+    pub fn new_graph(&mut self) -> String {
+        let name = (1..)
+            .map(|number| match number {
+                1 => "graph".to_string(),
+                _ => format!("graph {number}"),
+            })
+            .find(|name| self.library.get(name).is_none())
+            .unwrap();
+        self.library.insert(Graph::new(name.clone()));
+        self.open(&name);
+        name
+    }
+
+    /// Everything which can be added to the current graph as a node:
+    /// the nodes of the registry, and the other graphs of the document
+    /// as long as they do not use this one themselves.
+    pub fn palette(&self) -> Vec<PaletteEntry> {
         let generic = self.registry.generics().map(|node| node.id);
         // The versions of a generic node are picked by lowering, never by hand.
         let plain = self
@@ -311,17 +397,61 @@ impl Document {
             .map(|node| node.id);
         let mut ids: Vec<_> = generic.chain(plain).collect();
         ids.sort_unstable();
-        ids
+
+        let nodes = ids.into_iter().map(|id| PaletteEntry {
+            label: id.into(),
+            kind: NodeKind::Node(id.into()),
+        });
+        let graphs = self
+            .library
+            .iter()
+            .filter(|graph| !self.library.uses(&graph.name, &self.current))
+            .map(|graph| PaletteEntry {
+                label: format!("graph: {}", graph.name),
+                kind: NodeKind::Graph(graph.name.clone()),
+            });
+        nodes.chain(graphs).collect()
     }
 
     pub fn view(&self, id: NodeId) -> Option<NodeView> {
-        let node = self.graph.node(id)?;
+        let node = self.graph().node(id)?;
         let name = match &node.kind {
             NodeKind::Node(id) | NodeKind::Graph(id) => id.as_str(),
         };
         let custom = node.meta.name.clone();
 
-        if let Some(generic) = self.registry.generic(name) {
+        // Another graph shows up with its parameters and outputs as pins.
+        if let NodeKind::Graph(graph) = &node.kind
+            && let Some(program) = self.programs.get(graph)
+        {
+            let session = self.session.lock().unwrap();
+            let program = session.engine.programs().get(*program);
+            return Some(NodeView {
+                title: custom.unwrap_or_else(|| graph.clone()),
+                inputs: program
+                    .params
+                    .iter()
+                    .map(|param| PortView {
+                        name: param.name.clone(),
+                        ty: PinType::Exact(program.slot(param.slot).ty),
+                        default: param.default.to_vec(),
+                    })
+                    .collect(),
+                outputs: program
+                    .outputs
+                    .iter()
+                    .map(|output| PortView {
+                        name: output.name.clone(),
+                        ty: PinType::Exact(program.slot(output.slot).ty),
+                        default: Vec::new(),
+                    })
+                    .collect(),
+                known: true,
+            });
+        }
+        let is_graph = matches!(node.kind, NodeKind::Graph(_));
+
+        if let Some(generic) = self.registry.generic(name).filter(|_| !is_graph) {
             let port = |port: &oneiroi_core::node::GenericPort| PortView {
                 name: port.name.into(),
                 ty: port.ty.into(),
@@ -334,7 +464,7 @@ impl Document {
                 known: true,
             });
         }
-        if let Some(def) = self.registry.get(name) {
+        if let Some(def) = self.registry.get(name).filter(|_| !is_graph) {
             let port = |port: &oneiroi_core::node::PortDecl| PortView {
                 name: port.name.into(),
                 ty: PinType::Exact(port.ty),
@@ -356,7 +486,7 @@ impl Document {
             default: Vec::new(),
         };
         let mut outputs: Vec<String> = self
-            .graph
+            .graph()
             .nodes()
             .flat_map(|(_, other)| other.inputs.values())
             .filter_map(|input| match input {
@@ -394,10 +524,16 @@ impl Document {
     }
 
     pub fn add_node(&mut self, id: &str, position: [f32; 2]) -> NodeId {
-        let node = self.graph.add(id);
-        self.graph.node_mut(node).unwrap().meta.position = position;
-        if self.graph.display.is_none() {
-            self.graph.display = Some(node);
+        self.add(NodeKind::Node(id.into()), position)
+    }
+
+    /// Adds a node from the [palette](Document::palette).
+    pub fn add(&mut self, kind: NodeKind, position: [f32; 2]) -> NodeId {
+        let graph = self.graph_mut();
+        let node = graph.add_node(kind);
+        graph.node_mut(node).unwrap().meta.position = position;
+        if graph.display.is_none() {
+            graph.display = Some(node);
         }
         self.refresh();
         node
@@ -405,14 +541,14 @@ impl Document {
 
     pub fn remove_nodes(&mut self, nodes: &[NodeId]) {
         for node in nodes {
-            self.graph.remove_node(*node);
+            self.graph_mut().remove_node(*node);
         }
         self.refresh();
     }
 
     pub fn move_nodes(&mut self, nodes: &[NodeId], delta: [f32; 2]) {
         for node in nodes {
-            if let Some(node) = self.graph.node_mut(*node) {
+            if let Some(node) = self.graph_mut().node_mut(*node) {
                 node.meta.position[0] += delta[0];
                 node.meta.position[1] += delta[1];
             }
@@ -422,7 +558,7 @@ impl Document {
     /// Returns whether the link was made.
     pub fn connect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
         let connected = self.accepts(from, output, to, input)
-            && self.graph.connect(from, output, to, input).is_ok();
+            && self.graph_mut().connect(from, output, to, input).is_ok();
         if connected {
             self.refresh();
         }
@@ -431,7 +567,7 @@ impl Document {
 
     /// Removes the link into `input` of `to` if it comes from `from`.
     pub fn disconnect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) {
-        let linked = self.graph.node(to).and_then(|node| node.inputs.get(input));
+        let linked = self.graph().node(to).and_then(|node| node.inputs.get(input));
         if matches!(linked, Some(Input::Link { node, output: o }) if *node == from && o == output) {
             self.reset(to, input);
         }
@@ -439,12 +575,12 @@ impl Document {
 
     /// Puts an input back to its default.
     pub fn reset(&mut self, node: NodeId, input: &str) {
-        self.graph.reset(node, input);
+        self.graph_mut().reset(node, input);
         self.refresh();
     }
 
     pub fn set_display(&mut self, node: Option<NodeId>) {
-        self.graph.display = node;
+        self.graph_mut().display = node;
         self.refresh();
     }
 
@@ -453,7 +589,7 @@ impl Document {
     pub fn input_text(&self, node: NodeId, input: &str) -> Option<(String, bool)> {
         let view = self.view(node)?;
         let port = view.inputs.iter().find(|port| port.name == input)?;
-        let stored = self.graph.node(node)?.inputs.get(input);
+        let stored = self.graph().node(node)?.inputs.get(input);
         if matches!(stored, Some(Input::Link { .. })) {
             return Some(("linked".into(), false));
         }
@@ -488,7 +624,20 @@ impl Document {
             Value::F32(values) => values.len(),
             Value::U32(values) => values.len(),
         };
-        if len % ty.words as usize != 0 || self.graph.set(node, input, value).is_err() {
+        if len % ty.words as usize != 0 {
+            return false;
+        }
+        // A parameter stays one, the value is what it starts with.
+        let exposed = match self.graph().input_of(node, input) {
+            Some(Input::Exposed { name, .. }) => Some(name.clone()),
+            _ => None,
+        };
+        let graph = self.graph_mut();
+        let set = match exposed {
+            Some(name) => graph.expose(node, input, &name, Some(value)),
+            None => graph.set(node, input, value),
+        };
+        if set.is_err() {
             return false;
         }
         self.refresh();
@@ -510,12 +659,21 @@ impl Document {
         let session = &mut *session;
         session.instance = None;
 
-        let lowered = self.graph.display.map(|display| {
-            self.graph.lower_node(
+        // Every graph first, so the ones used as nodes are there.
+        let (programs, errors) = self
+            .library
+            .lower_all(&self.registry, session.engine.programs_mut());
+        self.programs = programs;
+        self.library_errors = errors;
+        let keep: Vec<_> = self.programs.values().copied().collect();
+
+        let graph = self.library.get(&self.current).unwrap();
+        let lowered = graph.display.map(|display| {
+            graph.lower_node(
                 Context {
                     registry: &self.registry,
                     programs: session.engine.programs(),
-                    graphs: &HashMap::new(),
+                    graphs: &self.programs,
                 },
                 display,
             )
@@ -524,17 +682,21 @@ impl Document {
             Some(Ok(program)) => program,
             Some(Err(error)) => {
                 self.error = Some(error);
+                session.engine.programs_mut().retain(keep);
                 return session.show(Shown::Nothing);
             }
-            None => return session.show(Shown::Nothing),
+            None => {
+                session.engine.programs_mut().retain(keep);
+                return session.show(Shown::Nothing);
+            }
         };
 
         let id = match session.engine.programs().find(program.hash) {
             Some(id) => id,
             None => session.engine.add_program(program),
         };
-        // Whatever the graph lowered to before the edit is of no use now.
-        session.engine.programs_mut().retain([id]);
+        // Whatever the graphs lowered to before the edit is of no use now.
+        session.engine.programs_mut().retain(keep.into_iter().chain([id]));
 
         let mut instance = session.engine.instantiate(id);
         self.nodes_run = session.engine.plan([&mut instance]);
@@ -583,9 +745,18 @@ impl Document {
     /// One line about the state of the preview.
     pub fn status(&self) -> String {
         if let Some(error) = &self.error {
+            // A graph which is used here and broken itself says more
+            // than that it could not be found.
+            if let LowerErrorKind::UnknownGraph(name) = &error.kind
+                && let Some(inner) = self.library_errors.iter().find(
+                    |inner| matches!(inner, LibraryError::Lower { graph, .. } if graph == name),
+                )
+            {
+                return inner.to_string();
+            }
             return error.to_string();
         }
-        match (self.shown(), self.graph.display) {
+        match (self.shown(), self.graph().display) {
             (Shown::Drawn { drawable, .. }, _) => format!(
                 "`{}` drawn as it is, {} nodes ran",
                 drawable.ty.name, self.nodes_run
@@ -596,12 +767,71 @@ impl Document {
         }
     }
 
-    pub fn to_json(&self) -> String {
-        self.graph.to_json()
+    pub fn is_exposed(&self, node: NodeId, input: &str) -> bool {
+        matches!(self.graph().input_of(node, input), Some(Input::Exposed { .. }))
     }
 
+    /// Makes an input a parameter of the graph, named after the input,
+    /// or a plain value again. A linked input stays what it is. Returns
+    /// whether anything changed.
+    pub fn toggle_exposed(&mut self, node: NodeId, input: &str) -> bool {
+        let graph = self.graph_mut();
+        let changed = match graph.input_of(node, input).cloned() {
+            Some(Input::Link { .. }) => false,
+            Some(Input::Exposed { value: Some(value), .. }) => graph.set(node, input, value).is_ok(),
+            Some(Input::Exposed { value: None, .. }) => graph.reset(node, input).is_some(),
+            Some(Input::Value(value)) => graph.expose(node, input, input, Some(value)).is_ok(),
+            None => graph.expose(node, input, input, None).is_ok(),
+        };
+        if changed {
+            self.refresh();
+        }
+        changed
+    }
+
+    /// Whether an output of a node is an output of the whole graph.
+    pub fn is_output(&self, node: NodeId, output: &str) -> bool {
+        self.graph()
+            .outputs()
+            .iter()
+            .any(|declared| declared.node == node && declared.output == output)
+    }
+
+    /// Makes an output of a node an output of the whole graph, which is
+    /// what other graphs see of it, or takes it away again.
+    pub fn toggle_output(&mut self, node: NodeId, output: &str) {
+        let declared = self
+            .graph()
+            .outputs()
+            .iter()
+            .find(|declared| declared.node == node && declared.output == output)
+            .map(|declared| declared.name.clone());
+        let graph = self.graph_mut();
+        match declared {
+            Some(name) => graph.remove_output(&name),
+            None => {
+                // Named after the port, with a number if that is taken.
+                let name = (1..)
+                    .map(|number| match number {
+                        1 => output.to_string(),
+                        _ => format!("{output} {number}"),
+                    })
+                    .find(|name| graph.outputs().iter().all(|declared| declared.name != *name))
+                    .unwrap();
+                let _ = graph.add_output(&name, node, output);
+            }
+        }
+        self.refresh();
+    }
+
+    /// All graphs of the document as one file.
+    pub fn to_json(&self) -> String {
+        self.library.to_json()
+    }
+
+    /// Reads a document back, also one which was saved as a single graph.
     pub fn from_json(json: &str) -> Result<Self, oneiroi_graph::FormatError> {
-        Graph::from_json(json).map(Self::new)
+        Library::from_json(json).map(|library| Self::with_library(library, ""))
     }
 }
 
@@ -708,8 +938,9 @@ mod tests {
         for sides in 3..20 {
             assert!(document.set_input(mesh, "sides", &sides.to_string()));
         }
+        // The one of the graph itself and the one of its preview.
         let session = document.session();
-        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 1);
+        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 2);
     }
 
     #[test]
@@ -788,8 +1019,9 @@ mod tests {
         assert_eq!(ports(&view.outputs), [("surface".to_string(), "surface")]);
         assert_eq!(document.view(mesh).unwrap().outputs.len(), 4);
 
+        let labels: Vec<_> = document.palette().into_iter().map(|e| e.label).collect();
         assert_eq!(
-            document.palette(),
+            labels,
             [
                 "curve.circle",
                 "curve.frames",
@@ -804,6 +1036,118 @@ mod tests {
         assert_eq!(document.graph().node(added).unwrap().meta.position, [10.0, 20.0]);
         document.move_nodes(&[added], [5.0, -5.0]);
         assert_eq!(document.graph().node(added).unwrap().meta.position, [15.0, 15.0]);
+    }
+
+    fn radius(document: &Document) -> f32 {
+        document.session().lock().unwrap().bounds().unwrap().1
+    }
+
+    #[test]
+    fn graphs_are_nodes_in_other_graphs() {
+        let mut document = Document::example();
+        let [_, _, sweep, _] = nodes(&document);
+        let thin = radius(&document);
+
+        // A graph of its own for the profile: a circle whose radius is a
+        // parameter and which is what the graph gives.
+        let profile = document.new_graph();
+        assert_eq!((profile.as_str(), document.current()), ("graph", "graph"));
+        let circle = document.add_node("curve.circle", [0.0, 0.0]);
+        assert!(document.set_input(circle, "radius", "0.5"));
+        assert!(document.toggle_exposed(circle, "radius"));
+        document.toggle_output(circle, "circle");
+        assert!(document.is_exposed(circle, "radius") && document.is_output(circle, "circle"));
+
+        // Back in the first graph it can be picked like any node.
+        assert!(document.open("tube"));
+        let entry = document
+            .palette()
+            .into_iter()
+            .find(|entry| entry.label == "graph: graph")
+            .unwrap();
+        let used = document.add(entry.kind, [0.0, 0.0]);
+        let view = document.view(used).unwrap();
+        assert_eq!((view.title.as_str(), view.known), ("graph", true));
+        assert_eq!(view.inputs[0].name, "radius");
+        assert_eq!(view.outputs[0].ty.name(), "circle");
+        assert_eq!(document.input_text(used, "radius").unwrap().0, "0.5");
+
+        // Its circle is a profile, and a thicker one than before.
+        assert!(document.connect(used, "circle", sweep, "profile"));
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        let thick = radius(&document);
+        assert!(thick > thin + 0.2, "{thick} {thin}");
+        assert!(document.set_input(used, "radius", "0.25"));
+        assert!((radius(&document) - thin).abs() < 1e-3);
+
+        // An edit inside the other graph is seen here.
+        document.reset(used, "radius");
+        document.open("graph");
+        assert!(document.set_input(circle, "radius", "1"));
+        assert!(document.is_exposed(circle, "radius"));
+        document.open("tube");
+        assert!(radius(&document) > thick);
+
+        // A graph can not be put into one which it is used by.
+        document.open("graph");
+        assert!(document.palette().iter().all(|entry| entry.label != "graph: tube"));
+
+        // One program per graph and the one of the preview, however many
+        // edits there were.
+        let session = document.session();
+        assert!(session.lock().unwrap().engine_mut().programs().len() <= 3);
+        drop(session);
+
+        // All of it survives its file.
+        let loaded = Document::from_json(&document.to_json()).unwrap();
+        assert_eq!(loaded.graphs(), ["graph", "tube"]);
+        let mut loaded = loaded;
+        loaded.open("tube");
+        assert!(radius(&loaded) > thick);
+    }
+
+    #[test]
+    fn a_broken_graph_says_what_is_wrong_where_it_is_used() {
+        let mut document = Document::example();
+        let [_, _, sweep, _] = nodes(&document);
+
+        let name = document.new_graph();
+        let inner = document.add_node("curve.sweep", [0.0, 0.0]);
+        document.toggle_output(inner, "surface");
+        document.open("tube");
+        let used = document.add(NodeKind::Graph(name), [0.0, 0.0]);
+        document.set_display(Some(used));
+
+        // The sweep in there has no profile, which is the real problem.
+        assert!(document.status().contains("something has to be connected"), "{}", document.status());
+        assert!(!document.view(used).unwrap().known);
+
+        // Everything else keeps working.
+        document.set_display(Some(sweep));
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+    }
+
+    #[test]
+    fn outputs_and_parameters_can_be_taken_back() {
+        let mut document = Document::example();
+        let [_, circle, sweep, _] = nodes(&document);
+
+        document.toggle_output(sweep, "surface");
+        document.toggle_output(circle, "circle");
+        let names: Vec<_> = document.graph().outputs().iter().map(|o| o.name.clone()).collect();
+        assert_eq!(names, ["surface", "circle"]);
+        document.toggle_output(sweep, "surface");
+        assert!(!document.is_output(sweep, "surface") && document.is_output(circle, "circle"));
+
+        // The value an input had is what the parameter starts with, and
+        // what it goes back to.
+        assert!(document.toggle_exposed(circle, "radius"));
+        assert_eq!(document.input_text(circle, "radius").unwrap(), ("0.25".into(), true));
+        assert!(document.toggle_exposed(circle, "radius"));
+        assert!(!document.is_exposed(circle, "radius"));
+        assert_eq!(document.input_text(circle, "radius").unwrap().0, "0.25");
+        // A link is not a value to expose.
+        assert!(!document.toggle_exposed(sweep, "spine"));
     }
 
     #[test]
