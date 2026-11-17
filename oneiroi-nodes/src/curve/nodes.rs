@@ -6,7 +6,7 @@ use crate::parallel::per_group;
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
     node::{
-        Caps, Drawable, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl,
+        Caps, Drawable, GpuKernel, GpuOutput, GpuStage, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl,
         Topology,
     },
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
@@ -14,7 +14,7 @@ use oneiroi_core::{
 
 use rayon::prelude::*;
 
-use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, clamped_uniform_knots, extract_segments, spans};
+use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, NurbsPiece, clamped_uniform_knots, extract_segments, spans};
 
 /// A [`MovingFrame`] in the layout of the WGSL struct with the same name.
 #[repr(C)]
@@ -80,7 +80,7 @@ impl From<EvaluatedFrame> for MovingFrame {
 pub static NURBS: NodeDef = NodeDef {
     id: "curve.nurbs",
     display_name: "NURBS Curve",
-    version: 1,
+    version: 2,
     inputs: &[
         PortDecl::new::<[f32; 4]>("points").grouped(),
         PortDecl::new::<f32>("knots").grouped(),
@@ -96,7 +96,7 @@ pub static NURBS: NodeDef = NodeDef {
                 words: None,
             },
             GpuOutput {
-                entry: "nurbs_offset",
+                entry: "",
                 len: |inputs| inputs.group_count(0) + 1,
                 // Known from the knots, so the CPU has them right away.
                 words: Some(|inputs| offsets(segment_counts(inputs))),
@@ -105,11 +105,10 @@ pub static NURBS: NodeDef = NodeDef {
         requires: Caps::NONE,
         // The knots, and where the points and the knots of each curve start.
         reads: &[1, 2, 3],
-        // Each segment walks along its curve from the start, which only
-        // pays off for curves of not too many segments.
+        // Each segment joins the pieces of its curve before it, which is
+        // cheap but still grows with the length of the curve.
         accepts: Some(|inputs| {
-            inputs.group_count(0) <= MAX_GPU_CURVES
-                && (inputs.len(1) == 0 || !inputs.groups(1).is_empty())
+            (inputs.len(1) == 0 || !inputs.groups(1).is_empty())
                 && segment_counts(inputs).all(|count| count <= MAX_GPU_SEGMENTS)
         }),
         examples: &[
@@ -122,16 +121,53 @@ pub static NURBS: NodeDef = NodeDef {
             // No curve of 3 points, then knots which do not fit and ones
             // which do.
             || nurbs_example(&[3, 6, 5], &[&clamped_uniform_knots(3), &[0.0; 4], &clamped_uniform_knots(5)]),
-            // Longer curves drift apart a bit more, see the tests of the
-            // executor.
             || nurbs_example(&[40], &[]),
+            || nurbs_example(&[200, 3, 120], &[]),
             || {
                 let line: Vec<[f32; 4]> = (0..6).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
                 vec![bytemuck::cast_slice(&line).to_vec(), Vec::new(), Vec::new(), Vec::new()]
             },
         ],
+        stages: &[
+            GpuStage {
+                name: "starts",
+                ty: u32::INFO,
+                entry: "",
+                len: |inputs| inputs.group_count(0) + 1,
+                words: Some(|inputs| offsets(segment_counts(inputs))),
+            },
+            GpuStage {
+                name: "spans",
+                ty: u32::INFO,
+                entry: "",
+                len: |inputs| segment_counts(inputs).sum(),
+                words: Some(span_words),
+            },
+            GpuStage {
+                name: "pieces",
+                ty: NurbsPiece::INFO,
+                entry: "nurbs_piece",
+                len: |inputs| segment_counts(inputs).sum(),
+                words: None,
+            },
+        ],
     }],
 };
+
+/// The knot span of every segment of every curve.
+fn span_words(inputs: &Inputs<'_>) -> Vec<u32> {
+    let knots = inputs.get::<f32>(1);
+    let knot_groups = inputs.groups(1);
+    let mut words = Vec::new();
+    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
+        let points = curve.len();
+        let knots = curve_knots(points, knots, &knot_groups, group);
+        if points >= 4 && knots.len() == points + 4 {
+            words.extend(spans(points, &knots).map(|span| span as u32));
+        }
+    }
+    words
+}
 
 /// Where each group starts, of groups this long, and where the last ends.
 fn offsets(lengths: impl Iterator<Item = usize>) -> Vec<u32> {
@@ -142,10 +178,8 @@ fn offsets(lengths: impl Iterator<Item = usize>) -> Vec<u32> {
     offsets
 }
 
-/// No more curves than these at once on the GPU.
-const MAX_GPU_CURVES: usize = 1024;
 /// No longer curves than these on the GPU.
-const MAX_GPU_SEGMENTS: usize = 256;
+const MAX_GPU_SEGMENTS: usize = 4096;
 
 /// The inputs of [`NURBS`] as words: curves with as many `points` each,
 /// with a group of `knots` each or none at all.
@@ -264,6 +298,7 @@ pub static SAMPLE_CURVE: NodeDef = NodeDef {
             || sample_example(&[7], 4, 0.5, &[]),
             || sample_example(&[0], 4, 0.0, &[]),
         ],
+        stages: &[],
     }],
 };
 
@@ -404,6 +439,7 @@ fn translate(index: u32) -> CubicNurbsSegmentCache {
             || translate_example(&[6], [0.0; 3]),
             || translate_example(&[], [3.0, 0.0, 0.0]),
         ],
+        stages: &[],
     }],
 };
 

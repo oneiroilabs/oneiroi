@@ -186,6 +186,7 @@ impl<P: Profile> Ports<P> {
         reads: &[2],
         accepts: None,
         examples: P::SWEEP_EXAMPLES,
+        stages: &[],
     }];
 }
 

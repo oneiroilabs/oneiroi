@@ -1,6 +1,10 @@
 
 // The NURBS node: the segments of every curve, made from its control
 // points and knots the same way `extract_segments` makes them on the CPU.
+// The CPU hands over where the segments of each curve start (`starts`)
+// and the knot span of every segment (`spans`). A pass makes the piece of
+// every segment on its own (`pieces`), then every segment joins the pieces
+// of its curve before it.
 
 fn nurbs_points(curve: u32) -> u32 {
     return in_points_end(curve) - in_points_start(curve);
@@ -17,43 +21,31 @@ fn nurbs_knot(curve: u32, k: u32) -> f32 {
     return in_knots(in_knots_start(group) + k);
 }
 
-fn nurbs_valid(curve: u32) -> bool {
-    let points = nurbs_points(curve);
-    if (points < 4u) {
-        return false;
-    }
-    if (in_knots_len() == 0u) {
-        return true;
-    }
-    let group = min(curve, in_knots_groups() - 1u);
-    return in_knots_end(group) - in_knots_start(group) == points + 4u;
-}
 
-fn nurbs_is_span(curve: u32, span: u32) -> bool {
-    return nurbs_knot(curve, span) < nurbs_knot(curve, span + 1u);
-}
 
-fn nurbs_segments(curve: u32) -> u32 {
-    if (!nurbs_valid(curve)) {
-        return 0u;
-    }
-    var count = 0u;
-    for (var span = 3u; span < nurbs_points(curve); span++) {
-        if (nurbs_is_span(curve, span)) {
-            count++;
-        }
-    }
-    return count;
-}
 
 // De Boor's algorithm with another parameter on every level.
-fn nurbs_blossom(curve: u32, span: u32, at: vec3<f32>) -> vec4<f32> {
+// The first control point of a span, which it is computed relative to,
+// as `span_origin`.
+fn nurbs_origin(curve: u32, span: u32) -> vec3<f32> {
+    let first = in_points(in_points_start(curve) + span - 3u);
+    if (first.w != 0.0) {
+        return first.xyz / first.w;
+    }
+    return vec3<f32>(0.0);
+}
+
+fn nurbs_moved(point: vec4<f32>, origin: vec3<f32>) -> vec4<f32> {
+    return point - vec4<f32>(origin * point.w, 0.0);
+}
+
+fn nurbs_blossom(curve: u32, span: u32, at: vec3<f32>, origin: vec3<f32>) -> vec4<f32> {
     let first = in_points_start(curve) + span - 3u;
     var d = array<vec4<f32>, 4>(
-        in_points(first),
-        in_points(first + 1u),
-        in_points(first + 2u),
-        in_points(first + 3u),
+        nurbs_moved(in_points(first), origin),
+        nurbs_moved(in_points(first + 1u), origin),
+        nurbs_moved(in_points(first + 2u), origin),
+        nurbs_moved(in_points(first + 3u), origin),
     );
     for (var level = 1u; level <= 3u; level++) {
         for (var j = 3u; j >= level; j--) {
@@ -69,14 +61,15 @@ fn nurbs_blossom(curve: u32, span: u32, at: vec3<f32>) -> vec4<f32> {
     return d[3];
 }
 
-fn nurbs_basis(curve: u32, span: u32) -> mat4x4<f32> {
+// The basis of a span relative to `origin`.
+fn nurbs_basis(curve: u32, span: u32, origin: vec3<f32>) -> mat4x4<f32> {
     let a = nurbs_knot(curve, span);
     let b = nurbs_knot(curve, span + 1u);
     let points = mat4x4<f32>(
-        nurbs_blossom(curve, span, vec3<f32>(a, a, a)),
-        nurbs_blossom(curve, span, vec3<f32>(a, a, b)),
-        nurbs_blossom(curve, span, vec3<f32>(a, b, b)),
-        nurbs_blossom(curve, span, vec3<f32>(b, b, b)),
+        nurbs_blossom(curve, span, vec3<f32>(a, a, a), origin),
+        nurbs_blossom(curve, span, vec3<f32>(a, a, b), origin),
+        nurbs_blossom(curve, span, vec3<f32>(a, b, b), origin),
+        nurbs_blossom(curve, span, vec3<f32>(b, b, b), origin),
     );
     let bezier = mat4x4<f32>(
         vec4<f32>(-1.0, 3.0, -3.0, 1.0),
@@ -93,90 +86,129 @@ fn nurbs_encode(normal: vec3<f32>, tangent: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(dot(normal, n), dot(normal, b));
 }
 
-// One step of the double reflection method, as `double_reflect`.
-fn nurbs_double_reflect(
+// The curve a segment belongs to, by a binary search through where the
+// segments of each curve start.
+fn nurbs_curve_of(index: u32) -> u32 {
+    var low = 0u;
+    var high = stage_starts_len() - 1u;
+    while (high - low > 1u) {
+        let middle = (low + high) / 2u;
+        if (stage_starts(middle) <= index) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+fn nurbs_reflection(v: vec3<f32>, c: f32) -> mat3x3<f32> {
+    let k = 2.0 / c;
+    return mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0) - (k * v.x) * v,
+        vec3<f32>(0.0, 1.0, 0.0) - (k * v.y) * v,
+        vec3<f32>(0.0, 0.0, 1.0) - (k * v.z) * v,
+    );
+}
+
+// One step of the double reflection method as a matrix, as
+// `double_reflection`.
+fn nurbs_double_reflection(
     position: vec3<f32>,
     tangent: vec3<f32>,
-    normal: vec3<f32>,
     next_position: vec3<f32>,
     next_tangent: vec3<f32>,
-) -> vec3<f32> {
+) -> mat3x3<f32> {
     let v1 = next_position - position;
     let c1 = dot(v1, v1);
     if (c1 <= 1e-8) {
-        return normal;
+        return mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
     }
-    let n_reflected = normal - (2.0 / c1) * dot(v1, normal) * v1;
-    let t_reflected = tangent - (2.0 / c1) * dot(v1, tangent) * v1;
-
-    let v2 = next_tangent - t_reflected;
+    let first = nurbs_reflection(v1, c1);
+    let v2 = next_tangent - first * tangent;
     let c2 = dot(v2, v2);
-    var next_normal = n_reflected;
-    if (c2 > 1e-8) {
-        next_normal = n_reflected - (2.0 / c2) * dot(v2, n_reflected) * v2;
+    if (c2 <= 1e-8) {
+        return first;
     }
-    let binormal = curve_normalize_or_zero(cross(next_tangent, next_normal));
-    return curve_normalize_or_zero(cross(binormal, next_tangent));
+    return nurbs_reflection(v2, c2) * first;
 }
 
-// A segment needs the length of and the frame at the end of the ones
-// before it, so every invocation walks its curve from the start.
+// A segment on its own, as `NurbsPiece::new`: measured relative to its
+// origin, where small numbers keep their precision.
+fn nurbs_piece(index: u32) -> NurbsPiece {
+    let curve = nurbs_curve_of(index);
+    let span = stage_spans(index);
+    let origin = nurbs_origin(curve, span);
+    let local = CubicNurbsSegmentCache(
+        nurbs_basis(curve, span, origin),
+        0.0,
+        0.0,
+        vec2<f32>(0.0),
+        vec2<f32>(0.0),
+    );
+    var transport = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+    var position = curve_point(local, 0.0).position;
+    var tangent = curve_tangent(local, 0.0);
+    let start_tangent = tangent;
+    for (var step = 1u; step <= 31u; step++) {
+        let u = f32(step) / 31.0;
+        let next_position = curve_point(local, u).position;
+        let next_tangent = curve_tangent(local, u);
+        transport = nurbs_double_reflection(position, tangent, next_position, next_tangent) * transport;
+        position = next_position;
+        tangent = next_tangent;
+    }
+    // The shape back where it is, as `translated`.
+    let m = local.monomial_basis;
+    let basis = mat4x4<f32>(
+        m[0] + vec4<f32>(origin * m[0].w, 0.0),
+        m[1] + vec4<f32>(origin * m[1].w, 0.0),
+        m[2] + vec4<f32>(origin * m[2].w, 0.0),
+        m[3] + vec4<f32>(origin * m[3].w, 0.0),
+    );
+    return NurbsPiece(
+        basis,
+        start_tangent,
+        curve_length_until(local, 1.0),
+        tangent,
+        transport[0],
+        transport[1],
+        transport[2],
+    );
+}
+
+// `normal` turned with the tangent, as `turn`.
+fn nurbs_turn(from_: vec3<f32>, to: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let turned = curve_rotate_arc(from_, to, normal);
+    let along = turned - to * dot(turned, to);
+    let len = length(along);
+    if (len > 1e-30) {
+        return along / len;
+    }
+    return curve_reference_normal(to);
+}
+
+// A segment joined with the pieces of its curve before it, as `join`.
 fn nurbs_segment(index: u32) -> CubicNurbsSegmentCache {
-    var curve = 0u;
-    var local = index;
-    loop {
-        let count = nurbs_segments(curve);
-        if (local < count) {
-            break;
-        }
-        local -= count;
-        curve++;
-    }
-
-    var tangent = vec3<f32>(0.0);
-    var normal = vec3<f32>(0.0);
+    let first = stage_starts(nurbs_curve_of(index));
+    var tangent = stage_pieces(first).start_tangent;
+    var normal = curve_reference_normal(tangent);
     var total = 0.0;
-    var seen = 0u;
-    var segment = CubicNurbsSegmentCache(mat4x4<f32>(), 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
-    for (var span = 3u; span < nurbs_points(curve); span++) {
-        if (!nurbs_is_span(curve, span)) {
-            continue;
-        }
-        segment = CubicNurbsSegmentCache(nurbs_basis(curve, span), 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
-        segment.length = curve_length_until(segment, 1.0);
-        total += segment.length;
-        segment.cumulative_length = total;
-
-        if (seen == 0u) {
-            tangent = curve_tangent(segment, 0.0);
-            normal = curve_reference_normal(tangent);
-        }
-        var position = curve_point(segment, 0.0).position;
-        let start_tangent = curve_tangent(segment, 0.0);
-        normal = curve_rotate_arc(tangent, start_tangent, normal);
-        tangent = start_tangent;
-        segment.rmf_start_normal = nurbs_encode(normal, tangent);
-        for (var step = 1u; step <= 31u; step++) {
-            let u = f32(step) / 31.0;
-            let next_position = curve_point(segment, u).position;
-            let next_tangent = curve_tangent(segment, u);
-            normal = nurbs_double_reflect(position, tangent, normal, next_position, next_tangent);
-            position = next_position;
-            tangent = next_tangent;
-        }
-        segment.rmf_end_normal = nurbs_encode(normal, tangent);
-        if (seen == local) {
-            break;
-        }
-        seen++;
+    var start_normal = vec2<f32>(0.0);
+    for (var at = first; at <= index; at++) {
+        let piece = stage_pieces(at);
+        normal = nurbs_turn(tangent, piece.start_tangent, normal);
+        start_normal = nurbs_encode(normal, piece.start_tangent);
+        normal = mat3x3<f32>(piece.transport_x, piece.transport_y, piece.transport_z) * normal;
+        tangent = piece.end_tangent;
+        total += piece.length;
     }
-    return segment;
-}
-
-fn nurbs_offset(curve: u32) -> u32 {
-    var total = 0u;
-    for (var before = 0u; before < curve; before++) {
-        total += nurbs_segments(before);
-    }
-    return total;
+    let piece = stage_pieces(index);
+    return CubicNurbsSegmentCache(
+        piece.monomial_basis,
+        piece.length,
+        total,
+        start_normal,
+        nurbs_encode(normal, tangent),
+    );
 }

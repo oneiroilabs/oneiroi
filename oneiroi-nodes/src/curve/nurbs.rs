@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4, Vec4Swizzles};
 use oneiroi_core::types::{DataType, Field, FieldType, Layout, Scalar};
 
 use crate::curve::Curve;
@@ -85,39 +85,6 @@ fn decode_normal(normal: [f32; 2], tangent: Vec3) -> Vec3 {
     n_ref * normal[0] + b_ref * normal[1]
 }
 
-/// One step of the double reflection method: carries `normal` from one
-/// sample of the curve to the next without twisting it around the tangent.
-fn double_reflect(
-    position: Vec3,
-    tangent: Vec3,
-    normal: Vec3,
-    next_position: Vec3,
-    next_tangent: Vec3,
-) -> Vec3 {
-    let v1 = next_position - position;
-    let c1 = v1.length_squared();
-    if c1 <= 1e-8 {
-        return normal;
-    }
-
-    let n_reflected = normal - (2.0 / c1) * v1.dot(normal) * v1;
-    let t_reflected = tangent - (2.0 / c1) * v1.dot(tangent) * v1;
-
-    let v2 = next_tangent - t_reflected;
-    let c2 = v2.length_squared();
-    let next_normal = if c2 > 1e-8 {
-        n_reflected - (2.0 / c2) * v2.dot(n_reflected) * v2
-    } else {
-        n_reflected
-    };
-
-    // Clean up numerical drift.
-    next_tangent
-        .cross(next_normal)
-        .normalize_or_zero()
-        .cross(next_tangent)
-        .normalize_or_zero()
-}
 
 impl CubicNurbsSegmentCache {
     fn from_basis(monomial_basis: Mat4) -> Self {
@@ -268,32 +235,189 @@ pub fn extract_segments(points: &[Vec4], knots: &[f32]) -> Vec<CubicNurbsSegment
         return Vec::new();
     }
 
-    let mut segments = bezier_extraction(points, knots);
-    compute_lengths(&mut segments);
-    compute_rmf_normals(&mut segments);
-    segments
+    let pieces: Vec<_> = spans(points.len(), knots)
+        .map(|span| NurbsPiece::new(points, knots, span))
+        .collect();
+    join(&pieces)
+}
+
+/// What a segment is on its own, before it is joined with the segments
+/// of its curve: its shape, its length, its tangents at both ends, and how
+/// the rotation minimizing frame turns from its start to its end.
+///
+/// Every piece is made without looking at any other, so all of them can be
+/// made at once. The GPU makes them in a pass of their own.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
+pub struct NurbsPiece {
+    monomial_basis: [[f32; 4]; 4],
+    start_tangent: [f32; 3],
+    length: f32,
+    end_tangent: [f32; 3],
+    _padding: f32,
+    /// The columns of the matrix which carries a normal at the start to
+    /// the one at the end: the double reflections of every step, one after
+    /// the other.
+    transport: [[f32; 4]; 3],
+}
+
+impl DataType for NurbsPiece {
+    type ConfigurationOptions = ();
+
+    const NAME: &'static str = "nurbs_piece";
+    const WGSL: &'static str = "NurbsPiece";
+    const SCALAR: Scalar = Scalar::F32;
+    const LAYOUT: Layout = Layout::Struct(&[
+        Field::new("monomial_basis", FieldType::Mat4),
+        Field::new("start_tangent", FieldType::Vec3),
+        Field::new("length", FieldType::F32),
+        Field::new("end_tangent", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("transport_x", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("transport_y", FieldType::Vec3),
+        Field::pad(1),
+        Field::new("transport_z", FieldType::Vec3),
+        Field::pad(1),
+    ]);
+}
+
+impl NurbsPiece {
+    /// The piece of the span which starts at knot `span`.
+    pub fn new(points: &[Vec4], knots: &[f32], span: usize) -> Self {
+        // Everything is measured on the segment relative to its origin,
+        // where differences of small numbers keep their precision, and only
+        // the shape is moved back to where it is.
+        let (local, origin) = local_span_segment(points, knots, span);
+        let segment = local.translated(origin);
+        let at = |step: u32| local.evaluate(step as f32 / RMF_STEPS as f32);
+        let mut transport = Mat3::IDENTITY;
+        let (mut position, _, mut tangent) = at(0);
+        for step in 1..=RMF_STEPS {
+            let (next_position, _, next_tangent) = at(step);
+            transport = double_reflection(position, tangent, next_position, next_tangent) * transport;
+            (position, tangent) = (next_position, next_tangent);
+        }
+        let column = |v: Vec3| v.extend(0.0).to_array();
+        Self {
+            monomial_basis: segment.monomial_basis,
+            start_tangent: local.evaluate(0.0).2.to_array(),
+            length: local.length_until(1.0),
+            end_tangent: tangent.to_array(),
+            _padding: 0.0,
+            transport: [
+                column(transport.x_axis),
+                column(transport.y_axis),
+                column(transport.z_axis),
+            ],
+        }
+    }
+
+    fn transport(&self) -> Mat3 {
+        let column = |c: [f32; 4]| Vec4::from_array(c).truncate();
+        Mat3::from_cols(
+            column(self.transport[0]),
+            column(self.transport[1]),
+            column(self.transport[2]),
+        )
+    }
+}
+
+/// The segments of a curve out of its pieces, in order: how long the curve
+/// is up to the end of each, and the rotation minimizing frame at both of
+/// its ends. The frame starts out from the reference of the first tangent,
+/// turns with the tangent where segments meet at a corner, and is carried
+/// across each segment by its transport.
+pub fn join(pieces: &[NurbsPiece]) -> Vec<CubicNurbsSegmentCache> {
+    let Some(first) = pieces.first() else {
+        return Vec::new();
+    };
+    let mut tangent = Vec3::from_array(first.start_tangent);
+    let mut normal = reference_basis(tangent).0;
+    let mut total = 0.0;
+    pieces
+        .iter()
+        .map(|piece| {
+            let start_tangent = Vec3::from_array(piece.start_tangent);
+            normal = turn(tangent, start_tangent, normal);
+            let start_normal = encode_normal(normal, start_tangent);
+            normal = piece.transport() * normal;
+            tangent = Vec3::from_array(piece.end_tangent);
+            total += piece.length;
+            CubicNurbsSegmentCache {
+                monomial_basis: piece.monomial_basis,
+                length: piece.length,
+                cumulative_length: total,
+                rmf_start_normal: start_normal,
+                rmf_end_normal: encode_normal(normal, tangent),
+                _padding: [0.0; 2],
+            }
+        })
+        .collect()
+}
+
+/// `normal` turned from where the tangent was `from` to where it is `to`,
+/// and made a unit normal of `to` again. That keeps the error of carrying
+/// it from adding up over many segments.
+fn turn(from: Vec3, to: Vec3, normal: Vec3) -> Vec3 {
+    let turned = Quat::from_rotation_arc(from, to) * normal;
+    (turned - to * turned.dot(to))
+        .try_normalize()
+        .unwrap_or_else(|| reference_basis(to).0)
+}
+
+/// One step of the double reflection method as a matrix: carries a normal
+/// from one sample of the curve to the next without twisting it around the
+/// tangent. The same as on the GPU.
+fn double_reflection(position: Vec3, tangent: Vec3, next_position: Vec3, next_tangent: Vec3) -> Mat3 {
+    let v1 = next_position - position;
+    let c1 = v1.length_squared();
+    if c1 <= 1e-8 {
+        return Mat3::IDENTITY;
+    }
+    let reflect = |v: Vec3, c: f32| {
+        let k = 2.0 / c;
+        Mat3::from_cols(
+            Vec3::X - (k * v.x) * v,
+            Vec3::Y - (k * v.y) * v,
+            Vec3::Z - (k * v.z) * v,
+        )
+    };
+    let first = reflect(v1, c1);
+    let v2 = next_tangent - first * tangent;
+    let c2 = v2.length_squared();
+    if c2 <= 1e-8 {
+        return first;
+    }
+    reflect(v2, c2) * first
 }
 
 /// The knot spans of a curve of `points` with these knots which are no
 /// shorter than nothing: one segment of the curve each. A span is known by
 /// the knot it starts at.
-pub(crate) fn spans(points: usize, knots: &[f32]) -> impl Iterator<Item = usize> + '_ {
+pub fn spans(points: usize, knots: &[f32]) -> impl Iterator<Item = usize> + '_ {
     (3..points).filter(move |span| knots[*span] < knots[span + 1])
 }
 
-/// The Bézier form of every segment, each made from the few points and
-/// knots around its span alone. The GPU makes them the same way, one
-/// segment at a time.
-fn bezier_extraction(points: &[Vec4], knots: &[f32]) -> Vec<CubicNurbsSegmentCache> {
-    spans(points.len(), knots)
-        .map(|span| span_segment(points, knots, span))
-        .collect()
+
+/// Where a span is computed relative to: its first control point. A curve
+/// can be far from the origin while its segments are small, and then the
+/// numbers of a segment lose their precision in what all of them share.
+fn span_origin(points: &[Vec4], span: usize) -> Vec3 {
+    let first = points[span - 3];
+    match first.w != 0.0 {
+        true => first.xyz() / first.w,
+        false => Vec3::ZERO,
+    }
 }
 
-/// The segment of the span which starts at knot `span`.
-pub(crate) fn span_segment(points: &[Vec4], knots: &[f32], span: usize) -> CubicNurbsSegmentCache {
+/// The segment of the span which starts at knot `span`, moved by minus
+/// its origin, and that origin. Moved back by it, it is the segment.
+fn local_span_segment(points: &[Vec4], knots: &[f32], span: usize) -> (CubicNurbsSegmentCache, Vec3) {
+    let origin = span_origin(points, span);
     let (a, b) = (knots[span], knots[span + 1]);
-    let bezier = [[a, a, a], [a, a, b], [a, b, b], [b, b, b]].map(|at| blossom(points, knots, span, at));
+    let bezier = [[a, a, a], [a, a, b], [a, b, b], [b, b, b]]
+        .map(|at| blossom(points, knots, span, at, origin));
     let bezier_basis = Mat4::from_cols(
         Vec4::new(-1.0, 3.0, -3.0, 1.0),
         Vec4::new(3.0, -6.0, 3.0, 0.0),
@@ -301,14 +425,21 @@ pub(crate) fn span_segment(points: &[Vec4], knots: &[f32], span: usize) -> Cubic
         Vec4::new(1.0, 0.0, 0.0, 0.0),
     );
     let points = Mat4::from_cols(bezier[0], bezier[1], bezier[2], bezier[3]);
-    CubicNurbsSegmentCache::from_basis(points * bezier_basis)
+    (CubicNurbsSegmentCache::from_basis(points * bezier_basis), origin)
 }
 
 /// The blossom of the span at the three parameters `at`: de Boor's
 /// algorithm with another parameter on every level. With the ends of the
 /// span as parameters it gives the Bézier points of the segment.
-fn blossom(points: &[Vec4], knots: &[f32], span: usize, at: [f32; 3]) -> Vec4 {
-    let mut d = [points[span - 3], points[span - 2], points[span - 1], points[span]];
+fn blossom(points: &[Vec4], knots: &[f32], span: usize, at: [f32; 3], origin: Vec3) -> Vec4 {
+    // The points are homogeneous, so moving them scales with the weight.
+    let moved = |point: Vec4| point - (origin * point.w).extend(0.0);
+    let mut d = [
+        moved(points[span - 3]),
+        moved(points[span - 2]),
+        moved(points[span - 1]),
+        moved(points[span]),
+    ];
     for level in 1..=3 {
         for j in (level..=3).rev() {
             let i = span - 3 + j;
@@ -320,41 +451,7 @@ fn blossom(points: &[Vec4], knots: &[f32], span: usize, at: [f32; 3]) -> Vec4 {
     d[3]
 }
 
-fn compute_lengths(segments: &mut [CubicNurbsSegmentCache]) {
-    let mut total_length = 0.0;
-    for segment in segments {
-        segment.length = segment.length_until(1.0);
-        total_length += segment.length;
-        segment.cumulative_length = total_length;
-    }
-}
 
-/// Walks the rotation minimizing frame along the whole curve and stores
-/// the normal it has at both ends of every segment.
-fn compute_rmf_normals(segments: &mut [CubicNurbsSegmentCache]) {
-    let Some(first) = segments.first() else {
-        return;
-    };
-
-    let mut tangent = first.evaluate(0.0).2;
-    let mut normal = reference_basis(tangent).0;
-
-    for segment in segments {
-        // Segments can meet at a corner. The frame turns with the tangent
-        // there, since no rotation around it is needed to follow along.
-        let (mut position, _, start_tangent) = segment.evaluate(0.0);
-        normal = Quat::from_rotation_arc(tangent, start_tangent) * normal;
-        tangent = start_tangent;
-        segment.rmf_start_normal = encode_normal(normal, tangent);
-
-        for step in 1..=RMF_STEPS {
-            let (next_position, _, next_tangent) = segment.evaluate(step as f32 / RMF_STEPS as f32);
-            normal = double_reflect(position, tangent, normal, next_position, next_tangent);
-            (position, tangent) = (next_position, next_tangent);
-        }
-        segment.rmf_end_normal = encode_normal(normal, tangent);
-    }
-}
 
 /// Splits `t` in `0..=1` into the index of a segment and the `u` inside it.
 /// Every segment covers the same share of `t`.
@@ -1015,7 +1112,7 @@ mod tests {
             for step in 1..=RMF_STEPS {
                 let u = step as f32 / RMF_STEPS as f32;
                 let (next_position, _, next_tangent) = segment.evaluate(u);
-                normal = double_reflect(position, tangent, normal, next_position, next_tangent);
+                normal = double_reflection(position, tangent, next_position, next_tangent) * normal;
                 (position, tangent) = (next_position, next_tangent);
                 worst = worst.max(normal.angle_between(segment.frame(u).normal));
             }

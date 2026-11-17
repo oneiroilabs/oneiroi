@@ -148,6 +148,7 @@ pub static CIRCLE: NodeDef = NodeDef {
             || vec![bytemuck::cast_slice(&[0.25f32, 1.0, -2.0, 0.0]).to_vec()],
             || vec![Vec::new()],
         ],
+        stages: &[],
     }],
 };
 
