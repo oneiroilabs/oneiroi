@@ -412,12 +412,28 @@ pub enum LodMethod {
 ///   `fs_main`. Draw one task workgroup per patch.
 /// - [`LodMethod::VertexPulling`]: entry points `vs_main` and `fs_main`.
 ///   Draw every patch as one instance with [`LodShader::vertices`].
+///
+/// Both have a compute entry point `cs_count` as well, which adds up how
+/// many triangles the patches in view get, into an `atomic<u32>` at
+/// binding 2. Dispatch `ceil(patches / 64)` workgroups. It is how a budget
+/// of triangles can be held, see [`LodShader::COUNT_GROUP`].
 #[derive(Debug, Clone)]
 pub struct LodShader {
     pub wgsl: String,
 }
 
 impl LodShader {
+    /// How many patches one workgroup of `cs_count` looks at.
+    pub const COUNT_GROUP: u32 = 64;
+
+    /// How many patches one task workgroup of [`LodMethod::MeshShader`]
+    /// takes care of. Dispatch `ceil(patches / TASK_GROUP)` of them.
+    pub const TASK_GROUP: u32 = 16;
+
+    /// The finest [`LodMethod::MeshShader`] draws: what one task workgroup
+    /// asks of mesh shaders has to fit into its payload.
+    pub const MESH_MAX_LEVEL: u32 = 6;
+
     /// How many vertices [`LodMethod::VertexPulling`] draws per patch.
     pub const fn vertices(max_level: u32) -> u32 {
         6 << (2 * max_level)
@@ -448,7 +464,9 @@ pub struct LodArgs {
     /// Anything but zero colours every patch by how fine it is drawn,
     /// from blue for coarse to red for fine.
     pub debug: u32,
-    pub _padding: [u32; 2],
+    /// How many patches there are.
+    pub patches: u32,
+    pub _padding: u32,
 }
 
 const LOD_COMMON: &str = "struct LodArgs {
@@ -460,10 +478,13 @@ const LOD_COMMON: &str = "struct LodArgs {
     offset: u32,
     max_level: u32,
     debug: u32,
+    patches: u32,
 }
 
 @group(0) @binding(0) var<storage, read> page: array<u32>;
 @group(0) @binding(1) var<uniform> args: LodArgs;
+// Only for `cs_count`: how many triangles all patches get together.
+@group(0) @binding(2) var<storage, read_write> counter: atomic<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -606,6 +627,20 @@ fn lod_of(piece: {name}) -> Lod {{
     );
 }}
 
+@compute @workgroup_size(64)
+fn cs_count(@builtin(global_invocation_id) id: vec3<u32>) {{
+    if (id.x >= args.patches) {{
+        return;
+    }}
+    let piece = element(id.x);
+    if (lod_hidden(piece)) {{
+        return;
+    }}
+    let inside = lod_inside(lod_of(piece));
+    let cells = (1u << lod_level(inside.x)) * (1u << lod_level(inside.y));
+    atomicAdd(&counter, cells * 2u);
+}}
+
 // Whether nothing of the patch can be on screen: a few points of it are
 // all beyond the same side of what the camera sees, with room to spare
 // for what bulges out between them.
@@ -658,36 +693,106 @@ fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance
 }
 ";
 
-const LOD_MESH: &str = "// A patch is cut into blocks of this many cells along each side, one
-// mesh shader each.
+const LOD_MESH: &str = "// A large patch is cut into blocks of this many cells along each side,
+// one mesh shader each. Small ones are bundled: several of them share one.
 const BLOCK: u32 = 8u;
+// What one mesh shader can make at most.
+const VERTICES: u32 = 81u;
+const TRIANGLES: u32 = 128u;
+// How many patches one task shader takes care of.
+const PATCHES: u32 = 16u;
 
 struct Payload {
-    piece: u32,
-    // The level of the grid of the whole patch, along and across.
-    levels: vec2<u32>,
-    along: vec2<f32>,
-    across: vec2<f32>,
+    first: u32,
+    // How fine each of the patches is, by its place among the 16.
+    levels: array<vec2<u32>, 16>,
+    along: array<vec2<f32>, 16>,
+    across: array<vec2<f32>, 16>,
+    // What each mesh shader makes. The lowest 4 bits are the place of a
+    // patch. Above them is how many patches from there on it makes whole,
+    // or 0 if it makes one block of that patch, which is at the bits from
+    // 8 on (along) and from 16 on (across).
+    groups: array<u32, 1024>,
 }
 
 var<task_payload> payload: Payload;
 
+// The bundle being collected while the task shader goes over its patches.
+struct Bundle {
+    start: u32,
+    count: u32,
+    vertices: u32,
+    triangles: u32,
+}
+
+fn cells_of(levels: vec2<u32>) -> vec2<u32> {
+    return vec2<u32>(1u << levels.x, 1u << levels.y);
+}
+
 @task @payload(payload) @workgroup_size(1)
 fn ts_main(@builtin(workgroup_id) group: vec3<u32>) -> @builtin(mesh_task_size) vec3<u32> {
-    let piece = element(group.x);
-    if (lod_hidden(piece)) {
-        return vec3<u32>(0u, 0u, 0u);
+    payload.first = group.x * PATCHES;
+    var groups = 0u;
+    var bundle = Bundle(0u, 0u, 0u, 0u);
+
+    for (var place = 0u; place < PATCHES; place++) {
+        let index = payload.first + place;
+        if (index >= args.patches) {
+            break;
+        }
+        let piece = element(index);
+        if (lod_hidden(piece)) {
+            // A bundle is a run of patches which are all there.
+            if (bundle.count > 0u) {
+                payload.groups[groups] = bundle.start | (bundle.count << 4u);
+                groups++;
+                bundle = Bundle(0u, 0u, 0u, 0u);
+            }
+            continue;
+        }
+
+        let lod = lod_of(piece);
+        let inside = lod_inside(lod);
+        let levels = vec2<u32>(lod_level(inside.x), lod_level(inside.y));
+        payload.levels[place] = levels;
+        payload.along[place] = lod.along;
+        payload.across[place] = lod.across;
+
+        let cells = cells_of(levels);
+        let vertices = (cells.x + 1u) * (cells.y + 1u);
+        let triangles = cells.x * cells.y * 2u;
+        let fits = vertices <= VERTICES && triangles <= TRIANGLES;
+        let full = bundle.count == 15u
+            || bundle.vertices + vertices > VERTICES
+            || bundle.triangles + triangles > TRIANGLES;
+        if (bundle.count > 0u && (!fits || full)) {
+            payload.groups[groups] = bundle.start | (bundle.count << 4u);
+            groups++;
+            bundle = Bundle(0u, 0u, 0u, 0u);
+        }
+
+        if (fits) {
+            if (bundle.count == 0u) {
+                bundle.start = place;
+            }
+            bundle.count++;
+            bundle.vertices += vertices;
+            bundle.triangles += triangles;
+        } else {
+            let blocks = (cells + BLOCK - 1u) / BLOCK;
+            for (var x = 0u; x < blocks.x; x++) {
+                for (var y = 0u; y < blocks.y; y++) {
+                    payload.groups[groups] = place | (x << 8u) | (y << 16u);
+                    groups++;
+                }
+            }
+        }
     }
-
-    let lod = lod_of(piece);
-    let inside = lod_inside(lod);
-    payload.piece = group.x;
-    payload.levels = vec2<u32>(lod_level(inside.x), lod_level(inside.y));
-    payload.along = lod.along;
-    payload.across = lod.across;
-
-    let cells = vec2<u32>(1u << payload.levels.x, 1u << payload.levels.y);
-    return vec3<u32>((cells + BLOCK - 1u) / BLOCK, 1u);
+    if (bundle.count > 0u) {
+        payload.groups[groups] = bundle.start | (bundle.count << 4u);
+        groups++;
+    }
+    return vec3<u32>(groups, 1u, 1u);
 }
 
 struct PrimitiveOutput {
@@ -703,23 +808,19 @@ struct MeshOutput {
 
 var<workgroup> mesh_output: MeshOutput;
 
-@mesh(mesh_output) @payload(payload) @workgroup_size(1)
-fn ms_main(@builtin(workgroup_id) group: vec3<u32>) {
-    let piece = element(payload.piece);
-    let lod = Lod(payload.along, payload.across);
-    let cells = vec2<u32>(1u << payload.levels.x, 1u << payload.levels.y);
-    let first = group.xy * BLOCK;
-    let size = min(cells - first, vec2<u32>(BLOCK));
+// Writes the cells `first..first + size` of the patch at `place`, behind
+// `vertices` vertices and `triangles` triangles of other ones.
+fn emit(place: u32, first: vec2<u32>, size: vec2<u32>, vertices: u32, triangles: u32) {
+    let piece = element(payload.first + place);
+    let lod = Lod(payload.along[place], payload.across[place]);
+    let levels = payload.levels[place];
     let detail = lod_detail(lod);
-
-    mesh_output.vertex_count = (size.x + 1u) * (size.y + 1u);
-    mesh_output.primitive_count = size.x * size.y * 2u;
 
     for (var i = 0u; i <= size.x; i++) {
         for (var j = 0u; j <= size.y; j++) {
-            let uv = lod_uv(lod, payload.levels, first + vec2<u32>(i, j));
+            let uv = lod_uv(lod, levels, first + vec2<u32>(i, j));
             let point = surface_point(piece, uv);
-            mesh_output.vertices[i * (size.y + 1u) + j] = VertexOutput(
+            mesh_output.vertices[vertices + i * (size.y + 1u) + j] = VertexOutput(
                 args.view_projection * vec4<f32>(point.position, 1.0),
                 point.normal,
                 detail,
@@ -728,13 +829,43 @@ fn ms_main(@builtin(workgroup_id) group: vec3<u32>) {
     }
     for (var i = 0u; i < size.x; i++) {
         for (var j = 0u; j < size.y; j++) {
-            let a = i * (size.y + 1u) + j;
+            let a = vertices + i * (size.y + 1u) + j;
             let c = a + size.y + 1u;
-            let cell = (i * size.y + j) * 2u;
+            let cell = triangles + (i * size.y + j) * 2u;
             mesh_output.primitives[cell].indices = vec3<u32>(a, a + 1u, c);
             mesh_output.primitives[cell + 1u].indices = vec3<u32>(a + 1u, c + 1u, c);
         }
     }
+}
+
+@mesh(mesh_output) @payload(payload) @workgroup_size(1)
+fn ms_main(@builtin(workgroup_id) group: vec3<u32>) {
+    let word = payload.groups[group.x];
+    let place = word & 15u;
+    let count = (word >> 4u) & 15u;
+
+    if (count == 0u) {
+        // One block of a large patch.
+        let cells = cells_of(payload.levels[place]);
+        let first = vec2<u32>((word >> 8u) & 255u, (word >> 16u) & 255u) * BLOCK;
+        let size = min(cells - first, vec2<u32>(BLOCK));
+        mesh_output.vertex_count = (size.x + 1u) * (size.y + 1u);
+        mesh_output.primitive_count = size.x * size.y * 2u;
+        emit(place, first, size, 0u, 0u);
+        return;
+    }
+
+    // Several small patches, each of them whole.
+    var vertices = 0u;
+    var triangles = 0u;
+    for (var k = 0u; k < count; k++) {
+        let cells = cells_of(payload.levels[place + k]);
+        emit(place + k, vec2<u32>(0u), cells, vertices, triangles);
+        vertices += (cells.x + 1u) * (cells.y + 1u);
+        triangles += cells.x * cells.y * 2u;
+    }
+    mesh_output.vertex_count = vertices;
+    mesh_output.primitive_count = triangles;
 }
 ";
 
