@@ -931,6 +931,10 @@ fn ts_main(
 
 struct PrimitiveOutput {
     @builtin(triangle_indices) indices: vec3<u32>,
+    // Not read by anything. Without something per triangle besides its
+    // corners, naga gives DX12 an empty struct of outputs per triangle,
+    // which DXC crashes on. A cull flag instead crashes llvmpipe.
+    @location(7) @interpolate(flat) @per_primitive unused: u32,
 }
 
 struct MeshOutput {
@@ -1018,11 +1022,11 @@ fn ms_main(
         let cell = (triangle - base) / 2u;
         let a = vertex_base + (cell / size.y) * (size.y + 1u) + cell % size.y;
         let c = a + size.y + 1u;
+        var indices = vec3<u32>(a + 1u, c + 1u, c);
         if ((triangle - base) % 2u == 0u) {
-            mesh_output.primitives[triangle].indices = vec3<u32>(a, a + 1u, c);
-        } else {
-            mesh_output.primitives[triangle].indices = vec3<u32>(a + 1u, c + 1u, c);
+            indices = vec3<u32>(a, a + 1u, c);
         }
+        mesh_output.primitives[triangle] = PrimitiveOutput(indices, 0u);
     }
     if (lane == 0u) {
         mesh_output.vertex_count = vertices;
