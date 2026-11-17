@@ -141,6 +141,8 @@ struct Entry {
     /// Whether the words in the page are the value. If not, only the
     /// backend which computed it has them so far.
     resident: bool,
+    /// The entry this one is a part of. It owns no memory of its own.
+    alias_of: Option<ContentKey>,
 }
 
 pub struct Store {
@@ -186,13 +188,52 @@ impl Store {
     pub fn touch(&mut self, key: ContentKey) -> Option<Handle> {
         let entry = self.entries.get_mut(&key)?;
         entry.last_used = self.frame;
-        Some(entry.handle)
+        let (handle, parent) = (entry.handle, entry.alias_of);
+        // A part keeps what it is a part of.
+        if let Some(parent) = parent {
+            self.touch(parent);
+        }
+        Some(handle)
     }
 
     /// Whether the value of `key` can be read from the store right now.
     /// A value a backend keeps to itself has to be downloaded first.
     pub fn is_resident(&self, key: ContentKey) -> bool {
-        self.entries.get(&key).is_some_and(|entry| entry.resident)
+        self.entries.get(&key).is_some_and(|entry| self.resident(entry))
+    }
+
+    fn resident(&self, entry: &Entry) -> bool {
+        entry.resident || entry.alias_of.is_some_and(|parent| self.is_resident(parent))
+    }
+
+    /// Stores the words `start..start + len` of the value of `parent` under
+    /// `key` as well, without copying them. This is how a single element
+    /// of a value becomes a value of its own, on every backend at once.
+    ///
+    /// Returns `None` if `parent` is not here or too short.
+    pub fn alias(&mut self, key: ContentKey, parent: ContentKey, start: u32, len: u32) -> Option<Handle> {
+        if let Some(handle) = self.touch(key) {
+            return Some(handle);
+        }
+        let whole = self.touch(parent)?;
+        if start.checked_add(len)? > whole.len {
+            return None;
+        }
+        let handle = Handle {
+            page: whole.page,
+            offset: whole.offset + start,
+            len,
+        };
+        self.entries.insert(
+            key,
+            Entry {
+                handle,
+                last_used: self.frame,
+                resident: false,
+                alias_of: Some(parent),
+            },
+        );
+        Some(handle)
     }
 
     /// Stores `words` under `key`. An existing entry is kept as it is,
@@ -234,6 +275,7 @@ impl Store {
                 last_used: self.frame,
                 // Nothing is as good on one side as on the other.
                 resident: len == 0,
+                alias_of: None,
             },
         );
         handle
@@ -288,7 +330,7 @@ impl Store {
 
     /// The value of `key`, if it is here and not only on the backend.
     pub fn read<T: DataType>(&self, key: ContentKey) -> Option<&[T]> {
-        let entry = self.entries.get(&key).filter(|entry| entry.resident)?;
+        let entry = self.entries.get(&key).filter(|entry| self.resident(entry))?;
         Some(self.slice(entry.handle))
     }
 
@@ -313,10 +355,21 @@ impl Store {
             if self.used_words <= budget_words {
                 break;
             }
-            let handle = self.entries.remove(&key).unwrap().handle;
+            let Some(entry) = self.entries.remove(&key) else {
+                // A part which went along with what it is a part of.
+                continue;
+            };
+            evicted += 1;
+            if entry.alias_of.is_some() {
+                continue;
+            }
+            let handle = entry.handle;
             self.pages[handle.page as usize].free(handle.offset, handle.len);
             self.used_words -= handle.len as u64;
-            evicted += 1;
+            // Its parts point at memory which is free now.
+            let before = self.entries.len();
+            self.entries.retain(|_, entry| entry.alias_of != Some(key));
+            evicted += before - self.entries.len();
         }
         evicted
     }
@@ -462,6 +515,40 @@ mod tests {
         // An empty value is the same everywhere.
         store.reserve(key(4), 0);
         assert!(store.is_resident(key(4)));
+    }
+
+    #[test]
+    fn a_part_of_a_value_is_a_value_of_its_own() {
+        let mut store = Store::with_page_words(16);
+        store.insert(key(1), &[1, 2, 3, 4, 5, 6]);
+        let part = store.alias(key(2), key(1), 2, 2).unwrap();
+        assert_eq!((part.offset, part.len), (2, 2));
+        assert_eq!(store.read::<u32>(key(2)), Some(&[3, 4][..]));
+        // It costs nothing and is not written anywhere.
+        assert_eq!(store.used_words(), 6);
+        assert_eq!(store.take_dirty(), [(0, 0..6)]);
+
+        // Beyond the end of the value there is nothing to be a part of.
+        assert!(store.alias(key(3), key(1), 5, 2).is_none());
+        assert!(store.alias(key(3), key(9), 0, 1).is_none());
+
+        // A part of what only the backend has is only on the backend too,
+        // until the whole is brought over.
+        store.reserve(key(4), 4);
+        store.alias(key(5), key(4), 1, 1).unwrap();
+        assert!(!store.is_resident(key(5)));
+        store.fill(key(4), &[7, 8, 9, 10]);
+        assert_eq!(store.read::<u32>(key(5)), Some(&[8][..]));
+
+        // Using a part keeps the whole, and the parts go with the whole.
+        store.end_frame();
+        store.touch(key(2));
+        store.evict(0);
+        assert!(store.contains(key(1)) && store.contains(key(2)));
+        assert!(!store.contains(key(4)) && !store.contains(key(5)));
+        store.end_frame();
+        store.evict(0);
+        assert!(store.is_empty());
     }
 
     #[test]

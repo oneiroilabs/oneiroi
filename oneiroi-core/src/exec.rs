@@ -32,6 +32,48 @@ pub trait Executor {
     /// the store, so they can be read. A backend which keeps nothing to
     /// itself has nothing to do.
     fn download(&mut self, _store: &mut Store, _keys: &[ContentKey]) {}
+
+    /// Stores the values of `parts`, one after the other, as the value of
+    /// `output`. Every part is in the store already.
+    ///
+    /// This does it on the CPU. A backend which keeps values to itself can
+    /// do it without bringing them over.
+    fn gather(&mut self, store: &mut Store, parts: &[ContentKey], output: ContentKey) {
+        self.download(store, parts);
+        let mut words = Vec::new();
+        for part in parts {
+            if let Some(handle) = store.get(*part) {
+                words.extend_from_slice(store.words(handle));
+            }
+        }
+        store.insert(output, &words);
+    }
+}
+
+/// A call for each element, to be expanded once the element count is known.
+#[derive(Debug)]
+struct Expansion {
+    callee: ProgramId,
+    element: u32,
+    max: u32,
+    inputs: Box<[ContentKey]>,
+    outputs: Box<[ContentKey]>,
+}
+
+/// Something which was planned and has to run.
+#[derive(Debug)]
+enum Step {
+    Work(Work),
+    ForEach(Expansion),
+}
+
+/// A call for each element which had more elements than it may run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overflow {
+    /// The name of the program which was called.
+    pub program: String,
+    pub elements: u32,
+    pub max: u32,
 }
 
 /// Runs every node through its CPU kernel, one after the other.
@@ -115,6 +157,19 @@ impl Keys {
                     }
                     calls.push((index as u32, keys));
                 }
+                OpKind::ForEach {
+                    callee,
+                    element,
+                    max,
+                } => {
+                    // What comes out depends on what goes in and on what
+                    // is done for each element, not on how many there are.
+                    let callee = programs.get(callee).hash;
+                    let id = format!("for_each/{callee:x}/{element}/{max}");
+                    for (output, slot) in op.outputs.iter().enumerate() {
+                        slots[slot.0 as usize] = ContentKey::derive(&id, output as u32, &inputs);
+                    }
+                }
             }
         }
 
@@ -141,7 +196,7 @@ struct Planner<'a> {
     store: &'a mut Store,
     /// The parameter values of the instance being planned.
     params: &'a [Box<[u32]>],
-    work: &'a mut Vec<Work>,
+    work: &'a mut Vec<Step>,
     scheduled: &'a mut HashSet<ContentKey>,
 }
 
@@ -181,11 +236,35 @@ impl Planner<'_> {
                         };
                         let outputs = keys(&op.outputs);
                         self.scheduled.extend(outputs.iter().copied());
-                        self.work.push(Work {
+                        self.work.push(Step::Work(Work {
                             node,
                             inputs: keys(&op.inputs),
                             outputs,
-                        });
+                        }));
+                    }
+                    OpKind::ForEach {
+                        callee,
+                        element,
+                        max,
+                    } => {
+                        for input in &op.inputs {
+                            self.ensure(scope, *input);
+                        }
+                        let keys = |slots: &[SlotId]| {
+                            slots
+                                .iter()
+                                .map(|slot| scope.keys.slots[slot.0 as usize])
+                                .collect::<Box<[_]>>()
+                        };
+                        let outputs = keys(&op.outputs);
+                        self.scheduled.extend(outputs.iter().copied());
+                        self.work.push(Step::ForEach(Expansion {
+                            callee,
+                            element,
+                            max,
+                            inputs: keys(&op.inputs),
+                            outputs,
+                        }));
                     }
                     OpKind::Call(callee) => {
                         let program = self.programs.get(callee);
@@ -250,8 +329,9 @@ pub struct Engine<E: Executor = CpuExecutor> {
     programs: ProgramSet,
     store: Store,
     executor: E,
-    work: Vec<Work>,
+    work: Vec<Step>,
     scheduled: HashSet<ContentKey>,
+    overflows: Vec<Overflow>,
 }
 
 impl Default for Engine {
@@ -272,6 +352,7 @@ impl<E: Executor> Engine<E> {
             executor,
             work: Vec::new(),
             scheduled: HashSet::new(),
+            overflows: Vec::new(),
         }
     }
 
@@ -357,9 +438,8 @@ impl<E: Executor> Engine<E> {
     /// a backend sees everything that is new this frame at once. Returns
     /// how many nodes had to run.
     pub fn evaluate<'a>(&mut self, instances: impl IntoIterator<Item = &'a mut Instance>) -> usize {
-        let planned = self.plan(instances);
-        self.flush();
-        planned
+        self.plan(instances);
+        self.flush()
     }
 
     /// The first half of [`Engine::evaluate`]: finds out what has to run
@@ -397,12 +477,122 @@ impl<E: Executor> Engine<E> {
 
     /// The second half of [`Engine::evaluate`]: runs everything which was
     /// planned since the last time. Returns how many nodes ran.
+    ///
+    /// A call for each element can only be planned once it is known how
+    /// many elements there are, so that part of the planning happens here.
     pub fn flush(&mut self) -> usize {
-        let ran = self.work.len();
-        self.executor.execute(&mut self.store, &self.work);
+        let steps = std::mem::take(&mut self.work);
+        self.scheduled.clear();
+        self.overflows.clear();
+        self.run(steps)
+    }
+
+    /// The calls for each element which had to leave elements out during
+    /// the last [`Engine::flush`].
+    pub fn overflows(&self) -> &[Overflow] {
+        &self.overflows
+    }
+
+    fn run(&mut self, steps: Vec<Step>) -> usize {
+        let mut ran = 0;
+        let mut batch = Vec::new();
+        for step in steps {
+            match step {
+                Step::Work(work) => batch.push(work),
+                Step::ForEach(expansion) => {
+                    // Whatever the elements come from has to be there.
+                    ran += batch.len();
+                    self.executor.execute(&mut self.store, &batch);
+                    batch.clear();
+                    ran += self.expand(expansion);
+                }
+            }
+        }
+        ran += batch.len();
+        self.executor.execute(&mut self.store, &batch);
+        ran
+    }
+
+    /// Plans and runs the calls of one call for each element, and puts
+    /// their outputs together.
+    fn expand(&mut self, expansion: Expansion) -> usize {
+        let Expansion {
+            callee,
+            element,
+            max,
+            inputs,
+            outputs,
+        } = expansion;
+        let program = self.programs.get(callee);
+        let ty = program.slot(program.params[element as usize].slot).ty;
+        let source = inputs[element as usize];
+        let count = self
+            .store
+            .touch(source)
+            .map_or(0, |handle| handle.len / ty.words);
+        if count > max {
+            self.overflows.push(Overflow {
+                program: program.name.clone(),
+                elements: count,
+                max,
+            });
+        }
+
+        let mut steps = Vec::new();
+        let mut scheduled = HashSet::new();
+        let mut parts = vec![Vec::new(); program.outputs.len()];
+        let mut params = inputs.to_vec();
+        let resident = self.store.is_resident(source);
+        for index in 0..count.min(max) {
+            // Where the values are at hand an element is known by what it
+            // is: elements which did not change, or which are the same as
+            // another one, find their results. Otherwise it is known by
+            // where it is, which needs nothing from the backend.
+            let (start, words) = (index * ty.words, ty.words as usize);
+            let key = match resident {
+                true => {
+                    let all = self.store.words(self.store.get(source).unwrap());
+                    ContentKey::of_data(&ty, &all[start as usize..][..words])
+                }
+                false => ContentKey::derive("element", index, &[source]),
+            };
+            // An element is a part of what it is an element of, so it needs
+            // no copy on any backend.
+            self.store.alias(key, source, start, ty.words);
+            params[element as usize] = key;
+
+            let keys = Keys::derive(&self.programs, program, &params);
+            let scope = Scope {
+                program,
+                keys: &keys,
+                caller: None,
+            };
+            let mut planner = Planner {
+                programs: &self.programs,
+                store: &mut self.store,
+                // Every parameter is in the store already.
+                params: &[],
+                work: &mut steps,
+                scheduled: &mut scheduled,
+            };
+            for (parts, output) in parts.iter_mut().zip(&program.outputs) {
+                planner.ensure(&scope, output.slot);
+                parts.push(keys.slots[output.slot.0 as usize]);
+            }
+        }
+
+        let ran = self.run(steps);
+        for (parts, output) in parts.iter().zip(outputs.iter()) {
+            self.executor.gather(&mut self.store, parts, *output);
+        }
+        ran
+    }
+
+    /// Forgets what was planned and did not run yet, for when it is not
+    /// needed anymore. Nothing is lost: it is planned again when it is.
+    pub fn discard(&mut self) {
         self.work.clear();
         self.scheduled.clear();
-        ran
     }
 
     /// How many nodes are planned and did not run yet.
@@ -743,8 +933,139 @@ mod tests {
 
         assert_eq!(engine.flush(), 6);
         assert_eq!(engine.read::<f32>(&a, "out"), Some(&[12.5, 24.5, 36.5][..]));
+
+        // What is not needed anymore can be dropped, and planned again.
+        engine.set_param(&mut a, "scale", &[3f32]).unwrap();
+        assert_eq!(engine.plan([&mut a]), 2);
+        engine.discard();
+        assert_eq!((engine.pending(), engine.flush()), (0, 0));
+        assert_eq!(engine.plan([&mut a]), 2);
+        engine.flush();
         assert_eq!(engine.read::<f32>(&b, "out"), Some(&[13.5, 25.5, 37.5][..]));
         assert_eq!((engine.pending(), engine.flush()), (0, 0));
+    }
+
+    mod for_each {
+        use super::*;
+
+        /// `value * 10`, and how many values there were.
+        fn tenfold(engine: &mut Engine) -> ProgramId {
+            let mut b = ProgramBuilder::new("tenfold");
+            let value = b.param::<f32>("value", &[0.]);
+            let ten = b.constant::<f32>(&[10.]);
+            let out = b.node(&SCALE, &[value, ten]).unwrap()[0];
+            let sum = b.node(&SUM, &[out, value]).unwrap();
+            b.output("out", out);
+            b.output("count", sum[1]);
+            engine.add_program(b.finish())
+        }
+
+        fn each(engine: &mut Engine, max: u32) -> ProgramId {
+            let inner = tenfold(engine);
+            let mut b = ProgramBuilder::new("each");
+            let values = b.param::<f32>("values", &[1., 2., 3.]);
+            let out = b
+                .for_each(engine.programs(), inner, &[Some(values)], 0, max)
+                .unwrap();
+            b.output("out", out[0]);
+            b.output("count", out[1]);
+            engine.add_program(b.finish())
+        }
+
+        #[test]
+        fn a_program_runs_for_each_element() {
+            let mut engine = Engine::default();
+            let id = each(&mut engine, 100);
+            let mut instance = engine.instantiate(id);
+
+            // Two nodes for each of the three elements.
+            assert_eq!(engine.evaluate([&mut instance]), 6);
+            assert_eq!(engine.read::<f32>(&instance, "out"), Some(&[10., 20., 30.][..]));
+            // Every run saw a single element.
+            assert_eq!(engine.read::<u32>(&instance, "count"), Some(&[1, 1, 1][..]));
+            assert!(engine.overflows().is_empty());
+            assert_eq!(engine.evaluate([&mut instance]), 0);
+        }
+
+        #[test]
+        fn elements_which_stay_the_same_are_not_run_again() {
+            let mut engine = Engine::default();
+            let id = each(&mut engine, 100);
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+
+            // One new element, and one which is there twice now.
+            engine
+                .set_param(&mut instance, "values", &[1f32, 2., 5., 5.])
+                .unwrap();
+            assert_eq!(engine.evaluate([&mut instance]), 2);
+            assert_eq!(
+                engine.read::<f32>(&instance, "out"),
+                Some(&[10., 20., 50., 50.][..])
+            );
+
+            engine.set_param(&mut instance, "values", &[] as &[f32]).unwrap();
+            assert_eq!(engine.evaluate([&mut instance]), 0);
+            assert_eq!(engine.read::<f32>(&instance, "out"), Some(&[][..]));
+        }
+
+        #[test]
+        fn more_elements_than_allowed_are_left_out_and_reported() {
+            let mut engine = Engine::default();
+            let id = each(&mut engine, 2);
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+
+            assert_eq!(engine.read::<f32>(&instance, "out"), Some(&[10., 20.][..]));
+            assert_eq!(
+                engine.overflows(),
+                [Overflow {
+                    program: "tenfold".into(),
+                    elements: 3,
+                    max: 2
+                }]
+            );
+            // Nothing ran the next time, so nothing overflowed.
+            engine.evaluate([&mut instance]);
+            assert!(engine.overflows().is_empty());
+        }
+
+        #[test]
+        fn calls_for_each_element_can_be_nested() {
+            let mut engine = Engine::default();
+            let each = each(&mut engine, 100);
+
+            // For each list of values (here: twice the same), all of them.
+            let mut b = ProgramBuilder::new("each of each");
+            let values = b.param::<f32>("values", &[1., 2.]);
+            let pairs = b.node(&SUM, &[values, values]).unwrap()[0];
+            let out = b
+                .for_each(engine.programs(), each, &[Some(pairs)], 0, 100)
+                .unwrap();
+            b.output("out", out[0]);
+            let id = engine.add_program(b.finish());
+            let mut instance = engine.instantiate(id);
+            engine.evaluate([&mut instance]);
+
+            // 2 and 4, each a list of one, times ten.
+            assert_eq!(engine.read::<f32>(&instance, "out"), Some(&[20., 40.][..]));
+            assert_eq!(engine.programs_mut().retain([id]), 0);
+        }
+
+        #[test]
+        fn something_has_to_be_given_to_take_the_elements_of() {
+            let mut engine = Engine::default();
+            let inner = tenfold(&mut engine);
+            let mut b = ProgramBuilder::new("broken");
+            assert!(matches!(
+                b.for_each(engine.programs(), inner, &[None], 0, 1),
+                Err(BuildError::Element { .. })
+            ));
+            assert!(matches!(
+                b.for_each(engine.programs(), inner, &[None], 3, 1),
+                Err(BuildError::Element { .. })
+            ));
+        }
     }
 
     #[test]

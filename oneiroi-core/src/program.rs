@@ -57,6 +57,15 @@ pub enum OpKind {
     Node(&'static NodeDef),
     /// Runs another program. `inputs` are its parameters, in order.
     Call(ProgramId),
+    /// Runs another program once for every element of its parameter
+    /// `element`, with that element alone as the value of it. Every output
+    /// is what all of the runs gave, one after the other. At most `max`
+    /// elements are run, the rest is left out and reported.
+    ForEach {
+        callee: ProgramId,
+        element: u32,
+        max: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -144,7 +153,7 @@ impl ProgramSet {
             .into_iter()
             .flat_map(|program| program.ops.iter())
             .filter_map(|op| match op.kind {
-                OpKind::Call(callee) => Some(callee),
+                OpKind::Call(callee) | OpKind::ForEach { callee, .. } => Some(callee),
                 OpKind::Node(_) => None,
             })
     }
@@ -208,6 +217,9 @@ pub enum BuildError {
     /// Every port is fine on its own, but there is no version of the
     /// generic node for these data types together.
     Unresolved { target: String },
+    /// A call for each element has to be given something to take the
+    /// elements of.
+    Element { target: String },
 }
 
 impl fmt::Display for BuildError {
@@ -235,6 +247,9 @@ impl fmt::Display for BuildError {
             ),
             Self::Unresolved { target } => {
                 write!(f, "`{target}` has no version for these inputs")
+            }
+            Self::Element { target } => {
+                write!(f, "`{target}` is called for each element of nothing")
             }
         }
     }
@@ -418,6 +433,37 @@ impl ProgramBuilder {
             .map(|output| program.slot(output.slot).ty)
             .collect();
         Ok(self.push_op(OpKind::Call(callee), inputs, types))
+    }
+
+    /// Calls `callee` once for every element of the argument at `element`,
+    /// see [`OpKind::ForEach`]. The other arguments are the same for every
+    /// call. An argument which is `None` uses the default of the parameter
+    /// it stands for.
+    pub fn for_each(
+        &mut self,
+        programs: &ProgramSet,
+        callee: ProgramId,
+        args: &[Option<SlotId>],
+        element: usize,
+        max: u32,
+    ) -> Result<Vec<SlotId>, BuildError> {
+        let program = programs.get(callee);
+        if element >= args.len() || args[element].is_none() {
+            return Err(BuildError::Element {
+                target: program.name.clone(),
+            });
+        }
+        let outputs = self.call(programs, callee, args)?;
+
+        // It was built as a call, which it is in everything but this.
+        let op = self.ops.last_mut().unwrap();
+        op.kind = OpKind::ForEach {
+            callee,
+            element: element as u32,
+            max,
+        };
+        ("for_each", element, max).hash(&mut self.hasher);
+        Ok(outputs)
     }
 
     fn check(
