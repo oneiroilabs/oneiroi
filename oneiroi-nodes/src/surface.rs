@@ -4,7 +4,10 @@ use std::marker::PhantomData;
 
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
-    node::{GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape},
+    node::{
+        Drawable, GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Shape,
+        Topology,
+    },
     types::{DataType, PortDefault, Trait},
 };
 
@@ -27,6 +30,34 @@ pub trait Surface: DataType {
     fn uv(&self, u: f32, v: f32) -> Vec2 {
         Vec2::new(v, u)
     }
+
+    /// [`Surface::point`] for the GPU, which draws a surface without it
+    /// ever becoming a mesh:
+    /// `fn surface_point(piece: Self, uv: vec2<f32>) -> SurfacePoint`,
+    /// where a `SurfacePoint` is a `position` and a `normal`. Both have to
+    /// compute the same thing.
+    const WGSL: &'static str;
+}
+
+/// A sphere around the patches in `words`, found by looking at a few
+/// points of each of them.
+fn bounds<S: Surface>(words: &[u32]) -> Option<([f32; 3], f32)> {
+    const STEPS: usize = 4;
+
+    let patches: &[S] = bytemuck::try_cast_slice(words).ok()?;
+    let points = patches.iter().flat_map(|patch| {
+        (0..=STEPS).flat_map(move |ring| {
+            (0..=STEPS).map(move |side| {
+                patch
+                    .point(ring as f32 / STEPS as f32, side as f32 / STEPS as f32)
+                    .0
+            })
+        })
+    });
+    let (min, max) = points.fold((Vec3::MAX, Vec3::MIN), |(min, max), point| {
+        (min.min(point), max.max(point))
+    });
+    (min.x <= max.x).then(|| (((min + max) * 0.5).to_array(), (max - min).length() * 0.5))
 }
 
 const RINGS: PortDefault = PortDefault::U32(&[16]);
@@ -80,6 +111,12 @@ pub fn register_surface<S: Surface>(registry: &mut NodeRegistry) {
         gpu: &[],
     });
     registry.register_instance(&TESSELLATE, node);
+    registry.register_drawable(Drawable {
+        ty: S::INFO,
+        topology: Topology::Surface,
+        wgsl: <S as Surface>::WGSL,
+        bounds: bounds::<S>,
+    });
 }
 
 /// Every patch becomes a grid of its own. Patches which meet share their

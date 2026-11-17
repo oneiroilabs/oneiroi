@@ -226,6 +226,34 @@ pub struct GenericNode {
     pub outputs: &'static [GenericPort],
 }
 
+/// How the elements of a [`Drawable`] type turn into something visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topology {
+    /// Every element is a patch of a surface: a point for every `uv` in
+    /// the unit square.
+    Surface,
+    /// Every element is a piece of a line: a point for every `u` in `0..=1`.
+    Line,
+}
+
+/// A data type a backend can draw as it is, without anybody having turned
+/// it into triangles first.
+///
+/// `wgsl` holds the function which says where the points of an element
+/// are. For a [`Topology::Surface`] that is
+/// `fn surface_point(piece: Type, uv: vec2<f32>) -> SurfacePoint`, and
+/// for a [`Topology::Line`] `fn line_point(piece: Type, u: f32) -> vec3<f32>`.
+/// See [`shader::draw`](crate::shader::draw).
+#[derive(Debug, Clone, Copy)]
+pub struct Drawable {
+    pub ty: TypeInfo,
+    pub topology: Topology,
+    pub wgsl: &'static str,
+    /// Center and radius of a sphere around all of `words`, which are
+    /// elements of the type. `None` if there is nothing to be around.
+    pub bounds: fn(words: &[u32]) -> Option<([f32; 3], f32)>,
+}
+
 struct Generic {
     node: &'static GenericNode,
     instances: Vec<&'static NodeDef>,
@@ -236,6 +264,8 @@ struct Generic {
 pub struct NodeRegistry {
     nodes: HashMap<&'static str, &'static NodeDef>,
     generics: HashMap<&'static str, Generic>,
+    /// By the name of the data type.
+    drawables: HashMap<&'static str, Drawable>,
 }
 
 impl NodeRegistry {
@@ -289,6 +319,16 @@ impl NodeRegistry {
         if !entry.instances.iter().any(|known| std::ptr::eq(*known, node)) {
             entry.instances.push(node);
         }
+    }
+
+    /// Says how values of a data type can be drawn.
+    pub fn register_drawable(&mut self, drawable: Drawable) {
+        self.drawables.insert(drawable.ty.name, drawable);
+    }
+
+    /// How values of `ty` can be drawn, if they can.
+    pub fn drawable(&self, ty: &TypeInfo) -> Option<&Drawable> {
+        self.drawables.get(ty.name).filter(|drawable| drawable.ty == *ty)
     }
 
     pub fn get(&self, id: &str) -> Option<&'static NodeDef> {

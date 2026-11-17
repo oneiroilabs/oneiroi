@@ -183,6 +183,19 @@ impl GpuExecutor {
         }
     }
 
+    /// The buffer which mirrors a page of the store. Whoever draws a value
+    /// binds the page its handle names. Call [`GpuExecutor::sync`] first.
+    pub fn page(&self, index: u32) -> Option<&wgpu::Buffer> {
+        self.pages.get(index as usize)
+    }
+
+    /// Brings the buffers up to date with what the CPU wrote into the
+    /// store. Kernels do this themselves, anything else which reads the
+    /// buffers has to ask for it.
+    pub fn sync(&mut self, store: &mut Store) {
+        self.upload(store);
+    }
+
     /// Brings the buffers up to date with the pages of the store.
     fn upload(&mut self, store: &mut Store) {
         let dirty = store.take_dirty();
@@ -464,6 +477,47 @@ impl Executor for GpuExecutor {
             store.fill(*key, &words[offset..offset + handle.len as usize]);
             offset += handle.len as usize;
             self.stats.downloads += 1;
+        }
+    }
+}
+
+/// An [`Executor`] for when the graphics device only turns up later, as it
+/// does inside a user interface which owns it.
+///
+/// Until a device is [attached](DeferredExecutor::attach) everything runs
+/// on the CPU. Nothing is lost by that: what the CPU computed is uploaded
+/// once the device is there.
+#[derive(Default)]
+pub struct DeferredExecutor {
+    gpu: Option<GpuExecutor>,
+    cpu: CpuExecutor,
+}
+
+impl DeferredExecutor {
+    pub fn attach(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
+        self.gpu = Some(GpuExecutor::new(device, queue));
+    }
+
+    pub fn gpu(&self) -> Option<&GpuExecutor> {
+        self.gpu.as_ref()
+    }
+
+    pub fn gpu_mut(&mut self) -> Option<&mut GpuExecutor> {
+        self.gpu.as_mut()
+    }
+}
+
+impl Executor for DeferredExecutor {
+    fn execute(&mut self, store: &mut Store, work: &[Work]) {
+        match &mut self.gpu {
+            Some(gpu) => gpu.execute(store, work),
+            None => self.cpu.execute(store, work),
+        }
+    }
+
+    fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
+        if let Some(gpu) = &mut self.gpu {
+            gpu.download(store, keys);
         }
     }
 }

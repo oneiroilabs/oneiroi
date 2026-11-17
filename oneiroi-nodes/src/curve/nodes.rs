@@ -100,7 +100,7 @@ pub static FRAMES: NodeDef = NodeDef {
     shape: Shape::Expand,
     cpu: frames,
     gpu: &[GpuKernel {
-        wgsl: include_str!("frames.wgsl"),
+        wgsl: concat!(include_str!("curve.wgsl"), include_str!("frames.wgsl")),
         entry: "curve_frames",
         requires: Caps::NONE,
         len: frames_len,
@@ -268,6 +268,12 @@ mod tests {
             }
         }
         assert_eq!(checked, 1);
+
+        // And so does everything which says it can be drawn as it is.
+        for ty in registry.implementors(crate::surface::SURFACE) {
+            let drawable = registry.drawable(&ty).expect("every surface can be drawn");
+            oneiroi_core::shader::draw(drawable).unwrap_or_else(|e| panic!("{e}"));
+        }
     }
 
     #[test]

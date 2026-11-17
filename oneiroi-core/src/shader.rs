@@ -8,7 +8,7 @@
 use std::fmt::{self, Write};
 
 use crate::{
-    node::{GpuKernel, NodeDef},
+    node::{Drawable, GpuKernel, NodeDef, Topology},
     types::{Field, FieldType, Layout, TypeInfo},
 };
 
@@ -253,6 +253,137 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
 
     validate(node.id, &wgsl)?;
     Ok(ComputeShader { wgsl, call_words })
+}
+
+/// A shader which draws the elements of a [`Drawable`] type straight out
+/// of a page of the store. No vertices are stored anywhere: every one is
+/// computed from the index it is drawn with.
+///
+/// The entry points are `vs_main` and `fs_main` and everything is bound in
+/// group 0:
+///
+/// - binding 0: the page the elements live in, read-only `array<u32>`
+/// - binding 1: a uniform [`DrawArgs`]
+///
+/// Draw every element as one instance. A surface is a triangle list with
+/// `rings * sides * 6` vertices, a line a line list with `rings * 2`.
+#[derive(Debug, Clone)]
+pub struct DrawShader {
+    pub wgsl: String,
+}
+
+/// The uniform of a [`DrawShader`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DrawArgs {
+    /// Column-major, as WGSL wants it.
+    pub view_projection: [[f32; 4]; 4],
+    /// Points from what is drawn towards the light.
+    pub light: [f32; 4],
+    pub color: [f32; 4],
+    /// The word the first element starts at in the page.
+    pub offset: u32,
+    /// Steps along every element.
+    pub rings: u32,
+    /// Steps across every patch of a surface.
+    pub sides: u32,
+    pub _padding: u32,
+}
+
+const DRAW_ARGS: &str = "struct DrawArgs {
+    view_projection: mat4x4<f32>,
+    light: vec4<f32>,
+    color: vec4<f32>,
+    offset: u32,
+    rings: u32,
+    sides: u32,
+}
+
+@group(0) @binding(0) var<storage, read> page: array<u32>;
+@group(0) @binding(1) var<uniform> args: DrawArgs;
+";
+
+const SURFACE_STAGES: &str = "struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    // Six vertices per cell of the grid: two triangles which wind the
+    // way the mesh of the same surface does.
+    let cell = vertex / 6u;
+    var corners = array<vec2<u32>, 6>(
+        vec2<u32>(0u, 0u), vec2<u32>(0u, 1u), vec2<u32>(1u, 0u),
+        vec2<u32>(0u, 1u), vec2<u32>(1u, 1u), vec2<u32>(1u, 0u),
+    );
+    let corner = corners[vertex % 6u];
+    let ring = cell / args.sides + corner.x;
+    let side = cell % args.sides + corner.y;
+    let uv = vec2<f32>(f32(ring) / f32(args.rings), f32(side) / f32(args.sides));
+
+    let point = surface_point(element(instance), uv);
+    return VertexOutput(args.view_projection * vec4<f32>(point.position, 1.0), point.normal);
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Both sides are lit the same, a preview should never hide a surface
+    // just because it faces the wrong way.
+    let diffuse = abs(dot(normalize(input.normal), normalize(args.light.xyz)));
+    return vec4<f32>(args.color.rgb * (0.2 + 0.8 * diffuse), 1.0);
+}
+";
+
+const LINE_STAGES: &str = "@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+    // Two vertices per step: where it starts and where it ends.
+    let step = vertex / 2u + vertex % 2u;
+    let position = line_point(element(instance), f32(step) / f32(args.rings));
+    return args.view_projection * vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(args.color.rgb, 1.0);
+}
+";
+
+/// Writes the shader which draws values of a drawable type, and checks
+/// that it compiles.
+pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
+    let ty = &drawable.ty;
+    let mut wgsl = String::new();
+    let out = &mut wgsl;
+
+    let _ = writeln!(out, "// Generated to draw `{}`.\n", ty.name);
+    declare(out, &mut Vec::new(), ty);
+    if drawable.topology == Topology::Surface {
+        let _ = writeln!(
+            out,
+            "struct SurfacePoint {{\n    position: vec3<f32>,\n    normal: vec3<f32>,\n}}\n"
+        );
+    }
+    let _ = writeln!(out, "{DRAW_ARGS}");
+    let _ = writeln!(
+        out,
+        "fn element(index: u32) -> {} {{\n    let base = args.offset + index * {}u;\n    return {};\n}}\n",
+        ty.wgsl,
+        ty.words,
+        read_element(ty, "page", "base")
+    );
+    let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
+    let _ = write!(
+        out,
+        "{}",
+        match drawable.topology {
+            Topology::Surface => SURFACE_STAGES,
+            Topology::Line => LINE_STAGES,
+        }
+    );
+
+    validate(ty.name, &wgsl)?;
+    Ok(DrawShader { wgsl })
 }
 
 fn validate(node: &'static str, wgsl: &str) -> Result<(), ShaderError> {

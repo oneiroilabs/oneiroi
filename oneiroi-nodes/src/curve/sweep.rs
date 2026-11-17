@@ -67,6 +67,8 @@ impl Surface for TubePatch {
     fn uv(&self, u: f32, v: f32) -> Vec2 {
         Vec2::new(v, self.along[0] + (self.along[1] - self.along[0]) * u)
     }
+
+    const WGSL: &'static str = concat!(include_str!("curve.wgsl"), include_str!("tube.wgsl"));
 }
 
 /// One segment of a profile swept along one segment of a curve.
@@ -130,6 +132,8 @@ impl Surface for SweptPatch {
             self.along[0] + (self.along[1] - self.along[0]) * u,
         )
     }
+
+    const WGSL: &'static str = concat!(include_str!("curve.wgsl"), include_str!("swept.wgsl"));
 }
 
 /// The surface a profile leaves behind when it is moved along a curve.

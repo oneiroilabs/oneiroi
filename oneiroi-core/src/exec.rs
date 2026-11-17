@@ -295,6 +295,16 @@ impl<E: Executor> Engine<E> {
         &self.executor
     }
 
+    pub fn executor_mut(&mut self) -> &mut E {
+        &mut self.executor
+    }
+
+    /// The store together with the backend that fills it, for whoever
+    /// has to use both at once.
+    pub fn parts_mut(&mut self) -> (&mut Store, &mut E) {
+        (&mut self.store, &mut self.executor)
+    }
+
     /// A new instance with every parameter at its default.
     pub fn instantiate(&self, program: ProgramId) -> Instance {
         let decl = self.programs.get(program);
@@ -347,9 +357,20 @@ impl<E: Executor> Engine<E> {
     /// a backend sees everything that is new this frame at once. Returns
     /// how many nodes had to run.
     pub fn evaluate<'a>(&mut self, instances: impl IntoIterator<Item = &'a mut Instance>) -> usize {
-        self.work.clear();
-        self.scheduled.clear();
+        let planned = self.plan(instances);
+        self.flush();
+        planned
+    }
 
+    /// The first half of [`Engine::evaluate`]: finds out what has to run
+    /// for the outputs of the instances, without running it. Returns how
+    /// many nodes that is.
+    ///
+    /// Planning never needs the backend. The keys of all outputs are known
+    /// afterwards, and [`Engine::flush`] can happen later and somewhere
+    /// else, for example where a graphics device is at hand.
+    pub fn plan<'a>(&mut self, instances: impl IntoIterator<Item = &'a mut Instance>) -> usize {
+        let before = self.work.len();
         for instance in instances {
             let program = self.programs.get(instance.program);
             let keys = instance
@@ -371,8 +392,21 @@ impl<E: Executor> Engine<E> {
                 planner.ensure(&scope, output.slot);
             }
         }
+        self.work.len() - before
+    }
 
+    /// The second half of [`Engine::evaluate`]: runs everything which was
+    /// planned since the last time. Returns how many nodes ran.
+    pub fn flush(&mut self) -> usize {
+        let ran = self.work.len();
         self.executor.execute(&mut self.store, &self.work);
+        self.work.clear();
+        self.scheduled.clear();
+        ran
+    }
+
+    /// How many nodes are planned and did not run yet.
+    pub fn pending(&self) -> usize {
         self.work.len()
     }
 
@@ -683,6 +717,29 @@ mod tests {
         fn versions_have_to_line_up_with_their_generic_node() {
             NodeRegistry::new().register_instance(&DOUBLE, &SCALE);
         }
+    }
+
+    #[test]
+    fn planning_and_running_can_be_apart() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(program());
+        let mut a = engine.instantiate(id);
+        let mut b = engine.instantiate(id);
+        engine.set_param(&mut b, "offset", &[1.5f32]).unwrap();
+
+        // Planned in two goes, the second one only adds what is new.
+        assert_eq!(engine.plan([&mut a]), 4);
+        assert_eq!(engine.plan([&mut b]), 2);
+        assert_eq!(engine.pending(), 6);
+
+        // The keys are known, the values are not there yet.
+        assert!(engine.output_key(&a, "out").is_some());
+        assert_eq!(engine.read::<f32>(&a, "out"), None);
+
+        assert_eq!(engine.flush(), 6);
+        assert_eq!(engine.read::<f32>(&a, "out"), Some(&[12.5, 24.5, 36.5][..]));
+        assert_eq!(engine.read::<f32>(&b, "out"), Some(&[13.5, 25.5, 37.5][..]));
+        assert_eq!((engine.pending(), engine.flush()), (0, 0));
     }
 
     #[test]

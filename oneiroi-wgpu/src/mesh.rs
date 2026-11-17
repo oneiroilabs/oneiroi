@@ -154,9 +154,16 @@ impl MeshPreview {
     }
 
     fn depth(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+        depth_texture(device, size)
+    }
+}
+
+/// A depth buffer for a target of `size` pixels.
+pub(crate) fn depth_texture(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
+    {
         device
             .create_texture(&wgpu::TextureDescriptor {
-                label: Some("Mesh Preview Depth"),
+                label: Some("Oneiroi Depth"),
                 size: wgpu::Extent3d {
                     width: size.0.max(1),
                     height: size.1.max(1),
@@ -171,7 +178,36 @@ impl MeshPreview {
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     }
+}
 
+/// Limits what `pass` draws to `bounds` (x, y, width, height in pixels of
+/// the target `depth` belongs to). Returns whether anything is left.
+pub(crate) fn restrict(
+    pass: &mut wgpu::RenderPass<'_>,
+    depth: &wgpu::TextureView,
+    bounds: Option<(f32, f32, f32, f32)>,
+) -> bool {
+    let Some((x, y, width, height)) = bounds else {
+        return true;
+    };
+    let texture = depth.texture();
+    let (max_x, max_y) = (texture.width() as f32, texture.height() as f32);
+    let (left, top) = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
+    let (right, bottom) = ((x + width).clamp(0.0, max_x), (y + height).clamp(0.0, max_y));
+    if right - left < 1.0 || bottom - top < 1.0 {
+        return false;
+    }
+    pass.set_viewport(x, y, width, height, 0.0, 1.0);
+    pass.set_scissor_rect(
+        left as u32,
+        top as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    );
+    true
+}
+
+impl MeshPreview {
     /// Replaces the mesh that is drawn. Call it when the mesh changed, not
     /// every frame: it uploads everything again.
     pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: Option<MeshData<'_>>) {
@@ -289,21 +325,8 @@ impl MeshPreview {
             multiview_mask: None,
         });
 
-        if let Some((x, y, width, height)) = bounds {
-            let texture = self.depth.texture();
-            let (max_x, max_y) = (texture.width() as f32, texture.height() as f32);
-            let (left, top) = (x.clamp(0.0, max_x), y.clamp(0.0, max_y));
-            let (right, bottom) = ((x + width).clamp(0.0, max_x), (y + height).clamp(0.0, max_y));
-            if right - left < 1.0 || bottom - top < 1.0 {
-                return;
-            }
-            pass.set_viewport(x, y, width, height, 0.0, 1.0);
-            pass.set_scissor_rect(
-                left as u32,
-                top as u32,
-                (right - left) as u32,
-                (bottom - top) as u32,
-            );
+        if !restrict(&mut pass, &self.depth, bounds) {
+            return;
         }
 
         pass.set_pipeline(&self.pipeline);

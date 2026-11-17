@@ -10,11 +10,13 @@ use winit::{event_loop::OwnedDisplayHandle, window::Window};
 
 use crate::orbit::OrbitCamera;
 
+pub mod draw;
 pub mod executor;
 pub mod mesh;
 pub mod orbit;
 
-pub use executor::{GpuExecutor, GpuStats};
+pub use draw::{DrawStage, DrawView};
+pub use executor::{DeferredExecutor, GpuExecutor, GpuStats};
 pub use mesh::{MeshData, MeshPreview};
 
 pub const DEBUG: bool = true;
