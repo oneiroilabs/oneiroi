@@ -8,6 +8,11 @@ description.workspace = true
 version.workspace = true
 edition.workspace = true
 
+[features]
+# DXC for DX12, see the feature of the same name of `oneiroi-wgpu`. The
+# device of iced is made by the same wgpu, so it gets it as well.
+dxc = ["oneiroi-wgpu/dxc"]
+
 [dependencies]
 iced = { version = "0.15.0-dev", default-features = false, features = [
     "wgpu",

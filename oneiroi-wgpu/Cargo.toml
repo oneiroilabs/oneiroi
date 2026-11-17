@@ -9,6 +9,12 @@ repository.workspace = true
 readme.workspace = true
 publish = true
 
+[features]
+# Compiles shaders for DX12 with DXC built into the program, which DX12
+# needs for mesh shaders. Without it wgpu looks for `dxcompiler.dll` and
+# else falls back to FXC, which has none. Only does anything on Windows.
+dxc = ["wgpu/static-dxc"]
+
 [dependencies]
 #wgpu = { version = "30.0.0", default-features = false, features = [
 #    "dx12",
