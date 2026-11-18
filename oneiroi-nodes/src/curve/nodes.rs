@@ -156,14 +156,14 @@ pub static NURBS: NodeDef = NodeDef {
 
 /// The knot span of every segment of every curve.
 fn span_words(inputs: &Inputs<'_>) -> Vec<u32> {
-    let knots = inputs.get::<f32>(1);
-    let knot_groups = inputs.groups(1);
     let mut words = Vec::new();
-    for (group, curve) in inputs.groups(0).into_iter().enumerate() {
-        let points = curve.len();
-        let knots = curve_knots(points, knots, &knot_groups, group);
-        if points >= 4 && knots.len() == points + 4 {
-            words.extend(spans(points, &knots).map(|span| span as u32));
+    for curve in curve_spans(inputs) {
+        match curve {
+            CurveSpans::Uniform(points) => words.extend(3..points as u32),
+            CurveSpans::Knots(points, knots) => {
+                words.extend(spans(points, knots).map(|span| span as u32));
+            }
+            CurveSpans::None => {}
         }
     }
     words
@@ -215,18 +215,51 @@ fn curve_knots<'a>(
     }
 }
 
-/// How many segments each curve gets, without making them.
-fn segment_counts<'a>(inputs: &'a Inputs<'_>) -> impl Iterator<Item = usize> + 'a {
+/// The knot spans which become segments, of one curve.
+enum CurveSpans<'a> {
+    /// No knots of its own: clamped and uniform, so every span between
+    /// the ends is a segment, of this many points.
+    Uniform(usize),
+    /// Knots of its own, for this many points.
+    Knots(usize, &'a [f32]),
+    /// No curve.
+    None,
+}
+
+impl CurveSpans<'_> {
+    fn count(&self) -> usize {
+        match self {
+            CurveSpans::Uniform(points) => points - 3,
+            CurveSpans::Knots(points, knots) => spans(*points, knots).count(),
+            CurveSpans::None => 0,
+        }
+    }
+}
+
+/// The spans of every curve, without making a knot vector for curves
+/// which have none: that is asked for every call, and often.
+fn curve_spans<'a>(inputs: &'a Inputs<'_>) -> impl Iterator<Item = CurveSpans<'a>> + 'a {
     let knots = inputs.get::<f32>(1);
     let knot_groups = inputs.groups(1);
     inputs.groups(0).into_iter().enumerate().map(move |(group, curve)| {
         let points = curve.len();
-        let knots = curve_knots(points, knots, &knot_groups, group);
-        match points >= 4 && knots.len() == points + 4 {
-            true => spans(points, &knots).count(),
-            false => 0,
+        if points < 4 {
+            return CurveSpans::None;
+        }
+        if knots.is_empty() {
+            return CurveSpans::Uniform(points);
+        }
+        let knots = &knots[knot_groups[group.min(knot_groups.len() - 1)].clone()];
+        match knots.len() == points + 4 {
+            true => CurveSpans::Knots(points, knots),
+            false => CurveSpans::None,
         }
     })
+}
+
+/// How many segments each curve gets, without making them.
+fn segment_counts<'a>(inputs: &'a Inputs<'_>) -> impl Iterator<Item = usize> + 'a {
+    curve_spans(inputs).map(|curve| curve.count())
 }
 
 fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
