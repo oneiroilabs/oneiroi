@@ -19,6 +19,10 @@ pub struct PortDecl {
     pub card: Card,
     /// Only meaningful for grouped outputs.
     pub groups: Groups,
+    /// Only meaningful for outputs of instances: the input whose shape
+    /// they refer to. Either the input is the shape, or instances of it
+    /// and the shape is theirs.
+    pub prototype: Option<usize>,
 }
 
 impl PortDecl {
@@ -30,7 +34,27 @@ impl PortDecl {
             default: PortDefault::Empty,
             card: Card::Many,
             groups: Groups::Own,
+            prototype: None,
         }
+    }
+
+    /// A port of a type only known by its [`TypeInfo`], like instances.
+    pub const fn of(name: &'static str, ty: TypeInfo) -> Self {
+        Self {
+            name,
+            ty,
+            default: PortDefault::Empty,
+            card: Card::Many,
+            groups: Groups::Own,
+            prototype: None,
+        }
+    }
+
+    /// An output of instances of the shape of input `input`, see
+    /// [`PortDecl::prototype`].
+    pub const fn instances_of(mut self, input: usize) -> Self {
+        self.prototype = Some(input);
+        self
     }
 
     pub const fn with_default(mut self, default: PortDefault) -> Self {
@@ -115,7 +139,7 @@ impl<'a> Inputs<'a> {
     }
 
     pub fn get<T: DataType>(&self, index: usize) -> &'a [T] {
-        debug_assert_eq!(self.ports[index].ty, T::INFO, "{}", self.ports[index].name);
+        debug_assert!(self.ports[index].ty.stored_as(&T::INFO), "{}", self.ports[index].name);
         self.store.slice(self.handles[index])
     }
 
@@ -147,6 +171,33 @@ impl<'a> Inputs<'a> {
         }
     }
 
+    /// The shape an input of instances refers to.
+    pub fn prototype<T: DataType>(&self, index: usize) -> &'a [T] {
+        let hidden = hidden_prototype(self.ports, index).expect("only instances have a shape");
+        self.store.slice(self.handles[hidden])
+    }
+
+    /// How many elements the shape of an input of instances has.
+    pub fn prototype_len(&self, index: usize) -> usize {
+        let hidden = hidden_prototype(self.ports, index).expect("only instances have a shape");
+        let prototype = self.ports[index].ty.prototype.expect("only instances have a shape");
+        (self.handles[hidden].len / prototype.words) as usize
+    }
+
+    /// The groups of the shape an input of instances refers to.
+    pub fn prototype_groups(&self, index: usize) -> Vec<std::ops::Range<usize>> {
+        let hidden = hidden_prototype(self.ports, index).expect("only instances have a shape");
+        let len = self.prototype_len(index);
+        let offsets: &[u32] = self.store.slice(self.handles[hidden + 1]);
+        match offsets.is_empty() {
+            true => vec![0..len],
+            false => offsets
+                .windows(2)
+                .map(|pair| (pair[0] as usize).min(len)..(pair[1] as usize).min(len))
+                .collect(),
+        }
+    }
+
     /// How many groups an input has, without looking at its offsets: they
     /// may be on the GPU only. The same as the length of
     /// [`Inputs::groups`].
@@ -166,6 +217,17 @@ impl<'a> Inputs<'a> {
 pub(crate) fn hidden_input(ports: &[PortDecl], index: usize) -> Option<usize> {
     (ports[index].card == Card::Grouped).then(|| {
         ports.len() + ports[..index].iter().filter(|p| p.card == Card::Grouped).count()
+    })
+}
+
+/// Where the shape of input `index` of instances is handed over, and its
+/// offsets right after: behind the offsets of all grouped inputs, in the
+/// order of the inputs of instances.
+pub(crate) fn hidden_prototype(ports: &[PortDecl], index: usize) -> Option<usize> {
+    ports[index].ty.prototype.map(|_| {
+        let grouped = ports.iter().filter(|p| p.card == Card::Grouped).count();
+        let before = ports[..index].iter().filter(|p| p.ty.prototype.is_some()).count();
+        ports.len() + grouped + 2 * before
     })
 }
 
@@ -190,7 +252,7 @@ impl Outputs {
 
     /// Zeroed space for `len` elements to write the output in place.
     pub fn alloc<T: DataType>(&mut self, index: usize, len: usize) -> &mut [T] {
-        debug_assert_eq!(self.ports[index].ty, T::INFO, "{}", self.ports[index].name);
+        debug_assert!(self.ports[index].ty.stored_as(&T::INFO), "{}", self.ports[index].name);
         let buffer = &mut self.buffers[index];
         buffer.clear();
         buffer.resize(len * T::INFO.words as usize, 0);
@@ -317,6 +379,18 @@ impl NodeDef {
     /// for every grouped input, by its index.
     pub fn hidden_inputs(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.inputs.len()).filter(|index| hidden_input(self.inputs, *index).is_some())
+    }
+
+    /// The inputs of instances, whose shapes are handed over behind the
+    /// offsets of the grouped ones: the shape and its offsets each.
+    pub fn prototype_inputs(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.inputs.len()).filter(|index| self.inputs[*index].ty.prototype.is_some())
+    }
+
+    /// How many inputs a call of the node gets: the declared ones and
+    /// everything which comes along with them.
+    pub fn all_inputs(&self) -> usize {
+        self.inputs.len() + self.hidden_inputs().count() + 2 * self.prototype_inputs().count()
     }
 
     /// The offsets which are made behind the declared outputs: one for

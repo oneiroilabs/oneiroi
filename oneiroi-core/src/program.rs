@@ -40,6 +40,17 @@ pub struct SlotDecl {
     pub card: Card,
     /// The offsets of its groups, a `u32` slot, if it is grouped.
     pub groups: Option<SlotId>,
+    /// For instances: the shape they refer to.
+    pub prototype: Option<Prototype>,
+}
+
+/// The shape instances refer to: a value of the type of their prototype
+/// and its offsets. These are the slots of the value itself, nothing is
+/// copied for the instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Prototype {
+    pub elements: SlotId,
+    pub groups: SlotId,
 }
 
 #[derive(Debug)]
@@ -61,6 +72,12 @@ pub struct OutputDecl {
 /// The name of the hidden parameter which holds the groups of `param`.
 pub fn groups_param(param: &str) -> String {
     format!("{param}#groups")
+}
+
+/// The name of the hidden parameter which holds the shape of `param`, a
+/// parameter of instances. Its offsets are in [`groups_param`] of it.
+pub fn prototype_param(param: &str) -> String {
+    format!("{param}#prototype")
 }
 
 #[derive(Debug)]
@@ -122,17 +139,32 @@ impl Program {
     }
 
     /// The slot of the callee which output `index` of a call to it is: one
-    /// of its outputs, or behind those the offsets of a grouped one.
+    /// of its outputs, behind those the offsets of a grouped one, and then
+    /// the shape and its offsets of one which is instances.
     pub fn call_output_slot(&self, index: usize) -> SlotId {
-        match self.outputs.get(index) {
-            Some(output) => output.slot,
-            None => self
-                .outputs
-                .iter()
-                .filter_map(|output| self.slot(output.slot).groups)
-                .nth(index - self.outputs.len())
-                .expect("a call has outputs for the callee's outputs and their groups"),
-        }
+        self.call_output_slots()
+            .nth(index)
+            .expect("a call has outputs for the callee's outputs and what comes along")
+    }
+
+    /// Every slot a call of this program gives back, see
+    /// [`Program::call_output_slot`].
+    fn call_output_slots(&self) -> impl Iterator<Item = SlotId> + '_ {
+        let slots = self.outputs.iter().map(|output| self.slot(output.slot));
+        self.outputs
+            .iter()
+            .map(|output| output.slot)
+            .chain(slots.clone().filter_map(|slot| slot.groups))
+            .chain(
+                slots.flat_map(|slot| slot.prototype.map(|p| [p.elements, p.groups]).into_iter().flatten()),
+            )
+    }
+
+    /// The hidden parameters which hold the shape of `param` and its
+    /// offsets, if it is a parameter of instances.
+    pub fn prototype_of_param(&self, param: usize) -> Option<(usize, usize)> {
+        let name = prototype_param(&self.params[param].name);
+        Some((self.param_index(&name)?, self.param_index(&groups_param(&name))?))
     }
 
     /// The hidden parameter which holds the groups of `param`, if any.
@@ -262,6 +294,8 @@ pub enum BuildError {
     Element { target: String },
     /// A port takes a single element and is given a list.
     Card { target: String, port: String },
+    /// A program which gives or takes instances is called for each element.
+    Instances { target: String },
 }
 
 impl fmt::Display for BuildError {
@@ -295,6 +329,9 @@ impl fmt::Display for BuildError {
             }
             Self::Card { target, port } => {
                 write!(f, "`{target}.{port}` takes a single value but is given a list")
+            }
+            Self::Instances { target } => {
+                write!(f, "`{target}` gives or takes instances and can not run for each element")
             }
         }
     }
@@ -337,6 +374,7 @@ impl ProgramBuilder {
             source,
             card,
             groups: None,
+            prototype: None,
         });
         SlotId(self.slots.len() as u32 - 1)
     }
@@ -364,14 +402,24 @@ impl ProgramBuilder {
         ty: TypeInfo,
         default: &[u32],
     ) -> SlotId {
+        let name = name.into();
         let slot = self.push_slot(ty, SlotSource::Param(self.params.len() as u32));
         ("param", ty.name, default).hash(&mut self.hasher);
         self.params.push(ParamDecl {
-            name: name.into(),
+            name: name.clone(),
             slot,
             default: default.into(),
             hidden: false,
         });
+        // Instances come with their shape, in hidden parameters of its own.
+        if let Some(prototype) = ty.prototype {
+            let shape = prototype_param(&name);
+            let elements = self.param_words(shape.clone(), *prototype, &[]);
+            self.params.last_mut().unwrap().hidden = true;
+            let groups = self.param_words(groups_param(&shape), u32::INFO, &[]);
+            self.params.last_mut().unwrap().hidden = true;
+            self.slot_mut(slot).prototype = Some(Prototype { elements, groups });
+        }
         slot
     }
 
@@ -449,7 +497,8 @@ impl ProgramBuilder {
             }
         }
 
-        // The offsets of every grouped input go along, behind the others.
+        // The offsets of every grouped input go along, behind the others,
+        // and then the shapes of instances.
         let mut all = inputs.to_vec();
         for index in node.hidden_inputs() {
             let groups = match self.slot(inputs[index]).groups {
@@ -457,6 +506,10 @@ impl ProgramBuilder {
                 None => self.no_groups(),
             };
             all.push(groups);
+        }
+        for index in node.prototype_inputs() {
+            let prototype = self.prototype_of(inputs[index]);
+            all.extend([prototype.elements, prototype.groups]);
         }
 
         ("node", node.id, node.version, &all).hash(&mut self.hasher);
@@ -476,14 +529,41 @@ impl ProgramBuilder {
                 (Card::Grouped, Groups::Like(input)) => self.slot(inputs[input]).groups,
                 _ => None,
             };
+            let prototype = port.prototype.map(|input| self.shape_of(inputs[input]));
             let decl = self.slot_mut(*slot);
             decl.card = match (port.card, groups) {
                 (Card::Grouped, None) => Card::Many,
                 (card, _) => card,
             };
             decl.groups = groups;
+            decl.prototype = prototype;
         }
         Ok(slots[..visible].to_vec())
+    }
+
+    /// The shape of instances in `slot`, or an empty one if nothing says
+    /// what it is.
+    fn prototype_of(&mut self, slot: SlotId) -> Prototype {
+        if let Some(prototype) = self.slot(slot).prototype {
+            return prototype;
+        }
+        let ty = self.slot(slot).ty.prototype.expect("only instances have a shape");
+        let elements = self.constant_words(*ty, &[]);
+        let groups = self.no_groups();
+        Prototype { elements, groups }
+    }
+
+    /// The shape `slot` is or refers to: its own if it is instances, else
+    /// the value itself with its groups.
+    fn shape_of(&mut self, slot: SlotId) -> Prototype {
+        if self.slot(slot).ty.prototype.is_some() {
+            return self.prototype_of(slot);
+        }
+        let groups = match self.slot(slot).groups {
+            Some(groups) => groups,
+            None => self.no_groups(),
+        };
+        Prototype { elements: slot, groups }
     }
 
     /// Adds the version of `generic` which fits the data types of `inputs`.
@@ -595,6 +675,11 @@ impl ProgramBuilder {
                 };
                 inputs[hidden] = Some(groups);
             }
+            if let Some((elements, groups)) = program.prototype_of_param(index) {
+                let prototype = self.prototype_of(slot);
+                inputs[elements] = Some(prototype.elements);
+                inputs[groups] = Some(prototype.groups);
+            }
         }
         let inputs = inputs
             .into_iter()
@@ -612,6 +697,10 @@ impl ProgramBuilder {
                     .filter(|output| program.slot(output.slot).groups.is_some())
                     .map(|_| u32::INFO),
             )
+            .chain(program.outputs.iter().flat_map(|output| {
+                let prototype = program.slot(output.slot).ty.prototype;
+                prototype.map(|ty| [*ty, u32::INFO]).into_iter().flatten()
+            }))
             .collect();
         Ok((inputs, types))
     }
@@ -632,6 +721,14 @@ impl ProgramBuilder {
                 Some(_) => Card::Grouped,
                 None => card,
             };
+        }
+        // The shapes of instances come back behind all offsets.
+        for (output, slot) in program.outputs.iter().zip(slots) {
+            if program.slot(output.slot).ty.prototype.is_some() {
+                let elements = *hidden.next().unwrap();
+                let groups = *hidden.next().unwrap();
+                self.slot_mut(*slot).prototype = Some(Prototype { elements, groups });
+            }
         }
         slots[..visible].to_vec()
     }
@@ -656,6 +753,14 @@ impl ProgramBuilder {
                 target: program.name.clone(),
             });
         };
+        // What every run gives is put one after the other, which instances
+        // can not be: each run could refer to a shape of its own.
+        let instances = |slot: SlotId| program.slot(slot).ty.prototype.is_some();
+        if program.outputs.iter().any(|output| instances(output.slot)) || self.slot(source).ty.prototype.is_some() {
+            return Err(BuildError::Instances {
+                target: program.name.clone(),
+            });
+        }
         let param = program
             .params
             .iter()

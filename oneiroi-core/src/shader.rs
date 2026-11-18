@@ -252,7 +252,8 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         });
     }
     let hidden: Vec<usize> = node.hidden_inputs().collect();
-    let inputs = node.inputs.len() + hidden.len();
+    let prototypes: Vec<usize> = node.prototype_inputs().collect();
+    let inputs = node.all_inputs();
     let mut wgsl = String::new();
     let out = &mut wgsl;
 
@@ -266,6 +267,7 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         .map(|port| &port.ty)
         .chain(&outputs)
         .chain(stages.iter().map(|stage| &stage.ty))
+        .chain(prototypes.iter().filter_map(|index| node.inputs[*index].ty.prototype))
     {
         declare(out, &mut declared, ty);
     }
@@ -342,6 +344,56 @@ fn in_{name}_group_of(index: u32) -> u32 {{
             at + 2,
             at + 2,
             at + 2,
+        );
+    }
+
+    // The shapes instances refer to, and their groups, read like inputs.
+    for (place, index) in prototypes.iter().enumerate() {
+        let port = &node.inputs[*index];
+        let name = port.name;
+        let shape = port.ty.prototype.expect("only instances have a shape");
+        let (ty, words) = (shape.wgsl, shape.words);
+        let at = (node.inputs.len() + hidden.len() + 2 * place) * 3;
+        let groups = at + 3;
+        let element = read_element(shape, "pages[page].words", "base");
+        let _ = writeln!(
+            out,
+            "fn in_{name}_prototype_len() -> u32 {{
+    return calls[call + {len}u] / {words}u;
+}}
+
+fn in_{name}_prototype(index: u32) -> {ty} {{
+    let page = calls[call + {at}u];
+    let base = calls[call + {offset}u] + index * {words}u;
+    return {element};
+}}
+
+fn in_{name}_prototype_groups() -> u32 {{
+    let offsets = calls[call + {groups_len}u];
+    if (offsets == 0u) {{
+        return 1u;
+    }}
+    return offsets - 1u;
+}}
+
+fn in_{name}_prototype_start(group: u32) -> u32 {{
+    if (calls[call + {groups_len}u] == 0u) {{
+        return 0u;
+    }}
+    return min(pages[calls[call + {groups}u]].words[calls[call + {groups_offset}u] + group], in_{name}_prototype_len());
+}}
+
+fn in_{name}_prototype_end(group: u32) -> u32 {{
+    if (calls[call + {groups_len}u] == 0u) {{
+        return in_{name}_prototype_len();
+    }}
+    return min(pages[calls[call + {groups}u]].words[calls[call + {groups_offset}u] + group + 1u], in_{name}_prototype_len());
+}}
+",
+            len = at + 2,
+            offset = at + 1,
+            groups_len = groups + 2,
+            groups_offset = groups + 1,
         );
     }
 

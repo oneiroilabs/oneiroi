@@ -1,5 +1,5 @@
-use bytemuck::Pod;
-use glam::{Vec2, Vec3};
+use bytemuck::{Pod, Zeroable};
+use glam::{Quat, Vec2, Vec3};
 
 /// What the 32-bit words of a [`DataType`] are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +124,34 @@ pub struct TypeInfo {
     /// What those words are, which is how a value is written by hand.
     pub scalar: Scalar,
     pub layout: Layout,
+    /// For instances of a shape: the type of the shape they refer to. A
+    /// value of such a type is a table of [`InstanceRow`]s, and the shape
+    /// comes along with it as a value of its own, see
+    /// [`TypeInfo::instances`].
+    pub prototype: Option<&'static TypeInfo>,
+}
+
+impl TypeInfo {
+    /// The type of instances of `prototype`: rows which each put a group of
+    /// a value of `prototype` somewhere. Nothing of the shape is copied,
+    /// it is passed along by reference, behind the rows. `name` has to be
+    /// unique like any other, `instances<name of the prototype>` by
+    /// convention.
+    pub const fn instances(name: &'static str, prototype: &'static TypeInfo) -> TypeInfo {
+        TypeInfo {
+            name,
+            prototype: Some(prototype),
+            ..InstanceRow::INFO
+        }
+    }
+}
+
+impl TypeInfo {
+    /// Whether values of this type are stored as elements of `element`:
+    /// of the type itself, or instance rows for instances.
+    pub fn stored_as(&self, element: &TypeInfo) -> bool {
+        self == element || (self.prototype.is_some() && *element == InstanceRow::INFO)
+    }
 }
 
 impl PartialEq for TypeInfo {
@@ -174,6 +202,7 @@ pub trait DataType: Pod {
             words: (size_of::<Self>() / 4) as u32,
             scalar: Self::SCALAR,
             layout: Self::LAYOUT,
+            prototype: None,
         }
     };
 }
@@ -197,6 +226,102 @@ data_type!(Vec2, "vec2", "vec2<f32>", F32, Vec2);
 data_type!(Vec3, "vec3", "vec3<f32>", F32, Vec3);
 // glam's Vec4 is 16 byte aligned, so the plain array is the storage form.
 data_type!([f32; 4], "vec4", "vec4<f32>", F32, Vec4);
+
+/// Turning, scaling by the same amount in every direction, and then
+/// moving. Lengths only change by the scale and angles not at all, so
+/// everything a shape keeps about itself, like the lengths and frames of
+/// a curve, stays true of it once it is placed.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct Similarity {
+    /// A unit quaternion, `x`, `y`, `z` and then `w`.
+    pub rotation: [f32; 4],
+    pub offset: [f32; 3],
+    pub scale: f32,
+}
+
+impl Similarity {
+    pub const IDENTITY: Self = Self {
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        offset: [0.0; 3],
+        scale: 1.0,
+    };
+
+    pub fn new(rotation: Quat, scale: f32, offset: Vec3) -> Self {
+        Self {
+            rotation: rotation.normalize().to_array(),
+            offset: offset.to_array(),
+            scale,
+        }
+    }
+
+    pub fn rotation(&self) -> Quat {
+        Quat::from_array(self.rotation)
+    }
+
+    pub fn offset(&self) -> Vec3 {
+        Vec3::from_array(self.offset)
+    }
+
+    /// Where `point` goes.
+    pub fn point(&self, point: Vec3) -> Vec3 {
+        self.rotation() * point * self.scale + self.offset()
+    }
+
+    /// Where a direction goes: only turned.
+    pub fn direction(&self, direction: Vec3) -> Vec3 {
+        self.rotation() * direction
+    }
+
+    /// `inner` first and then `self`.
+    pub fn then(&self, inner: &Similarity) -> Similarity {
+        let rotation = self.rotation() * inner.rotation();
+        Similarity {
+            rotation: rotation.normalize().to_array(),
+            offset: self.point(inner.offset()).to_array(),
+            scale: self.scale * inner.scale,
+        }
+    }
+}
+
+impl DataType for Similarity {
+    type ConfigurationOptions = ();
+
+    const NAME: &'static str = "similarity";
+    const WGSL: &'static str = "Similarity";
+    const SCALAR: Scalar = Scalar::F32;
+    const LAYOUT: Layout = Layout::Struct(&[
+        Field::new("rotation", FieldType::Vec4),
+        Field::new("offset", FieldType::Vec3),
+        Field::new("scale", FieldType::F32),
+    ]);
+}
+
+/// One instance of a shape: where a group of the shape goes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct InstanceRow {
+    pub transform: Similarity,
+    /// Which group of the shape.
+    pub group: u32,
+    /// How many elements of the shape all rows before this one have
+    /// together. Every element of all instances has an index of its own
+    /// that way, and the row of one is found by a binary search.
+    pub first: u32,
+}
+
+impl DataType for InstanceRow {
+    type ConfigurationOptions = ();
+
+    const NAME: &'static str = "instance_row";
+    const WGSL: &'static str = "InstanceRow";
+    const SCALAR: Scalar = Scalar::F32;
+    const LAYOUT: Layout = Layout::Struct(&[
+        Field::nested("transform", Similarity::INFO),
+        Field::new("group", FieldType::U32),
+        Field::new("first", FieldType::U32),
+    ]);
+}
 
 /// The value an input has while nothing is connected to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
