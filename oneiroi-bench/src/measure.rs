@@ -77,6 +77,14 @@ pub struct Stats {
 }
 
 impl Stats {
+    fn zero() -> Stats {
+        Stats {
+            median: 0.0,
+            p10: 0.0,
+            p90: 0.0,
+        }
+    }
+
     fn of(mut values: Vec<f64>) -> Stats {
         values.sort_by(f64::total_cmp);
         let at = |fraction: f64| {
@@ -123,16 +131,34 @@ impl Counters {
     }
 }
 
+/// How long one part of the work of the executor took.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Phase {
+    pub name: String,
+    pub time: Stats,
+}
+
+/// The parts of the work of an executor, in the order they are shown. What
+/// is left of `flush` is `rest`: on the GPU finding out sizes, making what
+/// the CPU makes and making room in the store, on the CPU scheduling.
+pub const PHASES: [&str; 8] = ["kernels", "store", "upload", "record", "submit", "download", "cpu", "rest"];
+
 /// The time of one edit, split up.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Measurement {
     /// From setting the new value until the result is computed, on the GPU
     /// included.
     pub total: Stats,
-    /// Setting the value and finding out what has to run.
+    /// Setting the new value, which hashes it. The same for every backend.
+    #[serde(default = "Stats::zero")]
+    pub set: Stats,
+    /// Finding out what has to run. The same for every backend.
     pub plan: Stats,
-    /// Running it on the CPU, and handing it to the GPU.
+    /// Running it on the CPU, and handing it to the GPU: `flush`.
     pub execute: Stats,
+    /// What `execute` was spent on.
+    #[serde(default)]
+    pub phases: Vec<Phase>,
     /// Waiting for the GPU to finish.
     pub wait: Stats,
     /// How long the GPU worked on compute passes, by its timestamps.
@@ -145,6 +171,9 @@ pub struct Measurement {
 /// What the measuring needs from an executor besides running work.
 pub trait Measured: Executor {
     fn wait(&mut self) {}
+
+    /// The time spent on parts of the work since the last call.
+    fn phases(&mut self) -> Vec<(&'static str, Duration)>;
 
     fn stats(&self) -> Option<GpuStats> {
         None
@@ -160,11 +189,19 @@ pub trait Measured: Executor {
     }
 }
 
-impl Measured for CpuExecutor {}
+impl Measured for CpuExecutor {
+    fn phases(&mut self) -> Vec<(&'static str, Duration)> {
+        self.take_phases()
+    }
+}
 
 impl Measured for GpuExecutor {
     fn wait(&mut self) {
         GpuExecutor::wait(self);
+    }
+
+    fn phases(&mut self) -> Vec<(&'static str, Duration)> {
+        self.take_phases()
     }
 
     fn stats(&self) -> Option<GpuStats> {
@@ -207,26 +244,45 @@ pub fn prepare<E: Measured>(engine: &mut Engine<E>, scenario: &Scenario, size: S
 
 /// One edit, timed.
 struct Run {
+    set: Duration,
     plan: Duration,
     execute: Duration,
     wait: Duration,
+    /// Of `execute`, by the names of [`PHASES`].
+    phases: [Duration; PHASES.len()],
 }
 
 fn edit<E: Measured>(engine: &mut Engine<E>, instance: &mut Instance, params: &Params) -> Run {
+    // Whatever was timed before belongs to no edit.
+    engine.executor_mut().phases();
     let start = Instant::now();
     set(engine, instance, params);
+    let set_done = Instant::now();
     engine.plan([&mut *instance]);
     let planned = Instant::now();
     engine.flush();
     let executed = Instant::now();
+    let timed = engine.executor_mut().phases();
     engine.executor_mut().wait();
     let done = Instant::now();
     // What the edit made before is of no use anymore, what it reused stays.
     engine.end_frame(0);
+
+    let execute = executed - planned;
+    let mut phases = [Duration::ZERO; PHASES.len()];
+    for (name, time) in timed {
+        if let Some(index) = PHASES.iter().position(|phase| *phase == name) {
+            phases[index] += time;
+        }
+    }
+    let rest = PHASES.len() - 1;
+    phases[rest] = execute.saturating_sub(phases.iter().sum());
     Run {
-        plan: planned - start,
-        execute: executed - planned,
+        set: set_done - start,
+        plan: planned - set_done,
+        execute,
         wait: done - executed,
+        phases,
     }
 }
 
@@ -281,12 +337,23 @@ pub fn measure<E: Measured>(
         }
     }
 
-    let stats = |part: fn(&Run) -> Duration| Stats::of(runs.iter().map(|run| micros(part(run))).collect());
+    let stats = |part: &dyn Fn(&Run) -> Duration| Stats::of(runs.iter().map(|run| micros(part(run))).collect());
+    let phases = PHASES
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| runs.iter().any(|run| !run.phases[*index].is_zero()))
+        .map(|(index, name)| Phase {
+            name: name.to_string(),
+            time: stats(&|run| run.phases[index]),
+        })
+        .collect();
     Measurement {
-        total: stats(|run| run.plan + run.execute + run.wait),
-        plan: stats(|run| run.plan),
-        execute: stats(|run| run.execute),
-        wait: stats(|run| run.wait),
+        total: stats(&|run| run.set + run.plan + run.execute + run.wait),
+        set: stats(&|run| run.set),
+        plan: stats(&|run| run.plan),
+        execute: stats(&|run| run.execute),
+        phases,
+        wait: stats(&|run| run.wait),
         device: (!device.is_empty()).then(|| Stats::of(device)),
         runs: runs.len() as u32,
         counters,

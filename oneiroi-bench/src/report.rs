@@ -129,8 +129,10 @@ fn time(micros: f64) -> String {
         format!("{:.2} s", micros / 1e6)
     } else if micros >= 1e3 {
         format!("{:.2} ms", micros / 1e3)
-    } else {
+    } else if micros >= 10.0 {
         format!("{micros:.0} µs")
+    } else {
+        format!("{micros:.1} µs")
     }
 }
 
@@ -168,8 +170,10 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
     writeln!(
         out,
         "The time from an edit until its result is computed, the median of many \
-         edits. GPU work is split into planning, recording and handing it over, \
-         waiting for the device, and the time the device spends on compute passes."
+         edits. Below each table, where it goes: setting the new value (which \
+         hashes it) and planning are the same for every backend, `flush` is the \
+         executor, then waiting for the device. The device column is the time \
+         the GPU spends on compute passes, by its timestamps."
     )
     .unwrap();
 
@@ -184,13 +188,9 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
             continue;
         }
         writeln!(out, "\n## {}\n\n{}.\n", scenario.name, scenario.about).unwrap();
-        writeln!(
-            out,
-            "| size | cpu, 1 thread | cpu | gpu | gpu against cpu | gpu: plan / record / wait / device | gpu work |"
-        )
-        .unwrap();
-        writeln!(out, "|---|---:|---:|---:|---:|---|---|").unwrap();
-        for size in sizes {
+        writeln!(out, "| size | cpu, 1 thread | cpu | gpu | gpu against cpu | gpu work |").unwrap();
+        writeln!(out, "|---|---:|---:|---:|---:|---|").unwrap();
+        for &size in &sizes {
             let find = |backend| results.find(scenario.name, size, backend);
             let (cpu1, cpu, gpu) = (find(Backend::Cpu1), find(Backend::Cpu), find(Backend::Gpu));
             let speedup = match (cpu, gpu) {
@@ -203,16 +203,6 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
                 }
                 _ => "–".into(),
             };
-            let breakdown = gpu.map_or("–".into(), |gpu| {
-                let m = &gpu.measurement;
-                format!(
-                    "{} / {} / {} / {}",
-                    time(m.plan.median),
-                    time(m.execute.median),
-                    time(m.wait.median),
-                    m.device.map_or("–".into(), |device| time(device.median)),
-                )
-            });
             let work = gpu.and_then(|gpu| gpu.measurement.counters).map_or("–".into(), |c| {
                 format!(
                     "{} on gpu, {} on cpu, {} passes, {} downloads",
@@ -221,16 +211,45 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
             });
             writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} |",
                 size.label(),
                 cell(cpu1, baseline),
                 cell(cpu, baseline),
                 cell(gpu, baseline),
                 speedup,
-                breakdown,
                 work,
             )
             .unwrap();
+        }
+
+        writeln!(out, "\n| size | backend | set | plan | flush | of which | wait | device |").unwrap();
+        writeln!(out, "|---|---|---:|---:|---:|---|---:|---:|").unwrap();
+        for &size in &sizes {
+            for backend in Backend::ALL {
+                let Some(entry) = results.find(scenario.name, size, backend) else {
+                    continue;
+                };
+                let m = &entry.measurement;
+                let parts: Vec<String> = m
+                    .phases
+                    .iter()
+                    .filter(|phase| phase.time.median >= 0.05)
+                    .map(|phase| format!("{} {}", phase.name, time(phase.time.median)))
+                    .collect();
+                writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                    size.label(),
+                    backend.name(),
+                    time(m.set.median),
+                    time(m.plan.median),
+                    time(m.execute.median),
+                    if parts.is_empty() { "–".into() } else { parts.join(", ") },
+                    time(m.wait.median),
+                    m.device.map_or("–".into(), |device| time(device.median)),
+                )
+                .unwrap();
+            }
         }
     }
 
@@ -248,4 +267,29 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A change of the format must not leave the baselines behind which
+    /// are in the repository already.
+    #[test]
+    fn every_baseline_still_loads() {
+        let Ok(files) = std::fs::read_dir(results_dir()) else {
+            return;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().is_some_and(|extension| extension == "json") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let results: Results = serde_json::from_str(&text)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert!(!results.entries.is_empty());
+                // The table can still be made of it.
+                assert!(table(&results, None).contains("## nurbs"));
+            }
+        }
+    }
 }

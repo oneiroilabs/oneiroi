@@ -13,6 +13,27 @@ baseline of the machine it runs on. `--quick` measures fewer sizes, `--only
 `WGPU_BACKEND` picks the backend of the GPU, `--features dxc` gives DX12
 its mesh shaders.
 
+## Where the time goes
+
+Below the table of every scenario, each edit is split up the same way for
+every backend:
+
+- `set`: setting the new value, which hashes it,
+- `plan`: finding out what has to run,
+- `flush`: the executor, and of which
+  - on the CPU: `kernels` (the nodes themselves) and `store` (writing what
+    they made),
+  - on the GPU: `upload`, `record` (writing the calls and encoding the
+    passes), `submit`, `download`, and `cpu` for nodes which run on the
+    CPU after all,
+  - `rest`: what is left, on the GPU finding out sizes, making what the
+    CPU makes, and making room in the store,
+- `wait`: waiting for the device to finish,
+- `device`: how long the GPU spent on compute passes, by its timestamps.
+
+The executors only time parts which do not contain each other, so they
+add up to `flush`.
+
 ## Baselines
 
 `results/` holds a baseline per machine, named after its operating system,
