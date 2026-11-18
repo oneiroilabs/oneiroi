@@ -10,6 +10,7 @@ mod profile;
 mod sweep;
 
 pub use nodes::{EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
+pub(crate) use nodes::example_curves;
 pub(crate) use profile::{fractions, sweep_example};
 pub use profile::{PROFILE, Profile};
 pub use sweep::{SWEEP, SweptPatch, TubePatch, register_profile, tube};

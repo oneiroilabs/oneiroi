@@ -16,6 +16,7 @@ use super::{
 };
 use crate::{
     generic::version,
+    instance::Placement,
     primitive::CIRCLE,
     surface::{self, SURFACE, Surface, register_surface},
 };
@@ -38,6 +39,15 @@ impl TubePatch {
             radius,
             along,
             _padding: 0.0,
+        }
+    }
+
+    /// The same tube put somewhere else, see [`Placement`].
+    pub fn placed(&self, place: &Placement) -> Self {
+        Self {
+            segment: self.segment.placed(place.rotation, place.scale, place.offset),
+            radius: self.radius * place.scale,
+            ..*self
         }
     }
 }
@@ -89,6 +99,17 @@ pub struct SweptPatch {
 }
 
 impl SweptPatch {
+    /// The same surface put somewhere else, see [`Placement`]. The profile
+    /// lies in the frames of the spine, which turn along with it, so it
+    /// only grows with the scale.
+    pub fn placed(&self, place: &Placement) -> Self {
+        Self {
+            spine: self.spine.placed(place.rotation, place.scale, place.offset),
+            profile: self.profile.placed(glam::Mat3::IDENTITY, place.scale, Vec3::ZERO),
+            ..*self
+        }
+    }
+
     pub fn new(
         spine: CubicNurbsSegmentCache,
         profile: CubicNurbsSegmentCache,

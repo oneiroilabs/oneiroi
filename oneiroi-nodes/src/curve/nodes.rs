@@ -713,7 +713,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 6);
+        assert_eq!(checked, 9);
 
         // And so does everything which says it can be drawn as it is: the
         // two kinds of surface, the curve and the circle.
@@ -745,9 +745,10 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 5 nodes of curves, a mesh for each of the 2 surfaces
-        // and a sweep for each of the 2 profiles, and 2 values.
-        assert_eq!(registry.iter().count(), 10);
+        // 5 nodes of curves, a mesh for each of the 2 surfaces, a sweep
+        // for each of the 2 profiles, 2 values and an instance node for
+        // each of the 3 shapes.
+        assert_eq!(registry.iter().count(), 13);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

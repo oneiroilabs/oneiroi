@@ -16,6 +16,7 @@ mod describe;
 
 pub mod curve;
 mod generic;
+pub mod instance;
 mod parallel;
 pub mod primitive;
 pub mod property;
@@ -26,6 +27,7 @@ pub mod value;
 pub fn register(registry: &mut NodeRegistry) {
     curve::register(registry);
     value::register(registry);
+    instance::register(registry);
 }
 
 /// A data type with what people see of it, see [`describe_type!`].
@@ -50,6 +52,7 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         &curve::SWEEP_META,
         &primitive::CIRCLE_META,
         &surface::MESH_META,
+        &instance::INSTANCE_META,
     ] {
         meta.add_node(*node);
     }
@@ -69,4 +72,5 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
     }
     meta.add_trait(curve::PROFILE_META);
     meta.add_trait(surface::SURFACE_META);
+    meta.add_trait(instance::PLACEABLE_META);
 }

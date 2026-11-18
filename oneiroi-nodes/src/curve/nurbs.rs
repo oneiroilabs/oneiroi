@@ -122,6 +122,27 @@ impl CubicNurbsSegmentCache {
         moved
     }
 
+    /// The same segment turned by `rotation`, scaled by `scale` and then
+    /// moved by `offset`, all about the origin. Its normals turn along, so
+    /// its frames are the ones of before, turned. `rotation` has to be one,
+    /// without any scale or mirroring of its own.
+    pub fn placed(&self, rotation: Mat3, scale: f32, offset: Vec3) -> Self {
+        let mut placed = *self;
+        for column in &mut placed.monomial_basis {
+            // Homogeneous, so the offset is scaled by the weight.
+            let point = rotation * Vec3::new(column[0], column[1], column[2]) * scale + offset * column[3];
+            column[..3].copy_from_slice(&point.to_array());
+        }
+        placed.length *= scale;
+        placed.cumulative_length *= scale;
+        let turn = |normal: [f32; 2], tangent: Vec3| {
+            encode_normal(rotation * decode_normal(normal, tangent), rotation * tangent)
+        };
+        placed.rmf_start_normal = turn(self.rmf_start_normal, self.evaluate(0.0).2);
+        placed.rmf_end_normal = turn(self.rmf_end_normal, self.evaluate(1.0).2);
+        placed
+    }
+
     /// Position, velocity and unit tangent at `u` in `0..=1`.
     pub fn evaluate(&self, u: f32) -> (Vec3, Vec3, Vec3) {
         let m = Mat4::from_cols_array_2d(&self.monomial_basis);

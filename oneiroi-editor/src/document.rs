@@ -1324,6 +1324,7 @@ mod tests {
                 "Curve / Sample Curve",
                 "Curve / Sweep",
                 "Curve / Translate Curve",
+                "Instance / Instance on Points",
                 "Value / Numbers",
                 "Value / Vectors"
             ]
