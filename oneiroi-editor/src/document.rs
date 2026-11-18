@@ -356,39 +356,96 @@ impl Document {
         document
     }
 
-    /// A circle swept along a curve, to have something to look at.
+    /// Something to look at: a circle swept along a curve, and in a second
+    /// graph small rings put onto points along the same curve.
     pub fn example() -> Self {
-        let mut graph = Graph::new("tube");
+        let mut library = Library::new();
+        library.insert(Self::tube_example());
+        library.insert(Self::instances_example());
+        Self::with_library(library, "tube")
+    }
+
+    /// The curve both examples start from.
+    fn example_curve(graph: &mut Graph) -> NodeId {
         let points: Vec<f32> = (0..8)
             .flat_map(|i| {
                 let side = if i % 2 == 0 { -1.0 } else { 1.0 };
                 [side * 0.8, i as f32, 0.5 * (i as f32 * 1.3).cos(), 1.0]
             })
             .collect();
-
         let curve = graph.add("curve.nurbs");
-        let circle = graph.add("curve.circle");
-        let sweep = graph.add("curve.sweep");
         let edits = [
             graph.set(curve, "points", Value::F32(points)),
             graph.set(curve, "knots", Value::F32(clamped_uniform_knots(8))),
+        ];
+        debug_assert!(edits.iter().all(Result::is_ok));
+        curve
+    }
+
+    fn place(graph: &mut Graph, positions: &[(NodeId, [f32; 2])]) {
+        for (node, position) in positions {
+            graph.node_mut(*node).unwrap().meta.position = *position;
+        }
+    }
+
+    /// A circle swept along a curve.
+    fn tube_example() -> Graph {
+        let mut graph = Graph::new("tube");
+        let curve = Self::example_curve(&mut graph);
+        let circle = graph.add("curve.circle");
+        let sweep = graph.add("curve.sweep");
+        let edits = [
             graph.set(circle, "radius", 0.25f32),
             graph.connect(curve, "segments", sweep, "spine"),
             graph.connect(circle, "circle", sweep, "profile"),
         ];
         debug_assert!(edits.iter().all(Result::is_ok));
-
-        let positions = [
-            (curve, [40., 40.]),
-            (circle, [40., 220.]),
-            (sweep, [300., 110.]),
-        ];
-        for (node, position) in positions {
-            graph.node_mut(node).unwrap().meta.position = position;
-        }
+        Self::place(&mut graph, &[(curve, [40., 40.]), (circle, [40., 220.]), (sweep, [300., 110.])]);
         // The surface is drawn as it is, it never has to become a mesh.
         graph.display = Some(sweep);
-        Self::new(graph)
+        graph
+    }
+
+    /// Small rings, a thin tube swept around a circle of a curve, put onto
+    /// frames along the curve of the tube.
+    fn instances_example() -> Graph {
+        let mut graph = Graph::new("instances");
+        let curve = Self::example_curve(&mut graph);
+        let around: Vec<f32> = (0..=12)
+            .flat_map(|i| {
+                let angle = i as f32 / 12.0 * std::f32::consts::TAU;
+                [0.45 * angle.cos(), 0.45 * angle.sin(), 0.0, 1.0]
+            })
+            .collect();
+        let ring = graph.add("curve.nurbs");
+        let thin = graph.add("curve.circle");
+        let torus = graph.add("curve.sweep");
+        let sample = graph.add("curve.sample");
+        let instances = graph.add("instance.on_points");
+        let edits = [
+            graph.set(ring, "points", Value::F32(around)),
+            graph.set(thin, "radius", 0.06f32),
+            graph.connect(ring, "segments", torus, "spine"),
+            graph.connect(thin, "circle", torus, "profile"),
+            graph.set(sample, "count", 12u32),
+            graph.connect(curve, "segments", sample, "segments"),
+            graph.connect(sample, "frames", instances, "points"),
+            graph.connect(torus, "surface", instances, "shape"),
+        ];
+        debug_assert!(edits.iter().all(Result::is_ok));
+        Self::place(
+            &mut graph,
+            &[
+                (curve, [40., 40.]),
+                (sample, [300., 40.]),
+                (ring, [40., 220.]),
+                (thin, [40., 400.]),
+                (torus, [300., 260.]),
+                (instances, [560., 140.]),
+            ],
+        );
+        graph.display = Some(instances);
+        graph
     }
 
     /// The graph which is being edited.
@@ -1326,7 +1383,8 @@ mod tests {
                 "Curve / Translate Curve",
                 "Instance / Instance on Points",
                 "Value / Numbers",
-                "Value / Vectors"
+                "Value / Vectors",
+                "Graph / instances"
             ]
         );
 
@@ -1495,7 +1553,7 @@ mod tests {
 
         // All of it survives its file.
         let loaded = Document::from_json(&document.to_json()).unwrap();
-        assert_eq!(loaded.graphs(), ["graph", "tube"]);
+        assert_eq!(loaded.graphs(), ["graph", "instances", "tube"]);
         let mut loaded = loaded;
         loaded.open("tube");
         assert!(radius(&loaded) > thick);
@@ -1596,10 +1654,23 @@ mod tests {
         assert!(!document.toggle_exposed(sweep, "spine"));
     }
 
+    /// The second example puts rings onto points along its curve.
+    #[test]
+    fn the_examples_run() {
+        let mut document = Document::example();
+        assert_eq!(document.graphs(), ["instances", "tube"]);
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(document.open("instances"));
+        assert!(document.error().is_none(), "{:?}", document.error());
+        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+    }
+
     #[test]
     fn a_document_survives_its_file() {
         let document = Document::example();
-        let loaded = Document::from_json(&document.to_json()).unwrap();
+        let mut loaded = Document::from_json(&document.to_json()).unwrap();
+        assert_eq!(loaded.graphs(), ["instances", "tube"]);
+        assert!(loaded.open("tube"));
         assert_eq!(loaded.graph(), document.graph());
         // The same graph is the same work, so it shows the very same value.
         assert_eq!(loaded.shown(), document.shown());
