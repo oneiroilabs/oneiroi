@@ -3,7 +3,7 @@
 use std::{collections::HashMap, num::NonZeroU32};
 
 use oneiroi_core::{
-    exec::{CpuExecutor, Executor, Work},
+    exec::{CpuExecutor, Executor, Phases, Work},
     node::{Caps, GpuKernel, Inputs, NodeDef},
     shader::{self, CALL_WINDOW, GATHER, GATHER_CALL_WORDS, ShaderError, WORKGROUP_SIZE},
     store::{ContentKey, Handle, Store},
@@ -145,6 +145,7 @@ pub struct GpuExecutor {
     errors: Vec<ShaderError>,
     /// Timestamps around every compute pass, while profiling.
     profiler: Option<Profiler>,
+    phases: Phases,
 }
 
 /// Measures how long the device works on compute passes, with a timestamp
@@ -216,7 +217,16 @@ impl GpuExecutor {
             },
             errors: Vec::new(),
             profiler: None,
+            phases: Phases::default(),
         }
+    }
+
+    /// How long the executor spent since the last call on uploading,
+    /// recording passes, submitting, downloading, and running nodes on the
+    /// CPU. The rest of its time goes to finding out sizes, making what
+    /// the CPU makes, and making room in the store.
+    pub fn take_phases(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        self.phases.take()
     }
 
     /// Starts measuring how long the device takes for the compute passes,
@@ -458,6 +468,12 @@ impl GpuExecutor {
 
     /// Brings the buffers up to date with the pages of the store.
     fn upload(&mut self, store: &mut Store) {
+        let start = std::time::Instant::now();
+        self.upload_untimed(store);
+        self.phases.since("upload", start);
+    }
+
+    fn upload_untimed(&mut self, store: &mut Store) {
         let dirty = store.take_dirty();
         for (index, page) in store.pages().enumerate() {
             if index == self.pages.len() {
@@ -514,6 +530,12 @@ impl GpuExecutor {
 
     /// Hands over all work which was recorded.
     fn submit(&mut self) {
+        let start = std::time::Instant::now();
+        self.submit_untimed();
+        self.phases.since("submit", start);
+    }
+
+    fn submit_untimed(&mut self) {
         if let Some(mut encoder) = self.encoder.take() {
             let measured = self.profiler.as_ref().map_or(0, |profiler| profiler.used);
             if let Some(profiler) = self.profiler.as_ref().filter(|_| measured > 0) {
@@ -603,6 +625,15 @@ impl GpuExecutor {
 
     /// Records one compute pass which runs `pipeline` for every call.
     fn record(&mut self, label: &str, pipeline: &wgpu::ComputePipeline, calls: &[u32], groups: (u32, u32)) {
+        let start = std::time::Instant::now();
+        let submitted = self.phases.get("submit");
+        self.record_untimed(label, pipeline, calls, groups);
+        // A full ring is handed over on the way, which counts as submitting.
+        let submitting = self.phases.get("submit") - submitted;
+        self.phases.add("record", start.elapsed().saturating_sub(submitting));
+    }
+
+    fn record_untimed(&mut self, label: &str, pipeline: &wgpu::ComputePipeline, calls: &[u32], groups: (u32, u32)) {
         let offset = self.push_calls(calls);
         let bind_group = self.bind_group();
         let calls = self.bindless.as_ref().unwrap().calls.clone();
@@ -779,10 +810,78 @@ impl GpuExecutor {
         self.stats.gpu += batch.len();
     }
 
+    fn timed_download(&mut self, store: &mut Store, keys: &[ContentKey]) {
+        let start = std::time::Instant::now();
+        let submitted = self.phases.get("submit");
+        self.download_untimed(store, keys);
+        // What was recorded is handed over first, which counts as submitting.
+        let submitting = self.phases.get("submit") - submitted;
+        self.phases.add("download", start.elapsed().saturating_sub(submitting));
+    }
+
+    fn download_untimed(&mut self, store: &mut Store, keys: &[ContentKey]) {
+        let remote: Vec<_> = keys
+            .iter()
+            .filter(|key| !store.is_resident(**key))
+            .filter_map(|key| Some((*key, store.get(*key)?)))
+            .collect();
+        let size: u64 = remote.iter().map(|(_, handle)| handle.len as u64 * 4).sum();
+        if size == 0 {
+            return;
+        }
+
+        // What is to be read may not even be computed yet.
+        self.submit();
+        if self.readback.as_ref().is_none_or(|readback| readback.size() < size) {
+            self.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Oneiroi Readback"),
+                size: size.next_power_of_two(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+            self.stats.buffers += 1;
+        }
+        let readback = self.readback.as_ref().unwrap();
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut offset = 0;
+        for (_, handle) in &remote {
+            let bytes = handle.len as u64 * 4;
+            let page = &self.pages[handle.page as usize];
+            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, readback, offset, bytes);
+            offset += bytes;
+        }
+        self.queue.submit([encoder.finish()]);
+        self.stats.submits += 1;
+
+        readback.map_async(wgpu::MapMode::Read, ..size, |result| {
+            result.expect("the readback buffer is only used here")
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device is alive while its executor is");
+        {
+            let bytes = readback
+                .get_mapped_range(..size)
+                .expect("the buffer was mapped right above");
+            let words: &[u32] = bytemuck::cast_slice(&bytes);
+
+            let mut offset = 0;
+            for (key, handle) in &remote {
+                store.fill(*key, &words[offset..offset + handle.len as usize]);
+                offset += handle.len as usize;
+                self.stats.downloads += 1;
+            }
+        }
+        readback.unmap();
+    }
+
     fn run_on_cpu(&mut self, store: &mut Store, item: &Work) {
         // A node on the CPU reads all of its inputs.
         self.download(store, &item.inputs);
+        let start = std::time::Instant::now();
         self.cpu.execute(store, std::slice::from_ref(item));
+        self.phases.since("cpu", start);
         self.stats.cpu += 1;
     }
 }
@@ -874,60 +973,7 @@ impl Executor for GpuExecutor {
     }
 
     fn download(&mut self, store: &mut Store, keys: &[ContentKey]) {
-        let remote: Vec<_> = keys
-            .iter()
-            .filter(|key| !store.is_resident(**key))
-            .filter_map(|key| Some((*key, store.get(*key)?)))
-            .collect();
-        let size: u64 = remote.iter().map(|(_, handle)| handle.len as u64 * 4).sum();
-        if size == 0 {
-            return;
-        }
-
-        // What is to be read may not even be computed yet.
-        self.submit();
-        if self.readback.as_ref().is_none_or(|readback| readback.size() < size) {
-            self.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Oneiroi Readback"),
-                size: size.next_power_of_two(),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }));
-            self.stats.buffers += 1;
-        }
-        let readback = self.readback.as_ref().unwrap();
-
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        let mut offset = 0;
-        for (_, handle) in &remote {
-            let bytes = handle.len as u64 * 4;
-            let page = &self.pages[handle.page as usize];
-            encoder.copy_buffer_to_buffer(page, handle.offset as u64 * 4, readback, offset, bytes);
-            offset += bytes;
-        }
-        self.queue.submit([encoder.finish()]);
-        self.stats.submits += 1;
-
-        readback.map_async(wgpu::MapMode::Read, ..size, |result| {
-            result.expect("the readback buffer is only used here")
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("the device is alive while its executor is");
-        {
-            let bytes = readback
-                .get_mapped_range(..size)
-                .expect("the buffer was mapped right above");
-            let words: &[u32] = bytemuck::cast_slice(&bytes);
-
-            let mut offset = 0;
-            for (key, handle) in &remote {
-                store.fill(*key, &words[offset..offset + handle.len as usize]);
-                offset += handle.len as usize;
-                self.stats.downloads += 1;
-            }
-        }
-        readback.unmap();
+        self.timed_download(store, keys);
     }
 }
 
@@ -954,6 +1000,14 @@ impl DeferredExecutor {
 
     pub fn gpu_mut(&mut self) -> Option<&mut GpuExecutor> {
         self.gpu.as_mut()
+    }
+
+    /// See [`GpuExecutor::take_phases`] and [`CpuExecutor::take_phases`].
+    pub fn take_phases(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        match &mut self.gpu {
+            Some(gpu) => gpu.take_phases(),
+            None => self.cpu.take_phases(),
+        }
     }
 }
 

@@ -5,7 +5,11 @@
 //! [`Store`] does not hold yet becomes [`Work`]. Only that work is handed to
 //! the [`Executor`], which is the part that can run on the CPU or the GPU.
 
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::HashSet,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use crate::{
     node::{Inputs, NodeDef, Outputs},
@@ -76,11 +80,53 @@ pub struct Overflow {
     pub max: u32,
 }
 
+/// Time an executor spent on named parts of its work, added up until
+/// somebody takes it. Only parts which do not contain each other are
+/// timed, so they can be added up.
+#[derive(Debug, Default, Clone)]
+pub struct Phases(Vec<(&'static str, Duration)>);
+
+impl Phases {
+    pub fn add(&mut self, name: &'static str, time: Duration) {
+        match self.0.iter_mut().find(|(phase, _)| *phase == name) {
+            Some((_, total)) => *total += time,
+            None => self.0.push((name, time)),
+        }
+    }
+
+    /// Adds the time since `start` to `name`.
+    pub fn since(&mut self, name: &'static str, start: Instant) {
+        self.add(name, start.elapsed());
+    }
+
+    /// What `name` added up to so far.
+    pub fn get(&self, name: &str) -> Duration {
+        self.0
+            .iter()
+            .find(|(phase, _)| *phase == name)
+            .map_or(Duration::ZERO, |(_, time)| *time)
+    }
+
+    /// Everything added up so far, and starts again from nothing.
+    pub fn take(&mut self) -> Vec<(&'static str, Duration)> {
+        std::mem::take(&mut self.0)
+    }
+}
+
 /// Runs every node through its CPU kernel, one after the other.
 #[derive(Default)]
 pub struct CpuExecutor {
     handles: Vec<Handle>,
     buffers: Vec<Vec<u32>>,
+    phases: Phases,
+}
+
+impl CpuExecutor {
+    /// How long the kernels took, and writing what they made into the
+    /// store, since the last call.
+    pub fn take_phases(&mut self) -> Vec<(&'static str, Duration)> {
+        self.phases.take()
+    }
 }
 
 impl Executor for CpuExecutor {
@@ -107,11 +153,15 @@ impl Executor for CpuExecutor {
                 ports: item.node.inputs,
                 handles: &self.handles,
             };
+            let start = Instant::now();
             (item.node.cpu)(&inputs, &mut outputs);
+            self.phases.since("kernels", start);
 
+            let start = Instant::now();
             for (key, words) in item.outputs.iter().zip(&outputs.buffers) {
                 store.insert(*key, words);
             }
+            self.phases.since("store", start);
             self.buffers = outputs.buffers;
         }
     }
