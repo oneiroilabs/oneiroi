@@ -22,6 +22,7 @@ iced = { version = "0.15.0-dev", default-features = false, features = [
     "image",
     "advanced",
     "thread-pool",
+    "markdown",
 ] }
 iced_core = { version = "0.15.0-dev" }
 #iced_aw = { git = "https://github.com/iced-rs/iced_aw.git", branch = "main", features = [

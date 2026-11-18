@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    button, checkbox, column, container, pick_list, row, scrollable, shader, space, text,
-    text_input,
+    button, checkbox, column, container, markdown, pick_list, row, scrollable, shader, space,
+    text, text_input, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Point, Theme, Vector};
 use iced_nodegraph::{
@@ -10,7 +10,9 @@ use iced_nodegraph::{
     default_can_connect, default_edge_style,
     default_node_style, edge, node, node_header, pin,
 };
-use oneiroi_editor::document::{Document, PaletteEntry, PinType};
+use oneiroi_editor::document::{Document, PaletteEntry, Side};
+use oneiroi_editor::look::{self, PinLook};
+use oneiroi_graph::Note;
 use oneiroi_editor::preview::{Detail, Preview};
 use oneiroi_graph::{Input, NodeId};
 
@@ -63,6 +65,14 @@ enum Message {
     ShowDetail(bool),
     Save,
     Load,
+    /// Whether the inspector shows the notes of the ports to edit.
+    EditNotes(bool),
+    NoteLabel(u32, Side, String, String),
+    NoteDoc(u32, Side, String, String),
+    /// What the open graph says about itself.
+    GraphDoc(String),
+    /// A link in documentation was clicked, which leads nowhere yet.
+    Link,
 }
 
 struct Editor {
@@ -79,6 +89,10 @@ struct Editor {
     /// Which of [`DETAIL`] the preview uses.
     detail: usize,
     show_detail: bool,
+    edit_notes: bool,
+    /// The documentation shown in tooltips, parsed, by its markdown. Made
+    /// anew after every update, since a view can only borrow it.
+    docs: HashMap<String, markdown::Content>,
 }
 
 /// The pins of a node are named after its ports. An input and an output
@@ -100,18 +114,12 @@ fn ends(a: &Pin, b: &Pin) -> Option<((NodeId, String), (NodeId, String))> {
         .or_else(|| output(b).zip(input(a)))
 }
 
-/// A colour per type, the same every time.
-fn pin_color(ty: &PinType) -> Color {
-    let hash = ty
-        .name()
-        .bytes()
-        .fold(2166136261u32, |hash, byte| (hash ^ byte as u32).wrapping_mul(16777619));
-    let hue = (hash % 360) as f32;
-    let channel = |offset: f32| {
-        let k = (offset + hue / 60.0) % 6.0;
-        0.85 - 0.5 * k.min(4.0 - k).clamp(0.0, 1.0)
-    };
-    Color::from_rgb(channel(5.0), channel(3.0), channel(1.0))
+/// What the tooltip of a node title says, as markdown.
+fn node_tip(title: &str, doc: &str) -> String {
+    match doc.trim().is_empty() {
+        true => format!("**{title}**"),
+        false => format!("**{title}**\n\n{}", doc.trim()),
+    }
 }
 
 impl Editor {
@@ -125,7 +133,48 @@ impl Editor {
             note: None,
             detail: 1,
             show_detail: false,
+            edit_notes: false,
+            docs: HashMap::new(),
         }
+        .with_docs()
+    }
+
+    fn with_docs(mut self) -> Self {
+        self.parse_docs();
+        self
+    }
+
+    /// Parses the documentation of everything on the screen which is not
+    /// parsed yet, and forgets what is not on it anymore.
+    fn parse_docs(&mut self) {
+        let mut shown = Vec::new();
+        for (id, _) in self.document.graph().nodes() {
+            let Some(view) = self.document.view(id) else {
+                continue;
+            };
+            shown.push(node_tip(&view.title, &view.doc));
+            for port in view.inputs.iter().chain(&view.outputs) {
+                shown.push(look::port_tip(&self.document, port));
+            }
+        }
+        self.docs.retain(|doc, _| shown.contains(doc));
+        for doc in shown {
+            self.docs.entry(doc).or_insert_with_key(|doc| markdown::Content::parse(doc));
+        }
+    }
+
+    /// `doc` rendered, in a box to float over the graph.
+    fn tip(&self, doc: &str) -> Element<'_, Message> {
+        let content: Element<'_, Message> = match self.docs.get(doc) {
+            Some(content) => markdown::view(content.items(), markdown::Settings::with_text_size(12, Theme::Dark))
+                .map(|_| Message::Link),
+            None => text(doc.to_string()).size(12).into(),
+        };
+        container(content)
+            .width(320)
+            .padding([6, 8])
+            .style(container::rounded_box)
+            .into()
     }
 
     fn theme(&self) -> Theme {
@@ -133,6 +182,11 @@ impl Editor {
     }
 
     fn update(&mut self, message: Message) {
+        self.on(message);
+        self.parse_docs();
+    }
+
+    fn on(&mut self, message: Message) {
         self.note = None;
         match message {
             Message::Connected(a, b) => {
@@ -242,6 +296,23 @@ impl Editor {
                     Err(error) => format!("could not load {FILE}: {error}"),
                 });
             }
+            Message::EditNotes(edit) => self.edit_notes = edit,
+            Message::NoteLabel(node, side, port, label) => {
+                let note = self.document.note(node.into(), side, &port);
+                let note = Note { label: Some(label), ..note };
+                self.document.set_note(node.into(), side, &port, note);
+            }
+            Message::NoteDoc(node, side, port, doc) => {
+                let note = self.document.note(node.into(), side, &port);
+                let note = Note { doc: Some(doc), ..note };
+                self.document.set_note(node.into(), side, &port, note);
+            }
+            Message::GraphDoc(doc) => {
+                let mut about = self.document.about().clone();
+                about.doc = Some(doc).filter(|doc| !doc.trim().is_empty());
+                self.document.set_about(about);
+            }
+            Message::Link => {}
         }
     }
 
@@ -272,6 +343,11 @@ impl Editor {
         ]
         .spacing(8)
         .align_y(Center);
+        let legend = text(
+            "● one   ■ a list   ◫ a list of groups   filled: exactly this type   ring: any type of a trait",
+        )
+        .size(11)
+        .color(Color::from_rgb(0.6, 0.6, 0.65));
 
         let preview = shader(Preview {
             session: self.document.session(),
@@ -303,13 +379,13 @@ impl Editor {
         // of its fields is then taken by the field, and the graph only
         // treats it as a shortcut (like deleting the selection) otherwise.
         let side = column![preview, self.inspector()].spacing(8).width(420);
-        let content = row![side, column![toolbar, self.graph()].spacing(8)].spacing(8);
+        let content = row![side, column![toolbar, legend, self.graph()].spacing(8)].spacing(8);
         container(content).padding(8).into()
     }
 
     fn graph(&self) -> Element<'_, Message> {
         let document = &self.document;
-        let mut graph: NodeGraph<'_, u32, String, PinType, Message, iced::Renderer, String> =
+        let mut graph: NodeGraph<'_, u32, String, PinLook, Message, iced::Renderer, String> =
             NodeGraph::default()
                 .view(self.camera.0, self.camera.1)
                 .on_connect(Message::Connected)
@@ -351,7 +427,11 @@ impl Editor {
             let header = node_header(
                 container(
                     row![
-                        text(view.title).size(13).color(Color::WHITE),
+                        tooltip(
+                            text(view.title.clone()).size(13).color(Color::WHITE),
+                            self.tip(&node_tip(&view.title, &view.doc)),
+                            tooltip::Position::Top,
+                        ),
                         space::horizontal(),
                         button(text(if displayed { "shown" } else { "show" }).size(11))
                             .padding([1, 6])
@@ -369,18 +449,22 @@ impl Editor {
             );
 
             let mut pins = column![].spacing(4);
-            for port in view.inputs {
-                let label = text(port.name.clone()).size(12);
+            for port in &view.inputs {
+                let tip = self.tip(&look::port_tip(document, port));
+                let label = tooltip(text(port.label.clone()).size(12), tip, tooltip::Position::Left);
+                let look = look::pin_look(document, port);
                 pins = pins.push(
-                    container(pin!(Left, input_pin(&port.name), label, Input, port.ty))
+                    container(pin!(Left, input_pin(&port.name), label, Input, look))
                         .width(Fill)
                         .align_left(Fill),
                 );
             }
-            for port in view.outputs {
-                let label = text(port.name.clone()).size(12);
+            for port in &view.outputs {
+                let tip = self.tip(&look::port_tip(document, port));
+                let label = tooltip(text(port.label.clone()).size(12), tip, tooltip::Position::Right);
+                let look = look::pin_look(document, port);
                 pins = pins.push(
-                    container(pin!(Right, output_pin(&port.name), label, Output, port.ty))
+                    container(pin!(Right, output_pin(&port.name), label, Output, look))
                         .width(Fill)
                         .align_right(Fill),
                 );
@@ -402,9 +486,14 @@ impl Editor {
                             base
                         }
                     })
-                    .pin_style(|theme, pin, _, status| iced_nodegraph::PinStyle {
-                        color: ColorQuad::solid(pin_color(pin.info())),
-                        ..iced_nodegraph::default_pin_style(theme, status)
+                    .pin_style(|theme, pin, _, status| {
+                        let look: &PinLook = pin.info();
+                        iced_nodegraph::PinStyle {
+                            color: ColorQuad::solid(look.color),
+                            shape: look.shape,
+                            fill: look.fill,
+                            ..iced_nodegraph::default_pin_style(theme, status)
+                        }
                     }),
             );
 
@@ -434,23 +523,44 @@ impl Editor {
     /// The inputs of the selected node, to type values into.
     fn inspector(&self) -> Element<'_, Message> {
         let selected = self.selected.first().copied();
+        let notes = checkbox(self.edit_notes)
+            .label("notes")
+            .text_size(11)
+            .on_toggle(Message::EditNotes);
         let Some((node, view)) = selected.and_then(|node| Some((node, self.document.view(node)?)))
         else {
-            return container(text("Select a node to edit its inputs.").size(13))
-                .height(260)
-                .into();
+            // Without a node, what the graph says about itself where it is
+            // used in another.
+            let mut rows = column![row![text("Select a node to edit its inputs.").size(13), space::horizontal(), notes]]
+                .spacing(6);
+            if self.edit_notes {
+                let doc = self.document.about().doc.clone().unwrap_or_default();
+                rows = rows.push(
+                    text_input("What this graph does, where it is used as a node (markdown)", doc)
+                        .size(12)
+                        .on_input(Message::GraphDoc),
+                );
+            }
+            return container(rows).height(260).into();
         };
 
-        let mut rows = column![text(view.title).size(15)].spacing(6);
+        let title = tooltip(
+            text(view.title.clone()).size(15),
+            self.tip(&node_tip(&view.title, &view.doc)),
+            tooltip::Position::Bottom,
+        );
+        let mut rows = column![row![title, space::horizontal(), notes].align_y(Center)].spacing(6);
         for port in &view.inputs {
             let key = (node, port.name.clone());
             let (stored, editable) = self
                 .document
                 .input_text(node, &port.name)
                 .unwrap_or_default();
-            let label = text(format!("{} ({})", port.name, port.ty.name()))
-                .size(12)
-                .width(150);
+            let label = tooltip(
+                text(port.label.clone()).size(12).width(150),
+                self.tip(&look::port_tip(&self.document, port)),
+                tooltip::Position::Right,
+            );
 
             let field: Element<'_, Message> = if editable {
                 let name = port.name.clone();
@@ -486,18 +596,47 @@ impl Editor {
                 expose.into()
             };
             rows = rows.push(row![label, field, middle, reset].spacing(6).align_y(Center));
+            if self.edit_notes {
+                rows = rows.push(self.note_fields(node, Side::Input, port));
+            }
         }
         for port in &view.outputs {
-            let label = text(format!("{} ({})", port.name, port.ty.name()))
-                .size(12)
-                .width(Fill);
+            let label = tooltip(
+                text(port.label.clone()).size(12).width(Fill),
+                self.tip(&look::port_tip(&self.document, port)),
+                tooltip::Position::Right,
+            );
             // An exported output is one of the whole graph.
             let exported = self.document.is_output(node, &port.name);
             let export = button(text(if exported { "exported" } else { "export" }).size(11))
                 .padding([1, 6])
                 .on_press(Message::Export(node.raw(), port.name.clone()));
             rows = rows.push(row![label, export].spacing(6).align_y(Center));
+            if self.edit_notes {
+                rows = rows.push(self.note_fields(node, Side::Output, port));
+            }
         }
         container(scrollable(rows)).height(260).into()
+    }
+
+    /// Fields for another name of `port` and how this node uses it. Left
+    /// empty, the port is described as its node describes it.
+    fn note_fields(
+        &self,
+        node: NodeId,
+        side: Side,
+        port: &oneiroi_editor::document::PortView,
+    ) -> Element<'_, Message> {
+        let note = self.document.note(node, side, &port.name);
+        let name = port.name.clone();
+        let label = text_input(port.label.clone(), note.label.unwrap_or_default())
+            .size(11)
+            .width(150)
+            .on_input(move |label| Message::NoteLabel(node.raw(), side, name.clone(), label));
+        let name = port.name.clone();
+        let doc = text_input("How it is used here (markdown)", note.doc.unwrap_or_default())
+            .size(11)
+            .on_input(move |doc| Message::NoteDoc(node.raw(), side, name.clone(), doc));
+        row![label, doc].spacing(6).padding([0, 0]).into()
     }
 }

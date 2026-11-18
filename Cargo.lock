@@ -3574,6 +3574,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "getopts"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4080,7 +4089,7 @@ dependencies = [
 [[package]]
 name = "iced_nodegraph"
 version = "0.5.0-dev"
-source = "git+https://github.com/kistz/iced_nodegraph.git?rev=cd38035737f16de6d394517c3d4440bf3368c1fc#cd38035737f16de6d394517c3d4440bf3368c1fc"
+source = "git+https://github.com/kistz/iced_nodegraph.git?rev=a54935a01e503c9f482cfc5a1bb46baf6b2eb83f#a54935a01e503c9f482cfc5a1bb46baf6b2eb83f"
 dependencies = [
  "euclid",
  "iced_nodegraph_sdf",
@@ -4092,7 +4101,7 @@ dependencies = [
 [[package]]
 name = "iced_nodegraph_sdf"
 version = "0.5.0-dev"
-source = "git+https://github.com/kistz/iced_nodegraph.git?rev=cd38035737f16de6d394517c3d4440bf3368c1fc#cd38035737f16de6d394517c3d4440bf3368c1fc"
+source = "git+https://github.com/kistz/iced_nodegraph.git?rev=a54935a01e503c9f482cfc5a1bb46baf6b2eb83f#a54935a01e503c9f482cfc5a1bb46baf6b2eb83f"
 dependencies = [
  "encase",
  "glam 0.33.3",
@@ -4177,6 +4186,7 @@ dependencies = [
  "iced_runtime",
  "log",
  "num-traits",
+ "pulldown-cmark",
  "rustc-hash 2.1.3",
  "thiserror 2.0.20",
  "unicode-segmentation",
@@ -6393,6 +6403,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags 2.13.1",
+ "getopts",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7724,6 +7753,12 @@ name = "ucd-trie"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

@@ -63,4 +63,4 @@ iced_core = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3
 iced_runtime = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
 iced_widget = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
 iced_wgpu = { git = "https://github.com/kistz/iced.git", rev = "95d2b2b1a91b8ea3293c50142bbb0a8788f31291" }
-iced_nodegraph = { git = "https://github.com/kistz/iced_nodegraph.git", rev = "cd38035737f16de6d394517c3d4440bf3368c1fc" }
+iced_nodegraph = { git = "https://github.com/kistz/iced_nodegraph.git", rev = "a54935a01e503c9f482cfc5a1bb46baf6b2eb83f" }

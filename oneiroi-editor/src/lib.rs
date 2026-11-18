@@ -1,6 +1,7 @@
 use iced::window;
 
 pub mod document;
+pub mod look;
 pub mod preview;
 pub mod viewport;
 

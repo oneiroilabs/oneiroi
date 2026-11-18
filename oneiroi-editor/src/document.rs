@@ -23,7 +23,7 @@ use oneiroi_graph::{
 };
 use oneiroi_nodes::{
     curve::nurbs::clamped_uniform_knots,
-    meta::{MetaRegistry, label_of, markdown},
+    meta::{Hue, MetaRegistry, label_of, markdown},
 };
 
 /// How many 32-bit words of results the preview keeps around.
@@ -282,12 +282,14 @@ fn words_to_value(words: &[u32], scalar: Scalar) -> Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteEntry {
     pub label: String,
+    /// Where it is found, like `Curve`. Other graphs are in `Graph`.
+    pub category: String,
     pub kind: NodeKind,
 }
 
 impl std::fmt::Display for PaletteEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.label)
+        write!(f, "{} / {}", self.category, self.label)
     }
 }
 
@@ -437,21 +439,59 @@ impl Document {
     /// Everything which can be added to the current graph as a node:
     /// the nodes of the registry, and the other graphs of the document
     /// as long as they do not use this one themselves.
+    /// Sorted by category and label, so that what belongs together is
+    /// next to each other.
     pub fn palette(&self) -> Vec<PaletteEntry> {
         let ids = self.registry.palette();
-        let nodes = ids.into_iter().map(|id| PaletteEntry {
-            label: id.into(),
-            kind: NodeKind::Node(id.into()),
-        });
+        let mut nodes: Vec<_> = ids
+            .into_iter()
+            .map(|id| {
+                let meta = self.meta.node(id);
+                PaletteEntry {
+                    label: meta.map_or_else(|| id.to_string(), |meta| meta.label.to_string()),
+                    category: meta.map_or("Other", |meta| meta.category).to_string(),
+                    kind: NodeKind::Node(id.into()),
+                }
+            })
+            .collect();
+        nodes.sort_by(|a, b| (&a.category, &a.label).cmp(&(&b.category, &b.label)));
         let graphs = self
             .library
             .iter()
             .filter(|graph| !self.library.uses(&graph.name, &self.current))
             .map(|graph| PaletteEntry {
-                label: format!("graph: {}", graph.name),
+                label: graph.name.clone(),
+                category: "Graph".into(),
                 kind: NodeKind::Graph(graph.name.clone()),
             });
-        nodes.chain(graphs).collect()
+        nodes.into_iter().chain(graphs).collect()
+    }
+
+    /// The hue of what a pin carries: of its type, or of the types which
+    /// implement its trait.
+    pub fn hue(&self, ty: &PinType) -> Hue {
+        let hue = match ty {
+            PinType::Exact(ty) => self.meta.ty(ty.name).map(|meta| meta.hue),
+            PinType::Trait(tr) => self.meta.tr(tr.name).map(|meta| meta.hue),
+            PinType::Unknown => None,
+        };
+        hue.unwrap_or(Hue::Zinc)
+    }
+
+    /// What a pin carries in words, like `Curve` or `any Profile`, and what
+    /// that is, as markdown.
+    pub fn type_text(&self, ty: &PinType) -> (String, String) {
+        match ty {
+            PinType::Exact(ty) => self.meta.ty(ty.name).map_or_else(
+                || (ty.name.to_string(), String::new()),
+                |meta| (meta.label.to_string(), markdown(meta.doc)),
+            ),
+            PinType::Trait(tr) => self.meta.tr(tr.name).map_or_else(
+                || (format!("any {}", tr.name), String::new()),
+                |meta| (format!("any {}", meta.label), markdown(meta.doc)),
+            ),
+            PinType::Unknown => ("unknown".into(), String::new()),
+        }
     }
 
     /// Node `id` of the open graph as it is shown: its pins, and what they
@@ -1275,17 +1315,17 @@ mod tests {
         assert_eq!(ports(&view.outputs), [("surface".to_string(), "surface")]);
         assert_eq!(document.view(mesh).unwrap().outputs.len(), 4);
 
-        let labels: Vec<_> = document.palette().into_iter().map(|e| e.label).collect();
+        let labels: Vec<_> = document.palette().into_iter().map(|e| e.to_string()).collect();
         assert_eq!(
             labels,
             [
-                "curve.circle",
-                "curve.nurbs",
-                "curve.sample",
-                "curve.sweep",
-                "curve.translate",
-                "value.f32",
-                "value.vec3"
+                "Curve / Circle",
+                "Curve / NURBS Curve",
+                "Curve / Sample Curve",
+                "Curve / Sweep",
+                "Curve / Translate Curve",
+                "Value / Numbers",
+                "Value / Vectors"
             ]
         );
 
@@ -1297,6 +1337,23 @@ mod tests {
 
     fn radius(document: &Document) -> f32 {
         document.session().lock().unwrap().bounds().unwrap().1
+    }
+
+    #[test]
+    fn pins_are_coloured_by_what_they_carry() {
+        let document = Document::example();
+        let [curve, circle, sweep] = nodes(&document);
+        let hue = |node, output: bool| {
+            let view = document.view(node).unwrap();
+            let port = if output { &view.outputs[0] } else { &view.inputs[1] };
+            document.hue(&port.ty)
+        };
+        assert_eq!(hue(curve, true), Hue::Amber);
+        assert_eq!(hue(circle, true), Hue::Orange);
+        // A trait has its own hue, near the ones of the types which have it.
+        assert_eq!(hue(sweep, false), Hue::Orange);
+        assert_eq!(document.type_text(&document.view(sweep).unwrap().inputs[1].ty).0, "any Profile");
+        assert_eq!(document.hue(&PinType::Unknown), Hue::Zinc);
     }
 
     #[test]
@@ -1400,7 +1457,7 @@ mod tests {
         let entry = document
             .palette()
             .into_iter()
-            .find(|entry| entry.label == "graph: graph")
+            .find(|entry| entry.to_string() == "Graph / graph")
             .unwrap();
         let used = document.add(entry.kind, [0.0, 0.0]);
         let view = document.view(used).unwrap();
@@ -1427,7 +1484,7 @@ mod tests {
 
         // A graph can not be put into one which it is used by.
         document.open("graph");
-        assert!(document.palette().iter().all(|entry| entry.label != "graph: tube"));
+        assert!(document.palette().iter().all(|entry| entry.kind != NodeKind::Graph("tube".into())));
 
         // One program per graph and the one of the preview, however many
         // edits there were.
