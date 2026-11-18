@@ -4089,7 +4089,7 @@ dependencies = [
 [[package]]
 name = "iced_nodegraph"
 version = "0.5.0-dev"
-source = "git+https://github.com/kistz/iced_nodegraph.git?rev=a54935a01e503c9f482cfc5a1bb46baf6b2eb83f#a54935a01e503c9f482cfc5a1bb46baf6b2eb83f"
+source = "git+https://github.com/kistz/iced_nodegraph.git?rev=69503b7b76173c5c2e04a32566a3f2057fd691b6#69503b7b76173c5c2e04a32566a3f2057fd691b6"
 dependencies = [
  "euclid",
  "iced_nodegraph_sdf",
@@ -4101,7 +4101,7 @@ dependencies = [
 [[package]]
 name = "iced_nodegraph_sdf"
 version = "0.5.0-dev"
-source = "git+https://github.com/kistz/iced_nodegraph.git?rev=a54935a01e503c9f482cfc5a1bb46baf6b2eb83f#a54935a01e503c9f482cfc5a1bb46baf6b2eb83f"
+source = "git+https://github.com/kistz/iced_nodegraph.git?rev=69503b7b76173c5c2e04a32566a3f2057fd691b6#69503b7b76173c5c2e04a32566a3f2057fd691b6"
 dependencies = [
  "encase",
  "glam 0.33.3",

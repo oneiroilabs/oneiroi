@@ -344,7 +344,7 @@ impl Editor {
         .spacing(8)
         .align_y(Center);
         let legend = text(
-            "● one   ■ a list   ◫ a list of groups   filled: exactly this type   ring: any type of a trait",
+            "●  one     [●]  a list     {●}  a list of groups     filled: exactly this type     ring: any type of a trait",
         )
         .size(11)
         .color(Color::from_rgb(0.6, 0.6, 0.65));
@@ -451,7 +451,8 @@ impl Editor {
             let mut pins = column![].spacing(4);
             for port in &view.inputs {
                 let tip = self.tip(&look::port_tip(document, port));
-                let label = tooltip(text(port.label.clone()).size(12), tip, tooltip::Position::Left);
+                let label = container(text(port.label.clone()).size(12)).padding(iced::Padding::ZERO.left(6));
+                let label = tooltip(label, tip, tooltip::Position::Left);
                 let look = look::pin_look(document, port);
                 pins = pins.push(
                     container(pin!(Left, input_pin(&port.name), label, Input, look))
@@ -461,7 +462,8 @@ impl Editor {
             }
             for port in &view.outputs {
                 let tip = self.tip(&look::port_tip(document, port));
-                let label = tooltip(text(port.label.clone()).size(12), tip, tooltip::Position::Right);
+                let label = container(text(port.label.clone()).size(12)).padding(iced::Padding::ZERO.right(6));
+                let label = tooltip(label, tip, tooltip::Position::Right);
                 let look = look::pin_look(document, port);
                 pins = pins.push(
                     container(pin!(Right, output_pin(&port.name), label, Output, look))
@@ -490,7 +492,7 @@ impl Editor {
                         let look: &PinLook = pin.info();
                         iced_nodegraph::PinStyle {
                             color: ColorQuad::solid(look.color),
-                            shape: look.shape,
+                            brackets: look.brackets,
                             fill: look.fill,
                             ..iced_nodegraph::default_pin_style(theme, status)
                         }

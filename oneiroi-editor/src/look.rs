@@ -1,8 +1,9 @@
-//! How what a pin carries looks: its shape says how many, its fill whether
-//! it takes one type or any of a trait, and its colour which type.
+//! How what a pin carries looks. It is always a circle: brackets beside it
+//! say how many, its fill whether it takes one type or any of a trait, and
+//! its colour which type.
 
 use iced::Color;
-use iced_nodegraph::{PinFill, PinShape};
+use iced_nodegraph::{PinBrackets, PinFill};
 use oneiroi_core::node::Card;
 use oneiroi_nodes::meta::Hue;
 
@@ -42,17 +43,16 @@ pub fn color(hue: Hue) -> Color {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinLook {
     pub color: Color,
-    pub shape: PinShape,
+    pub brackets: PinBrackets,
     pub fill: PinFill,
 }
 
-/// A circle for one, a square for a list, a split square for a list of
-/// groups.
-pub fn shape(card: Card) -> PinShape {
+/// Nothing for one, `[ ]` for a list, `{ }` for a list of groups.
+pub fn brackets(card: Card) -> PinBrackets {
     match card {
-        Card::One => PinShape::Circle,
-        Card::Many => PinShape::Square,
-        Card::Grouped => PinShape::Split,
+        Card::One => PinBrackets::None,
+        Card::Many => PinBrackets::Square,
+        Card::Grouped => PinBrackets::Curly,
     }
 }
 
@@ -68,7 +68,7 @@ pub fn fill(ty: &PinType) -> PinFill {
 pub fn pin_look(document: &Document, port: &PortView) -> PinLook {
     PinLook {
         color: color(document.hue(&port.ty)),
-        shape: shape(port.card),
+        brackets: brackets(port.card),
         fill: fill(&port.ty),
     }
 }
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shape_says_how_many_and_the_fill_how_exact() {
+    fn the_brackets_say_how_many_and_the_fill_how_exact() {
         let document = Document::example();
         let sweep = document
             .graph()
@@ -122,8 +122,8 @@ mod tests {
         let view = document.view(sweep).unwrap();
         let spine = pin_look(&document, &view.inputs[0]);
         let profile = pin_look(&document, &view.inputs[1]);
-        assert_eq!((spine.shape, spine.fill), (PinShape::Split, PinFill::Solid));
-        assert_eq!((profile.shape, profile.fill), (PinShape::Square, PinFill::Ring));
+        assert_eq!((spine.brackets, spine.fill), (PinBrackets::Curly, PinFill::Solid));
+        assert_eq!((profile.brackets, profile.fill), (PinBrackets::Square, PinFill::Ring));
         assert_eq!(spine.color, color(Hue::Amber));
 
         let tip = port_tip(&document, &view.inputs[1]);
