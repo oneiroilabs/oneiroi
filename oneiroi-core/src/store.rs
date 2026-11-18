@@ -7,10 +7,9 @@
 //! Entries are looked up by [`ContentKey`]. Everything in here can be
 //! recomputed from parameters, so the store is free to evict.
 
-use std::{
-    collections::HashMap,
-    hash::{DefaultHasher, Hash, Hasher},
-};
+use std::{collections::HashMap, hash::Hash};
+
+use xxhash_rust::xxh3::Xxh3;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -59,24 +58,24 @@ impl ContentKey {
     }
 }
 
-struct KeyHasher(DefaultHasher, DefaultHasher);
+/// XXH3 with 128 bits: fast over the megabytes a parameter can have, and
+/// with too many bits for two different values to meet by chance. Keys are
+/// never shared with anybody, so nothing has to resist an attacker.
+struct KeyHasher(Xxh3);
 
 impl KeyHasher {
     fn new(domain: u8) -> Self {
-        let mut hasher = Self(DefaultHasher::new(), DefaultHasher::new());
-        // Decorrelates the two halves of the key.
-        hasher.1.write_u8(0xA5);
+        let mut hasher = Self(Xxh3::new());
         hasher.write(domain);
         hasher
     }
 
     fn write(&mut self, value: impl Hash) {
         value.hash(&mut self.0);
-        value.hash(&mut self.1);
     }
 
     fn finish(self) -> ContentKey {
-        ContentKey((self.0.finish() as u128) << 64 | self.1.finish() as u128)
+        ContentKey(self.0.digest128())
     }
 }
 
