@@ -11,6 +11,7 @@ members = [
     "oneiroi-nodes",
     "oneiroi-graph",
     "oneiroi-bench",
+    "oneiroi-meta",
     "oneiroi-core-macro",
 ]
 package.authors = ["kistz (Kilian Strunz)"]
@@ -40,6 +41,7 @@ oneiroi-graph = { path = "./oneiroi-graph" }
 oneiroi-cpp = { path = "./oneiroi-cpp" }
 oneiroi-godot = { path = "./oneiroi-godot" }
 oneiroi-wgpu = { path = "./oneiroi-wgpu" }
+oneiroi-meta = { path = "./oneiroi-meta" }
 
 wgpu = { version = "30.0.2", features = ["trace"] }
 glam = { version = "=0.32.1", features = ["bytemuck"] }

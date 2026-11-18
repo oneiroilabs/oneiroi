@@ -1191,7 +1191,6 @@ mod tests {
         const OUTPUTS: &[PortDecl] = &[PortDecl::new::<Particle>("particles")];
         let node = NodeDef {
             id: "test.grow",
-            display_name: "Grow",
             inputs: INPUTS,
             outputs: OUTPUTS,
             version: 0,
@@ -1270,7 +1269,6 @@ mod tests {
         const OUTPUTS: &[PortDecl] = &[PortDecl::new::<Pair>("pairs")];
         let node = NodeDef {
             id: "test.swap",
-            display_name: "Swap",
             inputs: INPUTS,
             outputs: OUTPUTS,
             version: 0,
@@ -1346,7 +1344,6 @@ mod tests {
         const OUTPUTS: &[PortDecl] = &[PortDecl::new::<u32>("lengths").grouped()];
         let node = NodeDef {
             id: "test.lengths",
-            display_name: "Lengths",
             version: 0,
             inputs: INPUTS,
             outputs: OUTPUTS,

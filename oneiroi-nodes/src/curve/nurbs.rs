@@ -59,6 +59,12 @@ impl DataType for CubicNurbsSegmentCache {
     ]);
 }
 
+describe_type! {
+    /// A smooth curve, as the cubic segments it is made of. A group of
+    /// segments is one curve.
+    CubicNurbsSegmentCache { label: "Curve", hue: Amber }
+}
+
 /// The two vectors a normal is stored relative to. They only depend on the
 /// tangent, so the GPU can rebuild them from the segment alone.
 fn reference_basis(tangent: Vec3) -> (Vec3, Vec3) {

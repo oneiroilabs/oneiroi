@@ -15,6 +15,14 @@ serde.workspace = true
 rayon.workspace = true
 
 oneiroi-core.workspace = true
+oneiroi-meta = { workspace = true, optional = true }
+paste = { version = "1", optional = true }
 
 #[dev-dependencies]
 oneiroi-core-macro.workspace = true
+
+[features]
+default = ["meta"]
+# What people see of the nodes and types: names, documentation and colors,
+# for editors. A host which only runs graphs can leave it out.
+meta = ["dep:oneiroi-meta", "dep:paste"]

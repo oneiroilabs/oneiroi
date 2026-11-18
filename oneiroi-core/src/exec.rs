@@ -794,7 +794,6 @@ mod tests {
     const fn binary(id: &'static str, cpu: crate::node::CpuKernel) -> NodeDef {
         NodeDef {
             id,
-            display_name: id,
             inputs: BINARY_IN,
             outputs: BINARY_OUT,
             version: 0,
@@ -807,7 +806,6 @@ mod tests {
     static OFFSET: NodeDef = binary("test.offset", |i, o| zip(i, o, |a, b| a + b));
     static SUM: NodeDef = NodeDef {
         id: "test.sum",
-        display_name: "Sum",
         inputs: &[PortDecl::new::<f32>("a"), PortDecl::new::<f32>("b")],
         outputs: &[PortDecl::new::<f32>("sum"), PortDecl::new::<u32>("count")],
         version: 0,
@@ -961,13 +959,11 @@ mod tests {
 
         static DOUBLE: GenericNode = GenericNode {
             id: "test.double",
-            display_name: "Double",
             inputs: &[GenericPort::implementing("values", NUMBER)],
             outputs: &[GenericPort::implementing("values", NUMBER)],
         };
         static DOUBLE_F32: NodeDef = NodeDef {
             id: "test.double<f32>",
-            display_name: "Double",
             inputs: &[PortDecl::new::<f32>("values")],
             outputs: &[PortDecl::new::<f32>("values")],
             version: 0,
@@ -976,7 +972,6 @@ mod tests {
         };
         static DOUBLE_U32: NodeDef = NodeDef {
             id: "test.double<u32>",
-            display_name: "Double",
             inputs: &[PortDecl::new::<u32>("values")],
             outputs: &[PortDecl::new::<u32>("values")],
             version: 0,
@@ -1209,7 +1204,6 @@ mod tests {
         /// The sum of every group, and how many elements each had.
         static SUMS: NodeDef = NodeDef {
             id: "test.sums",
-            display_name: "Sums",
             version: 0,
             inputs: &[PortDecl::new::<f32>("values").grouped()],
             outputs: &[
@@ -1230,7 +1224,6 @@ mod tests {
         /// Splits a list into groups of `size` elements.
         static SPLIT: NodeDef = NodeDef {
             id: "test.split",
-            display_name: "Split",
             version: 0,
             inputs: &[
                 PortDecl::new::<f32>("values"),
@@ -1253,7 +1246,6 @@ mod tests {
         /// Doubles every element and keeps the groups as they are.
         static DOUBLE: NodeDef = NodeDef {
             id: "test.double_grouped",
-            display_name: "Double",
             version: 0,
             inputs: &[PortDecl::new::<f32>("values").grouped()],
             outputs: &[PortDecl::new::<f32>("values").grouped_like(0)],

@@ -21,7 +21,7 @@ use oneiroi_graph::{
     Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
     Value,
 };
-use oneiroi_nodes::curve::nurbs::clamped_uniform_knots;
+use oneiroi_nodes::{curve::nurbs::clamped_uniform_knots, meta::MetaRegistry};
 
 /// How many 32-bit words of results the preview keeps around.
 const BUDGET_WORDS: u64 = 1 << 26;
@@ -284,6 +284,8 @@ pub struct Document {
     programs: HashMap<String, ProgramId>,
     library_errors: Vec<LibraryError>,
     registry: NodeRegistry,
+    /// What people see of the nodes: their names and documentation.
+    meta: MetaRegistry,
     session: Arc<Mutex<Session>>,
     error: Option<LowerError>,
 }
@@ -295,6 +297,11 @@ impl Default for Document {
 }
 
 impl Document {
+    /// What node `id` is called, by its description.
+    fn label(&self, id: &str) -> String {
+        self.meta.node(id).map_or_else(|| id.to_string(), |meta| meta.label.to_string())
+    }
+
     pub fn new(graph: Graph) -> Self {
         let mut library = Library::new();
         let current = graph.name.clone();
@@ -315,12 +322,15 @@ impl Document {
 
         let mut registry = NodeRegistry::new();
         oneiroi_nodes::register(&mut registry);
+        let mut meta = MetaRegistry::new();
+        oneiroi_nodes::describe(&mut meta);
         let mut document = Self {
             library,
             current,
             programs: HashMap::new(),
             library_errors: Vec::new(),
             registry,
+            meta,
             session: Arc::new(Mutex::new(Session::new())),
             error: None,
         };
@@ -475,7 +485,7 @@ impl Document {
                 default: port.default.words().into(),
             };
             return Some(NodeView {
-                title: custom.unwrap_or_else(|| generic.display_name.into()),
+                title: custom.unwrap_or_else(|| self.label(generic.id)),
                 inputs: generic.inputs.iter().map(port).collect(),
                 outputs: generic.outputs.iter().map(port).collect(),
                 known: true,
@@ -489,7 +499,7 @@ impl Document {
                 default: port.default.words().into(),
             };
             return Some(NodeView {
-                title: custom.unwrap_or_else(|| def.display_name.into()),
+                title: custom.unwrap_or_else(|| self.label(def.id)),
                 inputs: def.inputs.iter().map(port).collect(),
                 outputs: def.outputs.iter().map(port).collect(),
                 known: true,

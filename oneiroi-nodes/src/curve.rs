@@ -13,6 +13,12 @@ pub use nodes::{EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
 pub(crate) use profile::{fractions, sweep_example};
 pub use profile::{PROFILE, Profile};
 pub use sweep::{SWEEP, SweptPatch, TubePatch, register_profile, tube};
+#[cfg(feature = "meta")]
+pub use {
+    nodes::{NURBS_META, SAMPLE_CURVE_META, TRANSLATE_META},
+    profile::PROFILE_META,
+    sweep::SWEEP_META,
+};
 
 pub trait Curve<Sample> {
     // Required methods

@@ -247,7 +247,6 @@ mod staying_on_the_gpu {
     /// Reads what another kernel computed.
     static ON_GPU: NodeDef = NodeDef {
         id: "test.positions",
-        display_name: "Positions",
         version: 0,
         inputs: INPUTS,
         outputs: OUTPUTS,
@@ -270,7 +269,6 @@ mod staying_on_the_gpu {
     /// The same node without a kernel.
     static ON_CPU: NodeDef = NodeDef {
         id: "test.positions_cpu",
-        display_name: "Positions",
         version: 0,
         inputs: INPUTS,
         outputs: OUTPUTS,

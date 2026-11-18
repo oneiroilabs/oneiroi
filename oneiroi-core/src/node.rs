@@ -298,7 +298,6 @@ pub struct NodeDef {
     ///
     /// [`ContentKey`]: crate::store::ContentKey
     pub id: &'static str,
-    pub display_name: &'static str,
     /// Counts up whenever what the node computes changes. Results of an
     /// older version are never mistaken for ones of the newer.
     pub version: u32,
@@ -397,7 +396,6 @@ impl GenericPort {
 #[derive(Debug)]
 pub struct GenericNode {
     pub id: &'static str,
-    pub display_name: &'static str,
     pub inputs: &'static [GenericPort],
     pub outputs: &'static [GenericPort],
 }

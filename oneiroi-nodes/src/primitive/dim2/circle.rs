@@ -3,7 +3,7 @@ use std::f32::consts::TAU;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
-    node::{Caps, Drawable, GpuKernel, GpuOutput, Inputs, NodeDef, Outputs, PortDecl, Topology},
+    node::{Caps, Drawable, GpuKernel, GpuOutput, Inputs, Outputs, PortDecl, Topology},
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
@@ -34,6 +34,11 @@ impl DataType for Circle {
     const WGSL: &'static str = "Circle";
     const SCALAR: Scalar = Scalar::F32;
     const LAYOUT: Layout = Layout::Struct(&[Field::new("radius", FieldType::F32)]);
+}
+
+describe_type! {
+    /// A circle around the origin, given by its radius.
+    Circle { label: "Circle", hue: Orange }
 }
 
 /// Runs counter-clockwise, starting on the x axis.
@@ -127,30 +132,40 @@ pub const CIRCLE_LINE: Drawable = Drawable {
     },
 };
 
-pub static CIRCLE: NodeDef = NodeDef {
-    id: "curve.circle",
-    display_name: "Circle",
-    inputs: &[PortDecl::new::<f32>("radius").with_default(PortDefault::F32(&[1.0]))],
-    outputs: &[PortDecl::new::<Circle>("circle")],
-    version: 1,
-    cpu: circle,
-    gpu: &[GpuKernel {
-        wgsl: "fn circle(index: u32) -> Circle { return Circle(in_radius(index)); }",
-        outputs: &[GpuOutput {
-            entry: "circle",
-            len: |inputs| inputs.len(0),
-            words: None,
+node! {
+    /// A circle around the origin, flat in the plane of `x` and `y`. As a
+    /// profile it sweeps out a tube.
+    pub static CIRCLE = "curve.circle" {
+        label: "Circle",
+        category: "Curve",
+        version: 1,
+        inputs {
+            /// The radius, a circle for each.
+            port PortDecl::new::<f32>("radius").with_default(PortDefault::F32(&[1.0]));
+        }
+        outputs {
+            /// The circles.
+            port PortDecl::new::<Circle>("circle"), "Circles";
+        }
+        cpu: circle,
+        gpu: &[GpuKernel {
+            wgsl: "fn circle(index: u32) -> Circle { return Circle(in_radius(index)); }",
+            outputs: &[GpuOutput {
+                entry: "circle",
+                len: |inputs| inputs.len(0),
+                words: None,
+            }],
+            requires: Caps::NONE,
+            reads: &[],
+            accepts: None,
+            examples: &[
+                || vec![bytemuck::cast_slice(&[0.25f32, 1.0, -2.0, 0.0]).to_vec()],
+                || vec![Vec::new()],
+            ],
+            stages: &[],
         }],
-        requires: Caps::NONE,
-        reads: &[],
-        accepts: None,
-        examples: &[
-            || vec![bytemuck::cast_slice(&[0.25f32, 1.0, -2.0, 0.0]).to_vec()],
-            || vec![Vec::new()],
-        ],
-        stages: &[],
-    }],
-};
+    }
+}
 
 fn circle(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let circles: Vec<_> = inputs.get(0).iter().map(|r| Circle::new(*r)).collect();

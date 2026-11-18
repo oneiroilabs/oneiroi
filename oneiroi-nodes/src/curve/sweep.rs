@@ -5,7 +5,7 @@ use std::{f32::consts::TAU, marker::PhantomData};
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec3Swizzles};
 use oneiroi_core::{
-    node::{Caps, GenericNode, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
+    node::{Caps, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     program::{Program, ProgramBuilder},
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
@@ -54,6 +54,11 @@ impl DataType for TubePatch {
         Field::new("along", FieldType::Vec2),
         Field::pad(1),
     ]);
+}
+
+describe_type! {
+    /// A tube around a piece of a curve, what a circle sweeps out.
+    TubePatch { label: "Tube", hue: Emerald }
 }
 
 impl Surface for TubePatch {
@@ -113,6 +118,11 @@ impl DataType for SweptPatch {
     ]);
 }
 
+describe_type! {
+    /// A piece of the surface a curve sweeps out along another one.
+    SweptPatch { label: "Swept surface", hue: Teal }
+}
+
 impl Surface for SweptPatch {
     fn point(&self, u: f32, v: f32) -> (Vec3, Vec3) {
         let frame = self.spine.frame(u);
@@ -136,19 +146,27 @@ impl Surface for SweptPatch {
     const WGSL: &'static str = concat!(include_str!("curve.wgsl"), include_str!("swept.wgsl"));
 }
 
-/// The surface a profile leaves behind when it is moved along a curve.
-///
-/// The profile has to run counter-clockwise for the surface to face
-/// outwards.
-pub static SWEEP: GenericNode = GenericNode {
-    id: "curve.sweep",
-    display_name: "Sweep",
-    inputs: &[
-        GenericPort::exact::<CubicNurbsSegmentCache>("spine").grouped(),
-        GenericPort::implementing("profile", PROFILE),
-    ],
-    outputs: &[GenericPort::implementing("surface", SURFACE).grouped()],
-};
+generic_node! {
+    /// The surface a profile leaves behind when it is moved along a curve.
+    ///
+    /// The profile stays upright to the curve and twists as little as it can.
+    /// It has to run counter-clockwise for the surface to face outwards.
+    pub static SWEEP = "curve.sweep" {
+        label: "Sweep",
+        category: "Curve",
+        inputs {
+            /// The curves to move the profile along, a surface for each.
+            port GenericPort::exact::<CubicNurbsSegmentCache>("spine").grouped();
+            /// The cross-section, in the plane of `x` and `y`: `x` points along the
+            /// normal of the curve, `y` along its binormal.
+            port GenericPort::implementing("profile", PROFILE);
+        }
+        outputs {
+            /// The swept surfaces, one per curve of the spine.
+            port GenericPort::implementing("surface", SURFACE).grouped();
+        }
+    }
+}
 
 struct Ports<P>(PhantomData<P>);
 
@@ -196,7 +214,6 @@ impl<P: Profile> Ports<P> {
 pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
     let node = version(&SWEEP, P::NAME, |id| NodeDef {
         id,
-        display_name: SWEEP.display_name,
         inputs: Ports::<P>::INPUTS,
         outputs: Ports::<P>::OUTPUTS,
         version: 1,

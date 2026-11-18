@@ -1,10 +1,14 @@
-use oneiroi_core::types::{DataType, Trait};
+use oneiroi_core::types::DataType;
 
 use super::{nurbs::CubicNurbsSegmentCache, sweep::SweptPatch};
 use crate::surface::Surface;
 
-/// Everything that can be swept along a curve implements this trait.
-pub const PROFILE: Trait = Trait { name: "profile" };
+describe_trait! {
+    /// A flat outline which can be swept along a curve, like a circle or a
+    /// curve in the plane of `x` and `y`. It has to run counter-clockwise for
+    /// the surface it sweeps out to face outwards.
+    pub const PROFILE = "profile" { label: "Profile", hue: Orange }
+}
 
 /// A flat outline, the cross-section of a sweep.
 ///

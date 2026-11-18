@@ -5960,6 +5960,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneiroi-meta"
+version = "0.0.0"
+
+[[package]]
 name = "oneiroi-nodes"
 version = "0.0.0"
 dependencies = [
@@ -5967,6 +5971,8 @@ dependencies = [
  "glam 0.32.1",
  "oneiroi-core",
  "oneiroi-core-macro",
+ "oneiroi-meta",
+ "paste",
  "rayon",
  "serde",
 ]

@@ -1,0 +1,12 @@
+[package]
+name = "oneiroi-meta"
+description = "What nodes, types and traits are called and how they are documented, for editors"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = true
+
+[dependencies]

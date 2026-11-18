@@ -5,18 +5,21 @@ use std::marker::PhantomData;
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
     node::{
-        Drawable, GenericNode, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Topology,
+        Drawable, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Topology,
     },
     program::{BuildError, ProgramBuilder, SlotId},
-    types::{DataType, PortDefault, Trait},
+    types::{DataType, PortDefault},
 };
 
 use rayon::prelude::*;
 
 use crate::generic::version;
 
-/// Everything which can be turned into a mesh implements this trait.
-pub const SURFACE: Trait = Trait { name: "surface" };
+describe_trait! {
+    /// A surface kept exact instead of as triangles. It gets as fine as it
+    /// has to be where it is drawn or turned into a mesh.
+    pub const SURFACE = "surface" { label: "Surface", hue: Green }
+}
 
 /// One patch of a surface: a rectangle of parameters `u` and `v`, both in
 /// `0..=1`, with a point of the surface for each of them.
@@ -70,30 +73,37 @@ pub const TOLERANCE: f32 = 0.001;
 /// tolerance.
 pub const MAX_STEPS: usize = 128;
 
-/// A triangle mesh of a surface, as fine as it has to be for no triangle to
-/// be further than `tolerance` from the surface.
-///
-/// This is no node an artist places. Surfaces are drawn as they are, and
-/// what needs triangles, like a host which exports or renders meshes, puts
-/// it in front of itself with [`mesh`]. Each group of patches is a surface
-/// of its own, and all of its patches get the same detail so that where
-/// they meet their edges line up.
-pub static MESH: GenericNode = GenericNode {
-    id: "surface.mesh",
-    display_name: "Mesh",
-    inputs: &[
-        GenericPort::implementing("surface", SURFACE).grouped(),
-        GenericPort::exact::<f32>("tolerance")
-            .with_default(PortDefault::F32(&[TOLERANCE]))
-            .one(),
-    ],
-    outputs: &[
-        GenericPort::exact::<Vec3>("positions"),
-        GenericPort::exact::<Vec3>("normals"),
-        GenericPort::exact::<Vec2>("uvs"),
-        GenericPort::exact::<u32>("indices"),
-    ],
-};
+generic_node! {
+    /// A triangle mesh of a surface, as fine as it has to be for no triangle to
+    /// be further than `tolerance` from the surface.
+    ///
+    /// Surfaces are drawn as they are, so this is only needed where triangles
+    /// are, like for an export. Each group of patches is a surface of its own,
+    /// and all of its patches get the same detail so that where they meet their
+    /// edges line up.
+    pub static MESH = "surface.mesh" {
+        label: "Mesh Surface",
+        category: "Surface",
+        inputs {
+            /// The surfaces to mesh.
+            port GenericPort::implementing("surface", SURFACE).grouped(), "Surfaces";
+            /// How far a triangle may be from the surface at most. Smaller makes more triangles.
+            port GenericPort::exact::<f32>("tolerance")
+                .with_default(PortDefault::F32(&[TOLERANCE]))
+                .one();
+        }
+        outputs {
+            /// A point for each corner of the triangles.
+            port GenericPort::exact::<Vec3>("positions");
+            /// The normal of the surface at each point.
+            port GenericPort::exact::<Vec3>("normals");
+            /// Where each point is on the surface, `u` along it and `v` across.
+            port GenericPort::exact::<Vec2>("uvs"), "UVs";
+            /// Three points for each triangle, counter-clockwise seen from outside.
+            port GenericPort::exact::<u32>("indices");
+        }
+    }
+}
 
 /// The outputs of [`MESH`] of `surface`, under the names of its ports. What
 /// a host calls which needs triangles of a surface.
@@ -130,7 +140,6 @@ const OUTPUTS: &[PortDecl] = &[
 pub fn register_surface<S: Surface>(registry: &mut NodeRegistry) {
     let node = version(&MESH, S::NAME, |id| NodeDef {
         id,
-        display_name: MESH.display_name,
         inputs: Ports::<S>::INPUTS,
         outputs: OUTPUTS,
         version: 2,
