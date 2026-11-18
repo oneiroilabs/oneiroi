@@ -18,10 +18,13 @@ use oneiroi_core::{
 use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
 use oneiroi_core::program::ProgramId;
 use oneiroi_graph::{
-    Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
-    Value,
+    About, Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
+    Note, Value,
 };
-use oneiroi_nodes::{curve::nurbs::clamped_uniform_knots, meta::MetaRegistry};
+use oneiroi_nodes::{
+    curve::nurbs::clamped_uniform_knots,
+    meta::{MetaRegistry, label_of, markdown},
+};
 
 /// How many 32-bit words of results the preview keeps around.
 const BUDGET_WORDS: u64 = 1 << 26;
@@ -57,6 +60,10 @@ impl From<PortType> for PinType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortView {
     pub name: String,
+    /// What it is called where it is shown.
+    pub label: String,
+    /// How the node uses it, as markdown.
+    pub doc: String,
     pub ty: PinType,
     /// How many elements it carries.
     pub card: Card,
@@ -64,10 +71,19 @@ pub struct PortView {
     pub default: Vec<u32>,
 }
 
+/// Which side of a node a port is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Input,
+    Output,
+}
+
 /// A node as it is shown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeView {
     pub title: String,
+    /// What the node does, as markdown.
+    pub doc: String,
     pub inputs: Vec<PortView>,
     pub outputs: Vec<PortView>,
     /// Whether the registry knows the node.
@@ -438,7 +454,92 @@ impl Document {
         nodes.chain(graphs).collect()
     }
 
+    /// Node `id` of the open graph as it is shown: its pins, and what they
+    /// are called and do.
     pub fn view(&self, id: NodeId) -> Option<NodeView> {
+        let mut view = self.pins(id)?;
+        let graph = self.graph();
+        let kind = &graph.node(id)?.kind;
+        view.doc = self.node_doc(kind);
+        for (side, ports) in [(Side::Input, &mut view.inputs), (Side::Output, &mut view.outputs)] {
+            for port in ports {
+                (port.label, port.doc) = self.port_text(graph, id, side, &port.name, 0);
+            }
+        }
+        Some(view)
+    }
+
+    /// What a node of `kind` does, as markdown.
+    fn node_doc(&self, kind: &NodeKind) -> String {
+        match kind {
+            NodeKind::Node(id) => self.meta.node(id).map_or_else(String::new, |meta| markdown(meta.doc)),
+            NodeKind::Graph(name) => {
+                self.library.get(name).and_then(|graph| graph.about.doc.clone()).unwrap_or_default()
+            }
+        }
+    }
+
+    /// What `port` of node `id` of `graph` is called and how it is used:
+    /// the note on the node if there is one, else what describes the node.
+    /// A graph used as a node says so for its parameters and outputs, or
+    /// they are described like the ports they come from.
+    fn port_text(&self, graph: &Graph, id: NodeId, side: Side, port: &str, depth: u32) -> (String, String) {
+        let Some(node) = graph.node(id) else {
+            return (label_of(port), String::new());
+        };
+        let notes = match side {
+            Side::Input => &node.meta.inputs,
+            Side::Output => &node.meta.outputs,
+        };
+        let note = notes.get(port);
+        let (label, doc) = match &node.kind {
+            NodeKind::Node(node) => self
+                .meta
+                .node(node)
+                .and_then(|meta| match side {
+                    Side::Input => meta.inputs.iter().find(|p| p.name == port),
+                    Side::Output => meta.outputs.iter().find(|p| p.name == port),
+                })
+                .map_or_else(|| (label_of(port), String::new()), |meta| (meta.label(), markdown(meta.doc))),
+            // Graphs can not use themselves, the depth only guards against
+            // a library which was edited by hand.
+            NodeKind::Graph(name) if depth < 32 => match self.library.get(name) {
+                Some(inner) => {
+                    let (note, source) = match side {
+                        Side::Input => (
+                            inner.about.params.get(port),
+                            inner.param_source(port).map(|(node, port)| (node, Side::Input, port)),
+                        ),
+                        Side::Output => (
+                            inner.about.outputs.get(port),
+                            inner
+                                .outputs()
+                                .iter()
+                                .find(|output| output.name == port)
+                                .map(|output| (output.node, Side::Output, output.output.as_str())),
+                        ),
+                    };
+                    let doc = note.and_then(|note| note.doc.clone()).unwrap_or_else(|| {
+                        source.map_or_else(String::new, |(node, side, port)| {
+                            self.port_text(inner, node, side, port, depth + 1).1
+                        })
+                    });
+                    // A parameter is called what the graph calls it.
+                    let label = note.and_then(|note| note.label.clone()).unwrap_or_else(|| label_of(port));
+                    (label, doc)
+                }
+                None => (label_of(port), String::new()),
+            },
+            NodeKind::Graph(_) => (label_of(port), String::new()),
+        };
+        (
+            note.and_then(|note| note.label.clone()).unwrap_or(label),
+            note.and_then(|note| note.doc.clone()).unwrap_or(doc),
+        )
+    }
+
+    /// The pins of node `id` of the open graph, without their text.
+    fn pins(&self, id: NodeId) -> Option<NodeView> {
         let node = self.graph().node(id)?;
         let name = match &node.kind {
             NodeKind::Node(id) | NodeKind::Graph(id) => id.as_str(),
@@ -453,10 +554,13 @@ impl Document {
             let program = session.engine.programs().get(*program);
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| graph.clone()),
+                doc: String::new(),
                 inputs: program
                     .visible_params()
                     .map(|param| PortView {
                         name: param.name.clone(),
+                        label: String::new(),
+                        doc: String::new(),
                         ty: PinType::Exact(program.slot(param.slot).ty),
                         card: program.slot(param.slot).card,
                         default: param.default.to_vec(),
@@ -467,6 +571,8 @@ impl Document {
                     .iter()
                     .map(|output| PortView {
                         name: output.name.clone(),
+                        label: String::new(),
+                        doc: String::new(),
                         ty: PinType::Exact(program.slot(output.slot).ty),
                         card: program.slot(output.slot).card,
                         default: Vec::new(),
@@ -480,12 +586,15 @@ impl Document {
         if let Some(generic) = self.registry.generic(name).filter(|_| !is_graph) {
             let port = |port: &oneiroi_core::node::GenericPort| PortView {
                 name: port.name.into(),
+                label: String::new(),
+                doc: String::new(),
                 ty: port.ty.into(),
                 card: port.card,
                 default: port.default.words().into(),
             };
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| self.label(generic.id)),
+                doc: String::new(),
                 inputs: generic.inputs.iter().map(port).collect(),
                 outputs: generic.outputs.iter().map(port).collect(),
                 known: true,
@@ -494,12 +603,15 @@ impl Document {
         if let Some(def) = self.registry.get(name).filter(|_| !is_graph) {
             let port = |port: &oneiroi_core::node::PortDecl| PortView {
                 name: port.name.into(),
+                label: String::new(),
+                doc: String::new(),
                 ty: PinType::Exact(port.ty),
                 card: port.card,
                 default: port.default.words().into(),
             };
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| self.label(def.id)),
+                doc: String::new(),
                 inputs: def.inputs.iter().map(port).collect(),
                 outputs: def.outputs.iter().map(port).collect(),
                 known: true,
@@ -510,6 +622,8 @@ impl Document {
         // its links stay visible and nothing is lost.
         let unknown = |name: &str| PortView {
             name: name.into(),
+            label: String::new(),
+            doc: String::new(),
             ty: PinType::Unknown,
             card: Card::Many,
             default: Vec::new(),
@@ -527,6 +641,7 @@ impl Document {
         outputs.dedup();
         Some(NodeView {
             title: custom.unwrap_or_else(|| name.into()),
+            doc: String::new(),
             inputs: node.inputs.keys().map(|name| unknown(name)).collect(),
             outputs: outputs.iter().map(|name| unknown(name)).collect(),
             known: false,
@@ -582,6 +697,42 @@ impl Document {
                 node.meta.position[1] += delta[1];
             }
         }
+    }
+
+    /// The note on `port` of `node`, what it shows over what describes the
+    /// node.
+    pub fn note(&self, node: NodeId, side: Side, port: &str) -> Note {
+        let notes = self.graph().node(node).map(|node| match side {
+            Side::Input => &node.meta.inputs,
+            Side::Output => &node.meta.outputs,
+        });
+        notes.and_then(|notes| notes.get(port)).cloned().unwrap_or_default()
+    }
+
+    /// Gives `port` of `node` another name or documentation, or with an
+    /// empty note takes them away again. Nothing has to run again for it.
+    pub fn set_note(&mut self, node: NodeId, side: Side, port: &str, note: Note) {
+        let note = Note {
+            label: note.label.filter(|label| !label.trim().is_empty()),
+            doc: note.doc.filter(|doc| !doc.trim().is_empty()),
+        };
+        if let Some(node) = self.graph_mut().node_mut(node) {
+            match side {
+                Side::Input => node.meta.set_input_note(port, note),
+                Side::Output => node.meta.set_output_note(port, note),
+            }
+        }
+    }
+
+    /// What the open graph says about itself where it is used as a node.
+    pub fn about(&self) -> &About {
+        &self.graph().about
+    }
+
+    /// Changes what the open graph says about itself. Its parameters and
+    /// outputs are by their names.
+    pub fn set_about(&mut self, about: About) {
+        self.graph_mut().about = about;
     }
 
     /// Returns whether the link was made.
@@ -1146,6 +1297,86 @@ mod tests {
 
     fn radius(document: &Document) -> f32 {
         document.session().lock().unwrap().bounds().unwrap().1
+    }
+
+    #[test]
+    fn ports_are_described_by_notes_over_their_nodes() {
+        let mut document = Document::example();
+        let [curve, _, sweep] = nodes(&document);
+
+        let view = document.view(curve).unwrap();
+        assert_eq!(view.title, "NURBS Curve");
+        assert!(view.doc.starts_with("A smooth curve"), "{}", view.doc);
+        let points = &view.inputs[0];
+        assert_eq!((points.name.as_str(), points.label.as_str()), ("points", "Control points"));
+        assert!(points.doc.contains("weight"), "{}", points.doc);
+
+        // A note changes what is shown.
+        document.set_note(sweep, Side::Input, "spine", Note {
+            label: Some("Path".into()),
+            doc: Some("Where the tube *goes*.".into()),
+        });
+        let spine = document.view(sweep).unwrap().inputs[0].clone();
+        assert_eq!((spine.label.as_str(), spine.doc.as_str()), ("Path", "Where the tube *goes*."));
+
+        // An empty one takes it away again.
+        document.set_note(sweep, Side::Input, "spine", Note {
+            label: Some(" ".into()),
+            doc: None,
+        });
+        assert_eq!(document.note(sweep, Side::Input, "spine"), Note::default());
+        assert_eq!(document.view(sweep).unwrap().inputs[0].label, "Spine");
+    }
+
+    #[test]
+    fn a_graph_as_a_node_is_described_by_what_is_inside() {
+        let mut document = Document::example();
+        document.new_graph();
+        let circle = document.add_node("curve.circle", [0.0, 0.0]);
+        assert!(document.toggle_exposed(circle, "radius"));
+        document.toggle_output(circle, "circle");
+
+        document.open("tube");
+        let used = document.add(NodeKind::Graph("graph".into()), [0.0, 0.0]);
+        let view = document.view(used).unwrap();
+        // Without notes, like the ports the parameters and outputs come from.
+        assert_eq!(view.doc, "");
+        assert_eq!(view.inputs[0].label, "Radius");
+        assert_eq!(view.inputs[0].doc, "The radius, a circle for each.");
+
+        // A note inside wins over the node, and one of the graph over both.
+        document.open("graph");
+        document.set_note(circle, Side::Input, "radius", Note {
+            label: None,
+            doc: Some("How round.".into()),
+        });
+        document.open("tube");
+        assert_eq!(document.view(used).unwrap().inputs[0].doc, "How round.");
+        document.open("graph");
+        let mut about = document.about().clone();
+        about.doc = Some("A circle of its own.".into());
+        about.set_param_note("radius", Note {
+            label: Some("Size".into()),
+            doc: Some("How large.".into()),
+        });
+        document.set_about(about);
+        document.open("tube");
+        let view = document.view(used).unwrap();
+        assert_eq!(view.doc, "A circle of its own.");
+        assert_eq!((view.inputs[0].label.as_str(), view.inputs[0].doc.as_str()), ("Size", "How large."));
+        assert_eq!(view.outputs[0].doc, "The circles.");
+
+        // And a note on the node in this graph wins over all of them.
+        document.set_note(used, Side::Input, "radius", Note {
+            label: Some("Thickness".into()),
+            doc: None,
+        });
+        let view = document.view(used).unwrap();
+        assert_eq!((view.inputs[0].label.as_str(), view.inputs[0].doc.as_str()), ("Thickness", "How large."));
+
+        let mut loaded = Document::from_json(&document.to_json()).unwrap();
+        loaded.open("tube");
+        assert_eq!(loaded.view(used), document.view(used));
     }
 
     #[test]

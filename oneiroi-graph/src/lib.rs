@@ -5,7 +5,9 @@
 //! ids up in a registry and builds a program out of them.
 //!
 //! Next to the wiring a graph carries what every editor wants to keep with
-//! it, like the position of a node. None of that takes part in lowering.
+//! it, like the position of a node, and what people read about it, like
+//! other names for ports and their documentation. None of that takes part
+//! in lowering.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -102,6 +104,31 @@ pub enum Input {
 /// The rest is left out, and that is reported.
 pub const MAX_ELEMENTS: u32 = 4096;
 
+/// What people read about a port where it should differ from what its node
+/// says: another name, or documentation of how it is used here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Note {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+}
+
+impl Note {
+    pub fn is_empty(&self) -> bool {
+        self.label.is_none() && self.doc.is_none()
+    }
+}
+
+/// Sets or clears the note of `port` in `notes`, leaving out empty ones.
+fn set_note(notes: &mut BTreeMap<String, Note>, port: &str, note: Note) {
+    match note.is_empty() {
+        true => notes.remove(port),
+        false => notes.insert(port.into(), note),
+    };
+}
+
 /// What an editor keeps with a node. It never changes what the graph does.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct NodeMeta {
@@ -111,6 +138,52 @@ pub struct NodeMeta {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Notes on its inputs, by the name of the port.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, Note>,
+    /// Notes on its outputs, by the name of the port.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, Note>,
+}
+
+impl NodeMeta {
+    pub fn set_input_note(&mut self, port: &str, note: Note) {
+        set_note(&mut self.inputs, port, note);
+    }
+
+    pub fn set_output_note(&mut self, port: &str, note: Note) {
+        set_note(&mut self.outputs, port, note);
+    }
+}
+
+/// What people read about a graph where it is used as a node in another.
+/// Its parameters and outputs without a note are described like the ports
+/// they come from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct About {
+    /// What the graph does, as markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    /// Notes on its parameters, by their names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Note>,
+    /// Notes on its outputs, by their names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, Note>,
+}
+
+impl About {
+    pub fn is_empty(&self) -> bool {
+        self.doc.is_none() && self.params.is_empty() && self.outputs.is_empty()
+    }
+
+    pub fn set_param_note(&mut self, param: &str, note: Note) {
+        set_note(&mut self.params, param, note);
+    }
+
+    pub fn set_output_note(&mut self, output: &str, note: Note) {
+        set_note(&mut self.outputs, output, note);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +215,8 @@ pub struct Graph {
     /// The node an editor shows in its preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "About::is_empty")]
+    pub about: About,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +269,7 @@ impl Graph {
             next_id: 0,
             outputs: Vec::new(),
             display: None,
+            about: About::default(),
         }
     }
 
@@ -372,6 +448,18 @@ impl Graph {
         self.nodes.values().filter_map(|node| match &node.kind {
             NodeKind::Graph(name) => Some(name.as_str()),
             NodeKind::Node(_) => None,
+        })
+    }
+
+    /// The input exposed as parameter `name` which comes first, as its node
+    /// and its port. A parameter without a note of its own is described
+    /// like it.
+    pub fn param_source(&self, name: &str) -> Option<(NodeId, &str)> {
+        self.nodes.iter().find_map(|(id, node)| {
+            node.inputs.iter().find_map(|(port, input)| match input {
+                Input::Exposed { name: exposed, .. } if exposed == name => Some((*id, port.as_str())),
+                _ => None,
+            })
         })
     }
 

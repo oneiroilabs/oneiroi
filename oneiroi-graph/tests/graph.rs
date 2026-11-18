@@ -7,8 +7,8 @@ use oneiroi_core::{
     program::{BuildError, ProgramBuilder, ProgramId},
 };
 use oneiroi_graph::{
-    Context, EditError, FormatError, Graph, Input, Library, LibraryError, LowerErrorKind, NodeId,
-    Value,
+    About, Context, EditError, FormatError, Graph, Input, Library, LibraryError, LowerErrorKind, NodeId,
+    Note, Value,
 };
 use oneiroi_nodes::{
     curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots},
@@ -173,7 +173,16 @@ fn metadata_does_not_change_the_program() {
     let meta = &mut graph.node_mut(nodes.circle).unwrap().meta;
     meta.position = [10.0, 20.0];
     meta.name = Some("Profile".into());
+    meta.set_input_note("radius", Note {
+        label: Some("Thickness".into()),
+        doc: Some("How thick the tube is.".into()),
+    });
     graph.display = Some(nodes.circle);
+    graph.about.doc = Some("A tube along a curve.".into());
+    graph.about.set_param_note("radius", Note {
+        label: None,
+        doc: Some("Half the thickness.".into()),
+    });
     let moved = hash(&graph, &mut engine);
     assert_eq!(before, moved);
 
@@ -633,4 +642,44 @@ fn exposed_inputs_keep_what_they_carry() {
         })
         .unwrap_err();
     assert_eq!(error.kind, LowerErrorKind::UnknownInput);
+}
+
+#[test]
+fn notes_survive_the_file_and_empty_ones_are_left_out() {
+    let (mut graph, nodes) = tube();
+    let empty = graph.to_json();
+    assert!(!empty.contains("\"about\"") && !empty.contains("\"inputs\": {}"));
+
+    let meta = &mut graph.node_mut(nodes.sweep).unwrap().meta;
+    meta.set_output_note("surface", Note {
+        label: Some("Tube".into()),
+        doc: None,
+    });
+    meta.set_input_note("spine", Note::default());
+    assert!(meta.inputs.is_empty(), "an empty note is no note");
+    graph.about.doc = Some("A *tube*.".into());
+    graph.about.set_output_note("mesh", Note {
+        label: None,
+        doc: Some("Triangles of it.".into()),
+    });
+
+    let json = graph.to_json();
+    assert_eq!(Graph::from_json(&json).unwrap(), graph);
+    // Files of before have none of it, and still load.
+    assert_eq!(Graph::from_json(&empty).unwrap().about, About::default());
+
+    graph.about.set_output_note("mesh", Note::default());
+    graph.about.doc = None;
+    assert!(graph.about.is_empty());
+}
+
+#[test]
+fn a_parameter_is_described_like_the_input_it_comes_from() {
+    let mut graph = Graph::new("g");
+    let a = graph.add("value.f32");
+    let b = graph.add("value.f32");
+    graph.expose(b, "values", "size", None).unwrap();
+    graph.expose(a, "values", "size", None).unwrap();
+    assert_eq!(graph.param_source("size"), Some((a, "values")));
+    assert_eq!(graph.param_source("other"), None);
 }
