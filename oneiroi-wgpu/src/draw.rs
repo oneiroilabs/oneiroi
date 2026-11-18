@@ -11,13 +11,57 @@ use std::{
 use glam::{Mat4, Vec3};
 use oneiroi_core::{
     node::{Drawable, Topology},
-    shader::{self, DrawArgs, LodArgs, LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError},
+    shader::{self, DrawArgs, InstanceArgs, LodArgs, LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError},
     store::Handle,
 };
 
 use crate::mesh::{depth_texture, restrict};
 
 /// From where and how finely something is drawn.
+/// What is drawn of instances besides the elements of their shape: the
+/// rows, and the offsets of the groups of the shape, each in the buffer of
+/// its page. `patches` is how many elements all instances have together.
+#[derive(Debug, Clone, Copy)]
+pub struct Instanced<'a> {
+    pub rows: (&'a wgpu::Buffer, Handle),
+    pub groups: (&'a wgpu::Buffer, Handle),
+    pub patches: u32,
+}
+
+/// What is bound to the bindings of [`instanced_entries`].
+fn instanced_bindings<'a>(
+    rows: &'a wgpu::Buffer,
+    groups: &'a wgpu::Buffer,
+    args: &'a wgpu::Buffer,
+) -> [wgpu::BindGroupEntry<'a>; 3] {
+    [
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: rows.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: groups.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 5,
+            resource: args.as_entire_binding(),
+        },
+    ]
+}
+
+/// The bindings a shader of instances has besides the others, see
+/// [`shader::draw`].
+fn instanced_entries(
+    buffer: impl Fn(u32, wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry,
+) -> [wgpu::BindGroupLayoutEntry; 3] {
+    [
+        buffer(3, wgpu::BufferBindingType::Storage { read_only: true }),
+        buffer(4, wgpu::BufferBindingType::Storage { read_only: true }),
+        buffer(5, wgpu::BufferBindingType::Uniform),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawView {
     pub view_projection: Mat4,
@@ -140,6 +184,7 @@ struct View {
     /// The bind group of the last frame, and what it was made for. Pages
     /// and uniforms stay, so it can almost always be used again.
     bound: Option<(BindKey, wgpu::BindGroup)>,
+    instance_uniform: wgpu::Buffer,
 }
 
 /// What a bind group of a view is made of: the pipeline it is for, the
@@ -149,6 +194,8 @@ struct BindKey {
     pipeline: (&'static str, Kind),
     page: wgpu::Buffer,
     lod: bool,
+    /// The pages of the rows and of the offsets of instances.
+    instanced: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 
 impl View {
@@ -164,6 +211,7 @@ impl View {
         Self {
             uniform: uniform("Oneiroi Draw Args", size_of::<DrawArgs>() as u64),
             lod_uniform: uniform("Oneiroi Lod Args", size_of::<LodArgs>() as u64),
+            instance_uniform: uniform("Oneiroi Instance Args", size_of::<InstanceArgs>() as u64),
             depth: depth_texture(device, (1, 1)),
             prepared: None,
             counter: Counter::new(device),
@@ -277,12 +325,16 @@ impl DrawStage {
             },
             count: None,
         };
+        let mut entries = vec![
+            buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
+            buffer(1, wgpu::BufferBindingType::Uniform),
+        ];
+        if drawable.ty.prototype.is_some() {
+            entries.extend(instanced_entries(buffer));
+        }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(drawable.ty.name),
-            entries: &[
-                buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
-                buffer(1, wgpu::BufferBindingType::Uniform),
-            ],
+            entries: &entries,
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(drawable.ty.name),
@@ -396,13 +448,17 @@ impl DrawStage {
             },
             count: None,
         };
+        let mut entries = vec![
+            buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
+            buffer(1, wgpu::BufferBindingType::Uniform),
+            buffer(2, wgpu::BufferBindingType::Storage { read_only: false }),
+        ];
+        if drawable.ty.prototype.is_some() {
+            entries.extend(instanced_entries(buffer));
+        }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(drawable.ty.name),
-            entries: &[
-                buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
-                buffer(1, wgpu::BufferBindingType::Uniform),
-                buffer(2, wgpu::BufferBindingType::Storage { read_only: false }),
-            ],
+            entries: &entries,
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(drawable.ty.name),
@@ -456,6 +512,43 @@ impl DrawStage {
         drawable: &Drawable,
         page: &wgpu::Buffer,
         handle: Handle,
+        view: &DrawView,
+    ) {
+        self.prepare_any(index, device, queue, target_size, drawable, page, handle, None, view);
+    }
+
+    /// [`DrawStage::prepare_view`] for instances, whose `drawable` is the
+    /// one of their type: `page` and `handle` are where the elements of
+    /// their shape are, `instanced` where the rows and the groups of the
+    /// shape are. Every instance is drawn where it is, with the detail it
+    /// needs there.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_instances_view(
+        &mut self,
+        index: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_size: (u32, u32),
+        drawable: &Drawable,
+        page: &wgpu::Buffer,
+        handle: Handle,
+        instanced: Instanced<'_>,
+        view: &DrawView,
+    ) {
+        self.prepare_any(index, device, queue, target_size, drawable, page, handle, Some(instanced), view);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_any(
+        &mut self,
+        index: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_size: (u32, u32),
+        drawable: &Drawable,
+        page: &wgpu::Buffer,
+        handle: Handle,
+        instanced: Option<Instanced<'_>>,
         view: &DrawView,
     ) {
         while self.views.len() <= index {
@@ -517,10 +610,24 @@ impl DrawStage {
         };
         let slot = &mut self.views[index];
 
-        let instances = handle.len / drawable.ty.words;
+        let instances = match &instanced {
+            Some(instanced) => instanced.patches,
+            None => handle.len / drawable.ty.words,
+        };
         if instances == 0 {
             return;
         }
+        // Where the rows of instances and the groups of their shape are.
+        let extra = instanced.map(|instanced| {
+            let args = InstanceArgs {
+                rows_offset: instanced.rows.1.offset,
+                rows: instanced.rows.1.len / drawable.ty.words,
+                groups_offset: instanced.groups.1.offset,
+                groups: instanced.groups.1.len,
+            };
+            queue.write_buffer(&slot.instance_uniform, 0, bytemuck::bytes_of(&args));
+            (instanced.rows.0.clone(), instanced.groups.0.clone())
+        });
         let view_projection = view.view_projection.to_cols_array_2d();
         let light = view.light.extend(0.0).to_array();
         let color = view.color.extend(1.0).to_array();
@@ -561,7 +668,8 @@ impl DrawStage {
                     && !counter.pending
                     && let Some((count, layout)) = &pipeline.count
                 {
-                    Self::count(device, queue, counter, count, layout, page, &slot.lod_uniform, instances);
+                    let extra = extra.as_ref().map(|(rows, groups)| (rows, groups, &slot.instance_uniform));
+                    Self::count(device, queue, counter, count, layout, page, &slot.lod_uniform, extra, instances);
                 }
                 (&slot.lod_uniform, draw)
             }
@@ -589,23 +697,28 @@ impl DrawStage {
             pipeline: key,
             page: page.clone(),
             lod: matches!(draw, Draw::Tasks { .. }) || std::ptr::eq(uniform, &slot.lod_uniform),
+            instanced: extra.clone(),
         };
         let bind_group = match &slot.bound {
             Some((bound, bind_group)) if *bound == bind_key => bind_group.clone(),
             _ => {
+                let mut entries = vec![
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: page.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: uniform.as_entire_binding(),
+                    },
+                ];
+                if let Some((rows, groups)) = &extra {
+                    entries.extend(instanced_bindings(rows, groups, &slot.instance_uniform));
+                }
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(key.0),
                     layout: &pipeline.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: page.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: uniform.as_entire_binding(),
-                        },
-                    ],
+                    entries: &entries,
                 });
                 self.bind_groups += 1;
                 slot.bound = Some((bind_key, bind_group.clone()));
@@ -629,25 +742,30 @@ impl DrawStage {
         layout: &wgpu::BindGroupLayout,
         page: &wgpu::Buffer,
         uniform: &wgpu::Buffer,
+        instanced: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer)>,
         patches: u32,
     ) {
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: page.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: counter.buffer.as_entire_binding(),
+            },
+        ];
+        if let Some((rows, groups, args)) = instanced {
+            entries.extend(instanced_bindings(rows, groups, args));
+        }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Oneiroi Count"),
             layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: page.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: counter.buffer.as_entire_binding(),
-                },
-            ],
+            entries: &entries,
         });
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&counter.buffer, 0, None);

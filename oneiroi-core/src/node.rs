@@ -516,6 +516,8 @@ pub struct NodeRegistry {
     drawables: HashMap<&'static str, Drawable>,
     /// Nodes which are never placed by hand, by id.
     hidden: std::collections::HashSet<&'static str>,
+    /// What copies instances back into the shape they refer to.
+    realizer: Option<&'static GenericNode>,
 }
 
 impl NodeRegistry {
@@ -570,6 +572,24 @@ impl NodeRegistry {
         if !entry.instances.iter().any(|known| std::ptr::eq(*known, node)) {
             entry.instances.push(node);
         }
+    }
+
+    /// Says which generic node copies instances back into their shape: it
+    /// takes instances as its only input and gives the shape. It is put in
+    /// front of a port which takes a shape where instances are linked.
+    pub fn set_realizer(&mut self, realizer: &'static GenericNode) {
+        self.realizer = Some(realizer);
+    }
+
+    pub fn realizer(&self) -> Option<&'static GenericNode> {
+        self.realizer
+    }
+
+    /// Whether instances of type `ty` can be copied back into their shape.
+    pub fn realizes(&self, ty: &TypeInfo) -> bool {
+        self.realizer.is_some_and(|realizer| {
+            self.instances(realizer).iter().any(|node| node.inputs[0].ty == *ty)
+        })
     }
 
     /// Says how values of a data type can be drawn.

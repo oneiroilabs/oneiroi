@@ -322,7 +322,9 @@ impl<'a> Lowerer<'a> {
                             };
                             at(Some(&port.name), kind)
                         })?;
-                    Some(slot)
+                    Some(self.realized(slot, port).map_err(|error| {
+                        at(Some(&port.name), LowerErrorKind::Build(error))
+                    })?)
                 }
             };
             slots.push(slot);
@@ -360,6 +362,23 @@ impl<'a> Lowerer<'a> {
         self.done
             .insert(id, target.outputs().into_iter().zip(outputs).collect());
         Ok(())
+    }
+
+    /// `slot` as `port` takes it: instances linked to a port which takes
+    /// a shape are copied into the shape in front of it.
+    fn realized(&mut self, slot: SlotId, port: &Port) -> Result<SlotId, BuildError> {
+        let registry = self.context.registry;
+        let ty = self.builder.slot_type(slot);
+        let taken = match port.ty {
+            PortType::Exact(expected) => expected == ty,
+            PortType::Trait(tr) => registry.implements(&ty, tr),
+        };
+        match (taken, registry.realizer()) {
+            (false, Some(realizer)) if registry.realizes(&ty) => {
+                Ok(self.builder.generic(registry, realizer, &[slot])?[0])
+            }
+            _ => Ok(slot),
+        }
     }
 
     fn output(&mut self, name: &str, node: NodeId, output: &str) -> Result<(), LowerError> {

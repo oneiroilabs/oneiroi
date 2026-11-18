@@ -10,6 +10,7 @@ use oneiroi_core::{
 };
 use oneiroi_nodes::{
     curve::{NURBS, SAMPLE_CURVE, SWEEP, TRANSLATE},
+    instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
     surface,
 };
@@ -62,6 +63,8 @@ const CURVES: &[Size] = &[
     Size::new(1024, 128),
 ];
 const CURVES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(256, 32), Size::new(16, 128)];
+const INSTANCES: &[Size] = &[Size::new(1, 32), Size::new(16, 32), Size::new(256, 32), Size::new(1024, 32)];
+const INSTANCES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(256, 32)];
 const MESHES: &[Size] = &[Size::new(1, 32), Size::new(16, 32), Size::new(64, 32)];
 const MESHES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(16, 32)];
 
@@ -185,6 +188,35 @@ pub const SCENARIOS: &[Scenario] = &[
         edit: moved_points,
     },
     Scenario {
+        name: "instances",
+        about: "A ring of 10 patches put onto 64 frames along every curve by reference, the control points move",
+        sizes: INSTANCES,
+        quick: INSTANCES_QUICK,
+        build: |registry| {
+            let mut b = ProgramBuilder::new("instances");
+            let placed = rings_on_curves(&mut b, registry);
+            b.output("instances", placed);
+            b.finish()
+        },
+        setup: points,
+        edit: moved_points,
+    },
+    Scenario {
+        name: "instances realized",
+        about: "The rings of `instances`, copied to where each one is",
+        sizes: INSTANCES,
+        quick: INSTANCES_QUICK,
+        build: |registry| {
+            let mut b = ProgramBuilder::new("instances realized");
+            let placed = rings_on_curves(&mut b, registry);
+            let copies = b.generic(registry, &REALIZE, &[placed]).unwrap()[0];
+            b.output("copies", copies);
+            b.finish()
+        },
+        setup: points,
+        edit: moved_points,
+    },
+    Scenario {
         name: "mesh",
         about: "Mesh of a swept circle, the tolerance changes",
         sizes: MESHES,
@@ -215,6 +247,31 @@ fn curves(b: &mut ProgramBuilder) -> SlotId {
     let points = b.param_grouped("points", <[f32; 4]>::INFO, &[]);
     let knots = b.constant::<f32>(&[]);
     b.node(&NURBS, &[points, knots]).unwrap()[0]
+}
+
+/// A thin tube around a circle of 13 points, 10 patches, put onto 64
+/// frames along every curve.
+fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
+    let spine = curves(b);
+    let count = b.constant::<u32>(&[SAMPLES as u32]);
+    let spacing = b.constant::<f32>(&[0.0]);
+    let t = b.constant::<f32>(&[]);
+    let frames = b.node(&SAMPLE_CURVE, &[spine, count, spacing, t]).unwrap()[0];
+
+    let around: Vec<[f32; 4]> = (0..=12)
+        .map(|i| {
+            let angle = i as f32 / 12.0 * std::f32::consts::TAU;
+            [0.45 * angle.cos(), 0.45 * angle.sin(), 0.0, 1.0]
+        })
+        .collect();
+    let ring = b.constant(&around);
+    let knots = b.constant::<f32>(&[]);
+    let ring = b.node(&NURBS, &[ring, knots]).unwrap()[0];
+    let radius = b.constant::<f32>(&[0.06]);
+    let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+    let torus = b.generic(registry, &SWEEP, &[ring, circle]).unwrap()[0];
+    let scale = b.constant::<f32>(&[1.0]);
+    b.generic(registry, &INSTANCE, &[frames, torus, scale]).unwrap()[0]
 }
 
 /// The control points of every curve, with the first one of the first

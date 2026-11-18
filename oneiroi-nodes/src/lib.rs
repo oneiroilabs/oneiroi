@@ -53,6 +53,8 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         &primitive::CIRCLE_META,
         &surface::MESH_META,
         &instance::INSTANCE_META,
+        &instance::TRANSFORM_META,
+        &instance::REALIZE_META,
     ] {
         meta.add_node(*node);
     }
@@ -73,4 +75,5 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
     meta.add_trait(curve::PROFILE_META);
     meta.add_trait(surface::SURFACE_META);
     meta.add_trait(instance::PLACEABLE_META);
+    instance::describe(meta);
 }

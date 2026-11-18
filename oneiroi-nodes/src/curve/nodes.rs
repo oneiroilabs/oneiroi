@@ -713,7 +713,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 9);
+        assert_eq!(checked, 25);
 
         // And so does everything which says it can be drawn as it is: the
         // two kinds of surface, the curve and the circle.
@@ -737,7 +737,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!((drawn, detailed), (4, 4));
+        // And instances of each of them.
+        assert_eq!((drawn, detailed), (8, 8));
     }
 
     #[test]
@@ -746,9 +747,10 @@ mod tests {
         crate::register(&mut registry);
         crate::register(&mut registry);
         // 5 nodes of curves, a mesh for each of the 2 surfaces, a sweep
-        // for each of the 2 profiles, 2 values and an instance node for
-        // each of the 3 shapes.
-        assert_eq!(registry.iter().count(), 13);
+        // for each of the 2 profiles and 2 values. For each of the 4
+        // shapes Instance on Points and Transform, given the shape or
+        // instances of it, and Realize for the 3 which can be copied.
+        assert_eq!(registry.iter().count(), 10 + 4 * 4 + 3);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

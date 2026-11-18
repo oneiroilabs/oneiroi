@@ -683,3 +683,52 @@ fn a_parameter_is_described_like_the_input_it_comes_from() {
     assert_eq!(graph.param_source("size"), Some((a, "values")));
     assert_eq!(graph.param_source("other"), None);
 }
+
+/// Instances linked to a port which takes the shape are copied into it in
+/// front of the port, and where they are taken as they are nothing is
+/// copied.
+#[test]
+fn instances_are_copied_where_the_shape_is_needed() {
+    let mut graph = Graph::new("instances");
+    let curve = graph.add("curve.nurbs");
+    graph.set(curve, "points", Value::F32(POINTS.as_flattened().to_vec())).unwrap();
+    let sample = graph.add("curve.sample");
+    graph.set(sample, "count", 3u32).unwrap();
+    graph.connect(curve, "segments", sample, "segments").unwrap();
+    let placed = graph.add("instance.on_points");
+    graph.connect(sample, "frames", placed, "points").unwrap();
+    graph.connect(curve, "segments", placed, "shape").unwrap();
+    // Instances of instances stay instances.
+    let moved = graph.add("instance.transform");
+    graph.connect(placed, "instances", moved, "shape").unwrap();
+    // Translate takes curves, so these are copied.
+    let translate = graph.add("curve.translate");
+    graph.connect(moved, "instances", translate, "segments").unwrap();
+    graph.add_output("segments", translate, "segments").unwrap();
+    graph.add_output("instances", moved, "instances").unwrap();
+
+    let mut engine = Engine::default();
+    let id = lower(&graph, &mut engine);
+    let program = engine.programs().get(id);
+    let ids: Vec<_> = program
+        .ops
+        .iter()
+        .filter_map(|op| match op.kind {
+            oneiroi_core::program::OpKind::Node(node) => Some(node.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids.iter().filter(|id| id.starts_with("instance.realize")).count(),
+        1,
+        "{ids:?}"
+    );
+
+    let mut instance = engine.instantiate(id);
+    engine.evaluate([&mut instance]);
+    let segments = POINTS.len() - 3;
+    let copies = engine.read::<oneiroi_nodes::curve::nurbs::CubicNurbsSegmentCache>(&instance, "segments");
+    assert_eq!(copies.map(<[_]>::len), Some(3 * segments));
+    let rows = engine.read::<oneiroi_core::types::InstanceRow>(&instance, "instances");
+    assert_eq!(rows.map(<[_]>::len), Some(3));
+}

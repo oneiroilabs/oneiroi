@@ -13,7 +13,7 @@ use oneiroi_core::{
     exec::{Engine, Instance, Overflow},
     node::{Card, Drawable, NodeRegistry, PortType, Topology},
     store::ContentKey,
-    types::{DataType, Scalar, Trait, TypeInfo},
+    types::{DataType, InstanceRow, Scalar, Trait, TypeInfo},
 };
 use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
 use oneiroi_core::program::ProgramId;
@@ -94,8 +94,14 @@ pub struct NodeView {
 #[derive(Debug, Clone, Copy)]
 pub enum Shown {
     Nothing,
-    /// A value the GPU draws as it is, without a mesh in between.
-    Drawn { key: ContentKey, drawable: Drawable },
+    /// A value the GPU draws as it is, without a mesh in between. For
+    /// instances, `key` is their rows and `shape` the elements and offsets
+    /// of the shape they refer to.
+    Drawn {
+        key: ContentKey,
+        drawable: Drawable,
+        shape: Option<(ContentKey, ContentKey)>,
+    },
     /// A triangle mesh somebody made on purpose.
     Mesh {
         positions: ContentKey,
@@ -108,9 +114,10 @@ impl PartialEq for Shown {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Nothing, Self::Nothing) => true,
-            (Self::Drawn { key: a, drawable: x }, Self::Drawn { key: b, drawable: y }) => {
-                a == b && x.ty == y.ty
-            }
+            (
+                Self::Drawn { key: a, drawable: x, shape: c },
+                Self::Drawn { key: b, drawable: y, shape: z },
+            ) => a == b && x.ty == y.ty && c == z,
             (
                 Self::Mesh { positions: a, indices: b, normals: c },
                 Self::Mesh { positions: x, indices: y, normals: z },
@@ -232,14 +239,76 @@ impl Session {
         })
     }
 
+    /// How many elements all copies of instances have together, which is
+    /// how many are drawn: where the last row starts, and how long its
+    /// group of the shape is. `shape_len` is how many elements the shape
+    /// has, for a shape without offsets.
+    pub fn instance_patches(&mut self, rows: ContentKey, groups: ContentKey, shape_len: u32) -> Option<u32> {
+        let last = *self.engine.fetch_key::<InstanceRow>(rows)?.last()?;
+        let offsets = self.engine.fetch_key::<u32>(groups)?;
+        let group = last.group as usize;
+        let len = match offsets.is_empty() {
+            true => shape_len,
+            false => match (offsets.get(group), offsets.get(group + 1)) {
+                (Some(start), Some(end)) => end.min(&shape_len).saturating_sub(*start),
+                _ => 0,
+            },
+        };
+        Some(last.first + len)
+    }
+
+    /// A sphere around all instances: the one around each group of the
+    /// shape, put where every instance is, and a sphere around those.
+    fn instances_bounds(
+        &mut self,
+        rows: ContentKey,
+        drawable: &Drawable,
+        elements: ContentKey,
+        groups: ContentKey,
+    ) -> Option<(Vec3, f32)> {
+        let rows = self.engine.fetch_key::<InstanceRow>(rows)?.to_vec();
+        let offsets = self.engine.fetch_key::<u32>(groups)?.to_vec();
+        let words = self.engine.fetch_key::<u32>(elements)?.to_vec();
+        let shape = drawable.ty.prototype?;
+        let len = words.len() / shape.words as usize;
+        let ranges: Vec<std::ops::Range<usize>> = match offsets.is_empty() {
+            true => vec![0..len],
+            false => offsets
+                .windows(2)
+                .map(|pair| (pair[0] as usize).min(len)..(pair[1] as usize).min(len))
+                .collect(),
+        };
+        let words_of = |range: &std::ops::Range<usize>| {
+            &words[range.start * shape.words as usize..range.end * shape.words as usize]
+        };
+        let spheres: Vec<Option<(Vec3, f32)>> = ranges
+            .iter()
+            .map(|range| (drawable.bounds)(words_of(range)).map(|(center, radius)| (center.into(), radius)))
+            .collect();
+        let (mut min, mut max) = (Vec3::MAX, Vec3::MIN);
+        for row in &rows {
+            let Some(Some((center, radius))) = spheres.get(row.group as usize) else {
+                continue;
+            };
+            let center = row.transform.point(*center);
+            let radius = radius * row.transform.scale;
+            min = min.min(center - radius);
+            max = max.max(center + radius);
+        }
+        (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
+    }
+
     /// Center and radius of a sphere around what is shown.
     pub fn bounds(&mut self) -> Option<(Vec3, f32)> {
         self.run();
         match self.shown {
             Shown::Nothing => None,
-            Shown::Drawn { key, drawable } => {
+            Shown::Drawn { key, drawable, shape: None } => {
                 let (center, radius) = (drawable.bounds)(self.engine.fetch_key::<u32>(key)?)?;
                 Some((center.into(), radius))
+            }
+            Shown::Drawn { key, drawable, shape: Some((elements, groups)) } => {
+                self.instances_bounds(key, &drawable, elements, groups)
             }
             Shown::Mesh { positions, .. } => {
                 let positions = self.engine.fetch_key::<Vec3>(positions)?;
@@ -747,20 +816,38 @@ impl Document {
 
     /// Whether `output` of `from` may be plugged into `input` of `to`.
     pub fn accepts(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
+        self.link(from, output, to, input).is_some()
+    }
+
+    /// Whether a link from `output` of `from` to `input` of `to` copies
+    /// instances into the shape they refer to: the input takes the shape,
+    /// and is given instances of it.
+    pub fn realizes(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
+        self.link(from, output, to, input) == Some(true)
+    }
+
+    /// Whether the link can be made, and if so whether instances are copied
+    /// on the way.
+    fn link(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> Option<bool> {
         let port = |id, name: &str, outputs: bool| {
             let view = self.view(id)?;
             let ports = if outputs { view.outputs } else { view.inputs };
             ports.into_iter().find(|port| port.name == name)
         };
-        let (Some(source), Some(target)) = (port(from, output, true), port(to, input, false))
-        else {
-            return false;
+        let (source, target) = (port(from, output, true)?, port(to, input, false)?);
+        let takes = |found: &TypeInfo| match target.ty {
+            PinType::Exact(expected) => *found == expected,
+            PinType::Trait(tr) => self.registry.implements(found, tr),
+            PinType::Unknown => true,
         };
-        match (source.ty, target.ty) {
-            (PinType::Exact(found), PinType::Exact(expected)) => found == expected,
-            (PinType::Exact(found), PinType::Trait(tr)) => self.registry.implements(&found, tr),
+        match source.ty {
+            PinType::Exact(found) if takes(&found) => Some(false),
+            PinType::Exact(found) => {
+                let shape = found.prototype.filter(|_| self.registry.realizes(&found))?;
+                takes(shape).then_some(true)
+            }
             // Only lowering can tell once a trait or an unknown node is involved.
-            _ => true,
+            _ => Some(false),
         }
     }
 
@@ -996,7 +1083,8 @@ impl Document {
         let drawn = program.outputs.iter().find_map(|output| {
             let drawable = *self.registry.drawable(&program.slot(output.slot).ty)?;
             let key = session.engine.output_key(&instance, &output.name)?;
-            Some(Shown::Drawn { key, drawable })
+            let shape = session.engine.prototype_keys(&instance, &output.name);
+            Some(Shown::Drawn { key, drawable, shape })
         });
         let mesh = || {
             Some(Shown::Mesh {
@@ -1219,7 +1307,7 @@ mod tests {
 
         // The sweep is drawn as it is: only the curve, the circle and the
         // sweep run, and nobody makes a mesh.
-        let Shown::Drawn { key, drawable } = document.shown() else {
+        let Shown::Drawn { key, drawable, .. } = document.shown() else {
             panic!("a surface can be drawn");
         };
         assert_eq!(drawable.ty.name, "tube_patch");
@@ -1382,6 +1470,8 @@ mod tests {
                 "Curve / Sweep",
                 "Curve / Translate Curve",
                 "Instance / Instance on Points",
+                "Instance / Realize Instances",
+                "Instance / Transform",
                 "Value / Numbers",
                 "Value / Vectors",
                 "Graph / instances"
@@ -1592,7 +1682,7 @@ mod tests {
         assert_eq!(document.input_text(tubes, "radius").unwrap().0, "each element");
 
         document.set_display(Some(tubes));
-        let Shown::Drawn { key, drawable } = document.shown() else {
+        let Shown::Drawn { key, drawable, .. } = document.shown() else {
             panic!("the tubes are a surface");
         };
         assert_eq!(drawable.ty.name, "tube_patch");

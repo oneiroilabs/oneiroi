@@ -7,7 +7,7 @@
 use oneiroi_core::{
     exec::{Engine, Executor, Instance},
     node::{Card, NodeDef, NodeRegistry},
-    program::{ProgramBuilder, ProgramId, groups_param},
+    program::{ProgramBuilder, ProgramId, groups_param, prototype_param},
     types::Scalar,
 };
 use oneiroi_wgpu::GpuExecutor;
@@ -60,11 +60,17 @@ fn program<E: Executor>(engine: &mut Engine<E>, node: &'static NodeDef) -> Progr
 /// [`GpuKernel::examples`](oneiroi_core::node::GpuKernel::examples).
 fn set<E: Executor>(engine: &Engine<E>, instance: &mut Instance, node: &NodeDef, example: &[Vec<u32>]) {
     let grouped = node.inputs.iter().filter(|port| port.card == Card::Grouped);
+    // The shapes of instances come behind all offsets, see `NodeDef::all_inputs`.
+    let shapes = node.inputs.iter().filter(|port| port.ty.prototype.is_some()).flat_map(|port| {
+        let shape = prototype_param(port.name);
+        [shape.clone(), groups_param(&shape)]
+    });
     let names = node
         .inputs
         .iter()
         .map(|port| port.name.to_string())
-        .chain(grouped.map(|port| groups_param(port.name)));
+        .chain(grouped.map(|port| groups_param(port.name)))
+        .chain(shapes);
     let mut given = 0;
     for (name, words) in names.zip(example) {
         engine.set_param_words(instance, &name, words).unwrap();

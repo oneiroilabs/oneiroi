@@ -344,7 +344,7 @@ impl Editor {
         .spacing(8)
         .align_y(Center);
         let legend = text(
-            "●  one     [●]  a list     {●}  a list of groups     filled: exactly this type     ring: any type of a trait",
+            "●  one     [●]  a list     {●}  a list of groups     filled: exactly this type     ring: any type of a trait     dotted link: instances copied",
         )
         .size(11)
         .color(Color::from_rgb(0.6, 0.6, 0.65));
@@ -506,13 +506,20 @@ impl Editor {
                         PinRef::new(id.raw(), input_pin(name)),
                         format!("{}:{name}", id.raw()),
                     );
-                    // A link a graph runs for each element of is dashed.
-                    let edge = match each {
-                        true => edge.style(|theme, status, _, _| EdgeStyle {
+                    // A link a graph runs for each element of is dashed, one
+                    // which copies instances into their shape dotted: both
+                    // cost work for every element.
+                    let realizes = document.realizes(*node, output, id, name);
+                    let edge = match (each, realizes) {
+                        (true, _) => edge.style(|theme, status, _, _| EdgeStyle {
                             pattern: Pattern::dashed(2.5, 8.0, 5.0),
                             ..default_edge_style(theme, status)
                         }),
-                        false => edge,
+                        (false, true) => edge.style(|theme, status, _, _| EdgeStyle {
+                            pattern: Pattern::dashed(2.5, 2.5, 3.5),
+                            ..default_edge_style(theme, status)
+                        }),
+                        (false, false) => edge,
                     };
                     graph.push_edge(edge);
                 }

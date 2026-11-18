@@ -13,7 +13,7 @@ use iced::{
 };
 use oneiroi_core::node::Topology;
 use oneiroi_wgpu::{
-    AutoDetail, DetailBudget, DrawStage, DrawView, MeshData, MeshPreview, orbit::OrbitCamera,
+    AutoDetail, DetailBudget, DrawStage, DrawView, Instanced, MeshData, MeshPreview, orbit::OrbitCamera,
 };
 
 use crate::document::{Session, Shown};
@@ -292,7 +292,15 @@ impl Primitive for Shot {
         pipeline.drawing = Drawing::Nothing;
         match session.shown() {
             Shown::Nothing => {}
-            Shown::Drawn { key, drawable } => {
+            Shown::Drawn { key, drawable, shape } => {
+                // How many elements all instances have together, which only
+                // their rows tell.
+                let patches = shape.and_then(|(elements, groups)| {
+                    let words = drawable.ty.prototype?.words;
+                    let (store, _) = session.engine_mut().parts_mut();
+                    let shape_len = store.get(elements)?.len / words;
+                    session.instance_patches(key, groups, shape_len)
+                });
                 let (store, executor) = session.engine_mut().parts_mut();
                 let Some(gpu) = executor.gpu_mut() else {
                     return;
@@ -301,13 +309,37 @@ impl Primitive for Shot {
                 if drawable.topology == Topology::Line {
                     view.color = Vec3::new(1.0, 0.75, 0.3);
                 }
-                if let Some(handle) = store.get(key)
-                    && let Some(page) = gpu.page(handle.page)
-                {
-                    pipeline
-                        .stage
-                        .prepare(device, queue, size, &drawable, page, handle, &view);
-                    pipeline.drawing = Drawing::Value;
+                match shape {
+                    None => {
+                        if let Some(handle) = store.get(key)
+                            && let Some(page) = gpu.page(handle.page)
+                        {
+                            pipeline
+                                .stage
+                                .prepare(device, queue, size, &drawable, page, handle, &view);
+                            pipeline.drawing = Drawing::Value;
+                        }
+                    }
+                    Some((elements, groups)) => {
+                        let handles = (store.get(key), store.get(elements), store.get(groups));
+                        if let (Some(rows), Some(elements), Some(groups), Some(patches)) =
+                            (handles.0, handles.1, handles.2, patches)
+                            && let (Some(rows_page), Some(page)) = (gpu.page(rows.page), gpu.page(elements.page))
+                        {
+                            // Offsets which are empty may live in no page,
+                            // nothing reads them then.
+                            let groups_page = gpu.page(groups.page).unwrap_or(rows_page);
+                            let instanced = Instanced {
+                                rows: (rows_page, rows),
+                                groups: (groups_page, groups),
+                                patches,
+                            };
+                            pipeline.stage.prepare_instances_view(
+                                0, device, queue, size, &drawable, page, elements, instanced, &view,
+                            );
+                            pipeline.drawing = Drawing::Value;
+                        }
+                    }
                 }
 
                 session.drawn_with = Some(match pipeline.stage.uses_mesh_shaders() {

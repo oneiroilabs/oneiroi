@@ -553,6 +553,138 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 ";
 
+/// What a draw shader of instances has besides the rest: where the rows
+/// and the offsets of the groups of the shape are, and turning.
+const INSTANCED: &str = "struct InstanceArgs {
+    // The word the first row starts at, in `instance_rows`.
+    rows_offset: u32,
+    rows: u32,
+    // The word the offsets of the groups of the shape start at, and how
+    // many there are. None at all are a single group of everything.
+    groups_offset: u32,
+    groups: u32,
+}
+
+@group(0) @binding(3) var<storage, read> instance_rows: array<u32>;
+@group(0) @binding(4) var<storage, read> instance_groups: array<u32>;
+@group(0) @binding(5) var<uniform> instance_args: InstanceArgs;
+
+fn instance_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+fn instance_place(t: Similarity, p: vec3<f32>) -> vec3<f32> {
+    return instance_rotate(t.rotation, p) * t.scale + t.offset;
+}
+
+fn instance_group_start(group: u32) -> u32 {
+    if (instance_args.groups == 0u) {
+        return 0u;
+    }
+    return instance_groups[instance_args.groups_offset + group];
+}
+";
+
+/// Writes how a draw shader gets to the pieces it draws: the structs, `fn
+/// element(index: u32)` and the functions of the drawable. Returns the
+/// type of a piece.
+///
+/// A piece of instances is a piece of the shape with the transform of its
+/// instance: the elements of all instances are counted one after the
+/// other, and the row of one is found by where the rows start. Its points
+/// are the ones of the shape, turned, scaled and moved. Everything which
+/// works on pieces, like choosing their detail, then sees each instance
+/// where it is.
+fn draw_pieces(out: &mut String, drawable: &Drawable) -> &'static str {
+    let ty = &drawable.ty;
+    let mut declared = Vec::new();
+    let Some(shape) = ty.prototype else {
+        declare(out, &mut declared, ty);
+        let _ = writeln!(
+            out,
+            "fn element(index: u32) -> {} {{\n    let base = args.offset + index * {}u;\n    return {};\n}}\n",
+            ty.wgsl,
+            ty.words,
+            read_element(ty, "page", "base")
+        );
+        let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
+        return ty.wgsl;
+    };
+
+    declare(out, &mut declared, shape);
+    declare(out, &mut declared, ty);
+    let _ = writeln!(out, "{INSTANCED}");
+    let _ = writeln!(
+        out,
+        "struct Placed {{\n    piece: {shape},\n    transform: Similarity,\n}}\n
+
+fn instance_row(index: u32) -> {row} {{
+    let base = instance_args.rows_offset + index * {row_words}u;
+    return {read_row};
+}}
+
+fn element(index: u32) -> Placed {{
+    var low = 0u;
+    var high = instance_args.rows;
+    while (high - low > 1u) {{
+        let middle = (low + high) / 2u;
+        if (instance_row(middle).first <= index) {{
+            low = middle;
+        }} else {{
+            high = middle;
+        }}
+    }}
+    let row = instance_row(low);
+    let base = args.offset + (instance_group_start(row.group) + index - row.first) * {words}u;
+    return Placed({read}, row.transform);
+}}
+",
+        shape = shape.wgsl,
+        row = ty.wgsl,
+        row_words = ty.words,
+        read_row = read_element(ty, "instance_rows", "base"),
+        words = shape.words,
+        read = read_element(shape, "page", "base"),
+    );
+    // The functions of the shape under other names, and the ones of a
+    // piece around them.
+    let wgsl = drawable
+        .wgsl
+        .replace("fn surface_point(", "fn shape_surface_point(")
+        .replace("fn line_point(", "fn shape_line_point(");
+    let _ = writeln!(out, "{}\n", wgsl.trim());
+    let _ = writeln!(
+        out,
+        "{}",
+        match drawable.topology {
+            Topology::Surface => "fn surface_point(placed: Placed, uv: vec2<f32>) -> SurfacePoint {
+    let point = shape_surface_point(placed.piece, uv);
+    return SurfacePoint(
+        instance_place(placed.transform, point.position),
+        instance_rotate(placed.transform.rotation, point.normal),
+    );
+}
+",
+            Topology::Line => "fn line_point(placed: Placed, u: f32) -> vec3<f32> {
+    return instance_place(placed.transform, shape_line_point(placed.piece, u));
+}
+",
+        }
+    );
+    "Placed"
+}
+
+/// The uniform of a draw shader of instances, at binding 5.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceArgs {
+    pub rows_offset: u32,
+    pub rows: u32,
+    pub groups_offset: u32,
+    pub groups: u32,
+}
+
 /// Writes the shader which draws values of a drawable type, and checks
 /// that it compiles.
 pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
@@ -561,7 +693,6 @@ pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
     let out = &mut wgsl;
 
     let _ = writeln!(out, "// Generated to draw `{}`.\n", ty.name);
-    declare(out, &mut Vec::new(), ty);
     if drawable.topology == Topology::Surface {
         let _ = writeln!(
             out,
@@ -569,14 +700,7 @@ pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
         );
     }
     let _ = writeln!(out, "{DRAW_ARGS}");
-    let _ = writeln!(
-        out,
-        "fn element(index: u32) -> {} {{\n    let base = args.offset + index * {}u;\n    return {};\n}}\n",
-        ty.wgsl,
-        ty.words,
-        read_element(ty, "page", "base")
-    );
-    let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
+    draw_pieces(out, drawable);
     let _ = write!(
         out,
         "{}",
@@ -787,14 +911,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 ";
 
 /// The functions which need to know the type of a patch.
-fn lod_typed(ty: &TypeInfo) -> String {
+fn lod_typed(name: &str) -> String {
     format!(
-        "fn element(index: u32) -> {name} {{
-    let base = args.offset + index * {words}u;
-    return {read};
-}}
-
-// How many steps the edge from `a` to `b` gets: its length on screen in
+        "// How many steps the edge from `a` to `b` gets: its length on screen in
 // steps of the size which was asked for.
 fn lod_edge(piece: {name}, a: vec2<f32>, b: vec2<f32>) -> f32 {{
     let first = surface_point(piece, a).position;
@@ -867,9 +986,6 @@ fn lod_hidden(piece: {name}) -> bool {{
     return beyond != 0u;
 }}
 ",
-        name = ty.wgsl,
-        words = ty.words,
-        read = read_element(ty, "page", "base"),
     )
 }
 
@@ -1158,14 +1274,13 @@ pub fn draw_lod(drawable: &Drawable, method: LodMethod) -> Result<LodShader, Sha
         let _ = writeln!(out, "enable wgpu_mesh_shader;\n");
     }
     let _ = writeln!(out, "// Generated to draw `{}` as fine as it appears.\n", ty.name);
-    declare(out, &mut Vec::new(), ty);
     let _ = writeln!(
         out,
         "struct SurfacePoint {{\n    position: vec3<f32>,\n    normal: vec3<f32>,\n}}\n"
     );
     let _ = writeln!(out, "{LOD_COMMON}");
-    let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
-    let _ = writeln!(out, "{}", lod_typed(ty));
+    let piece = draw_pieces(out, drawable);
+    let _ = writeln!(out, "{}", lod_typed(piece));
     let _ = write!(
         out,
         "{}",
