@@ -1626,6 +1626,8 @@ fn realize(index: u32) -> f32 {
                 cpu: |_, _| {},
             };
             crate::shader::compute(&GPU_REALIZE, &GPU_REALIZE.gpu[0]).unwrap_or_else(|e| panic!("{e}"));
+            // And so does the culling of instances before they are drawn.
+            crate::shader::cull().unwrap_or_else(|e| panic!("{e}"));
             // The values, the rows, and the shape with its offsets.
             assert_eq!(GPU_REALIZE.all_inputs(), 3);
         }

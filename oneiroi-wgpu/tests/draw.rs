@@ -16,7 +16,7 @@ use oneiroi_nodes::{
     surface,
 };
 use oneiroi_wgpu::{
-    AutoDetail, DeferredExecutor, DrawStage, DrawView, GpuExecutor, MeshData, MeshPreview,
+    AutoDetail, DeferredExecutor, DrawStage, DrawView, GpuExecutor, Instanced, MeshData, MeshPreview,
     orbit::OrbitCamera,
 };
 
@@ -761,5 +761,148 @@ fn many_patches_are_drawn_alike_both_ways() {
             assert_eq!(a, b);
         }
         assert!(stages[1].1.errors().is_empty());
+    }
+}
+
+/// Tubes put onto three points along a line, as instances and copied.
+fn instances_scene() -> Option<Scene> {
+    let (device, queue) = device()?;
+    let registry = registry();
+    let mut b = ProgramBuilder::new("instances");
+    let points = b.constant::<[f32; 4]>(&BENT);
+    let knots = b.constant(&clamped_uniform_knots(BENT.len()));
+    let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    let radius = b.constant::<f32>(&[0.3]);
+    let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+    let tube = b.generic(&registry, &SWEEP, &[spine, circle]).unwrap()[0];
+
+    let line = b.constant::<[f32; 4]>(&[[-3., -3., 0., 1.], [-1., -1., 0., 1.], [1., 1., 0., 1.], [3., 3., 0., 1.]]);
+    let knots = b.constant(&clamped_uniform_knots(4));
+    let line = b.node(&NURBS, &[line, knots]).unwrap()[0];
+    let count = b.constant(&[3u32]);
+    let spacing = b.constant(&[0.0f32]);
+    let t = b.constant::<f32>(&[]);
+    let frames = b.node(&oneiroi_nodes::curve::SAMPLE_CURVE, &[line, count, spacing, t]).unwrap()[0];
+    let scale = b.constant(&[0.8f32]);
+    let placed = b.generic(&registry, &instance::INSTANCE, &[frames, tube, scale]).unwrap()[0];
+    let copies = b.generic(&registry, &instance::REALIZE, &[placed]).unwrap()[0];
+    b.output("instances", placed);
+    b.output("copies", copies);
+
+    let mut engine = Engine::new(GpuExecutor::new(device.clone(), queue.clone()));
+    let id = engine.add_program(b.finish());
+    let mut instance = engine.instantiate(id);
+    engine.evaluate([&mut instance]);
+    let mut camera = OrbitCamera::default();
+    camera.yaw_pitch_delta(0.5, -0.4);
+    camera.frame(Vec3::ZERO, 9.0);
+    Some(Scene {
+        device,
+        queue,
+        engine,
+        registry,
+        instance,
+        camera,
+    })
+}
+
+use oneiroi_nodes::instance;
+
+impl Scene {
+    /// The instances drawn where they are, from their rows and the shape
+    /// they refer to. Those smaller than `min_pixels` are left out.
+    fn instances(&mut self, stage: &mut DrawStage, view: DrawView, min_pixels: f32) -> Vec<[u8; 4]> {
+        let rows = self.engine.output_key(&self.instance, "instances").unwrap();
+        let (elements, groups) = self.engine.prototype_keys(&self.instance, "instances").unwrap();
+        let drawable = *self.registry.drawable(&<TubePatch as instance::Shape>::INSTANCES).unwrap();
+
+        // What the editor knows of the shape: a sphere around each group.
+        let shape = self.engine.fetch_key::<u32>(elements).unwrap().to_vec();
+        let offsets = self.engine.fetch_key::<u32>(groups).unwrap().to_vec();
+        let words = <TubePatch as oneiroi_core::types::DataType>::INFO.words as usize;
+        let len = shape.len() / words;
+        let ranges: Vec<_> = match offsets.is_empty() {
+            true => vec![0..len],
+            false => offsets.windows(2).map(|pair| pair[0] as usize..pair[1] as usize).collect(),
+        };
+        let spheres: Vec<[f32; 4]> = ranges
+            .iter()
+            .map(|range| {
+                let (center, radius) = (drawable.bounds)(&shape[range.start * words..range.end * words]).unwrap();
+                [center[0], center[1], center[2], radius]
+            })
+            .collect();
+        let slots = ranges.iter().map(|range| range.len() as u32).max().unwrap();
+
+        let (store, executor) = self.engine.parts_mut();
+        executor.sync(store);
+        let (rows, elements, groups) = (store.get(rows).unwrap(), store.get(elements).unwrap(), store.get(groups).unwrap());
+        let rows_page = executor.page(rows.page).unwrap();
+        let instanced = Instanced {
+            rows: (rows_page, rows),
+            groups: (executor.page(groups.page).unwrap_or(rows_page), groups),
+            spheres: &spheres,
+            elements: len as u32,
+            slots,
+            min_pixels,
+        };
+        let page = executor.page(elements.page).unwrap();
+        stage.prepare_instances_view(0, &self.device, &self.queue, (SIZE, SIZE), &drawable, page, elements, instanced, &view);
+        picture(&self.device, &self.queue, |encoder, target| stage.render(encoder, target, None))
+    }
+}
+
+/// Instances look like the copies of their shape where they are, drawn
+/// either way.
+#[test]
+fn instances_look_like_their_copies() {
+    let Some(mut scene) = instances_scene() else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        let view = scene.auto(4.0, false);
+        let instances = scene.instances(&mut stage, view, 0.0);
+        let copies = scene.output(&mut stage, "copies", view);
+        let lit = covered(&copies);
+        assert!(lit > 300, "{name}: {lit}");
+        assert!(different(&instances, &copies) * 50 < lit, "{name}: {} of {lit}", different(&instances, &copies));
+    }
+}
+
+/// Instances out of view are left out before anything else is done with
+/// them, and so are those too small to see.
+#[test]
+fn instances_out_of_view_are_left_out() {
+    let Some(mut scene) = instances_scene() else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        let all = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let triangles = stage.triangles(&scene.device, 0).unwrap();
+        assert!(covered(&all) > 300 && triangles > 0, "{name}");
+
+        // Only the instance at one end is in view.
+        let camera = scene.camera;
+        scene.camera.frame(Vec3::new(-3.0, -3.0, 0.0), 1.5);
+        let one = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert!(covered(&one) > 0, "{name}");
+
+        // None of them.
+        scene.camera.frame(Vec3::new(0.0, 60.0, 0.0), 7.0);
+        let none = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert_eq!(covered(&none), 0, "{name}");
+        // Counting comes after the culling, and finds nothing left.
+        let _ = stage.triangles(&scene.device, 0);
+        let _ = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert_eq!(stage.triangles(&scene.device, 0), Some(0), "{name}");
+
+        // All in view, but each smaller than asked for.
+        scene.camera = camera;
+        let tiny = scene.instances(&mut stage, scene.auto(4.0, false), 10_000.0);
+        assert_eq!(covered(&tiny), 0, "{name}");
     }
 }

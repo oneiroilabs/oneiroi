@@ -162,6 +162,22 @@ pub struct Session {
     pub settling: u32,
     /// The graphs which ran for fewer elements than they were given.
     overflows: Vec<Overflow>,
+    /// The shape of the instances which are shown.
+    summary: Option<ShapeSummary>,
+}
+
+/// What drawing instances needs to know of the shape they refer to, see
+/// [`Session::shape_summary`].
+#[derive(Debug, Clone)]
+pub struct ShapeSummary {
+    /// The keys of the shape and of its offsets.
+    key: (ContentKey, ContentKey),
+    /// Center and radius around each group, a negative radius for an
+    /// empty one.
+    pub spheres: Vec<[f32; 4]>,
+    pub elements: u32,
+    /// How many elements the longest group has.
+    pub slots: u32,
 }
 
 impl Session {
@@ -178,6 +194,7 @@ impl Session {
             triangles: None,
             settling: 0,
             overflows: Vec::new(),
+            summary: None,
         }
     }
 
@@ -239,22 +256,40 @@ impl Session {
         })
     }
 
-    /// How many elements all copies of instances have together, which is
-    /// how many are drawn: where the last row starts, and how long its
-    /// group of the shape is. `shape_len` is how many elements the shape
-    /// has, for a shape without offsets.
-    pub fn instance_patches(&mut self, rows: ContentKey, groups: ContentKey, shape_len: u32) -> Option<u32> {
-        let last = *self.engine.fetch_key::<InstanceRow>(rows)?.last()?;
-        let offsets = self.engine.fetch_key::<u32>(groups)?;
-        let group = last.group as usize;
-        let len = match offsets.is_empty() {
-            true => shape_len,
-            false => match (offsets.get(group), offsets.get(group + 1)) {
-                (Some(start), Some(end)) => end.min(&shape_len).saturating_sub(*start),
-                _ => 0,
-            },
-        };
-        Some(last.first + len)
+    /// What drawing instances needs to know of their shape: a sphere
+    /// around each of its groups, how many elements it has and how many
+    /// its longest group has. The shape is brought over once, and its
+    /// summary kept while it stays the same.
+    pub fn shape_summary(&mut self, drawable: &Drawable, elements: ContentKey, groups: ContentKey) -> Option<&ShapeSummary> {
+        let key = (elements, groups);
+        if self.summary.as_ref().is_none_or(|summary| summary.key != key) {
+            let shape = drawable.ty.prototype?;
+            let words = self.engine.fetch_key::<u32>(elements)?.to_vec();
+            let offsets = self.engine.fetch_key::<u32>(groups)?.to_vec();
+            let len = words.len() / shape.words as usize;
+            let ranges: Vec<std::ops::Range<usize>> = match offsets.is_empty() {
+                true => vec![0..len],
+                false => offsets
+                    .windows(2)
+                    .map(|pair| (pair[0] as usize).min(len)..(pair[1] as usize).min(len))
+                    .collect(),
+            };
+            let at = |index: usize| index * shape.words as usize;
+            let spheres = ranges
+                .iter()
+                .map(|range| match (drawable.bounds)(&words[at(range.start)..at(range.end)]) {
+                    Some((center, radius)) => [center[0], center[1], center[2], radius],
+                    None => [0.0, 0.0, 0.0, -1.0],
+                })
+                .collect();
+            self.summary = Some(ShapeSummary {
+                key,
+                spheres,
+                elements: len as u32,
+                slots: ranges.iter().map(|range| range.len() as u32).max().unwrap_or(0),
+            });
+        }
+        self.summary.as_ref()
     }
 
     /// A sphere around all instances: the one around each group of the
@@ -266,32 +301,18 @@ impl Session {
         elements: ContentKey,
         groups: ContentKey,
     ) -> Option<(Vec3, f32)> {
-        let rows = self.engine.fetch_key::<InstanceRow>(rows)?.to_vec();
-        let offsets = self.engine.fetch_key::<u32>(groups)?.to_vec();
-        let words = self.engine.fetch_key::<u32>(elements)?.to_vec();
-        let shape = drawable.ty.prototype?;
-        let len = words.len() / shape.words as usize;
-        let ranges: Vec<std::ops::Range<usize>> = match offsets.is_empty() {
-            true => vec![0..len],
-            false => offsets
-                .windows(2)
-                .map(|pair| (pair[0] as usize).min(len)..(pair[1] as usize).min(len))
-                .collect(),
-        };
-        let words_of = |range: &std::ops::Range<usize>| {
-            &words[range.start * shape.words as usize..range.end * shape.words as usize]
-        };
-        let spheres: Vec<Option<(Vec3, f32)>> = ranges
-            .iter()
-            .map(|range| (drawable.bounds)(words_of(range)).map(|(center, radius)| (center.into(), radius)))
-            .collect();
+        let spheres = self.shape_summary(drawable, elements, groups)?.spheres.clone();
+        let rows = self.engine.fetch_key::<InstanceRow>(rows)?;
         let (mut min, mut max) = (Vec3::MAX, Vec3::MIN);
-        for row in &rows {
-            let Some(Some((center, radius))) = spheres.get(row.group as usize) else {
+        for row in rows {
+            let Some([x, y, z, radius]) = spheres.get(row.group as usize).copied() else {
                 continue;
             };
-            let center = row.transform.point(*center);
-            let radius = radius * row.transform.scale;
+            if radius < 0.0 {
+                continue;
+            }
+            let center = row.transform.point(Vec3::new(x, y, z));
+            let radius = radius * row.transform.scale.abs();
             min = min.min(center - radius);
             max = max.max(center + radius);
         }

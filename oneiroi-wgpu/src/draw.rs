@@ -11,7 +11,10 @@ use std::{
 use glam::{Mat4, Vec3};
 use oneiroi_core::{
     node::{Drawable, Topology},
-    shader::{self, DrawArgs, InstanceArgs, LodArgs, LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError},
+    shader::{
+        self, CULL_COUNT, CULL_DRAW, CULL_TASKS, CULL_WORDS, CullArgs, DrawArgs, FOLD, InstanceArgs, LodArgs,
+        LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError,
+    },
     store::Handle,
 };
 
@@ -20,12 +23,19 @@ use crate::mesh::{depth_texture, restrict};
 /// From where and how finely something is drawn.
 /// What is drawn of instances besides the elements of their shape: the
 /// rows, and the offsets of the groups of the shape, each in the buffer of
-/// its page. `patches` is how many elements all instances have together.
+/// its page, and what is known of the shape.
 #[derive(Debug, Clone, Copy)]
 pub struct Instanced<'a> {
     pub rows: (&'a wgpu::Buffer, Handle),
     pub groups: (&'a wgpu::Buffer, Handle),
-    pub patches: u32,
+    /// A sphere around each group of the shape: center and radius, a
+    /// negative radius for a group without anything in it.
+    pub spheres: &'a [[f32; 4]],
+    /// How many elements the shape has, and its longest group.
+    pub elements: u32,
+    pub slots: u32,
+    /// Instances smaller than this many pixels across are left out.
+    pub min_pixels: f32,
 }
 
 /// What is bound to the bindings of [`instanced_entries`].
@@ -33,8 +43,13 @@ fn instanced_bindings<'a>(
     rows: &'a wgpu::Buffer,
     groups: &'a wgpu::Buffer,
     args: &'a wgpu::Buffer,
-) -> [wgpu::BindGroupEntry<'a>; 3] {
+    visible: &'a wgpu::Buffer,
+) -> [wgpu::BindGroupEntry<'a>; 4] {
     [
+        wgpu::BindGroupEntry {
+            binding: 6,
+            resource: visible.as_entire_binding(),
+        },
         wgpu::BindGroupEntry {
             binding: 3,
             resource: rows.as_entire_binding(),
@@ -54,12 +69,129 @@ fn instanced_bindings<'a>(
 /// [`shader::draw`].
 fn instanced_entries(
     buffer: impl Fn(u32, wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry,
-) -> [wgpu::BindGroupLayoutEntry; 3] {
+) -> [wgpu::BindGroupLayoutEntry; 4] {
     [
         buffer(3, wgpu::BufferBindingType::Storage { read_only: true }),
         buffer(4, wgpu::BufferBindingType::Storage { read_only: true }),
         buffer(5, wgpu::BufferBindingType::Uniform),
+        buffer(6, wgpu::BufferBindingType::Storage { read_only: true }),
     ]
+}
+
+/// Workgroups for `count` of something, `per` in each, as many in one
+/// dimension as fit and the rest in the next: see [`FOLD`].
+fn folded(count: u32, per: u32) -> (u32, u32) {
+    let groups = count.div_ceil(per);
+    (groups.min(FOLD), groups.div_ceil(FOLD))
+}
+
+/// The pipelines which find the instances worth drawing, see
+/// [`shader::cull`]. The same for every type.
+struct CullPipelines {
+    layout: wgpu::BindGroupLayout,
+    cull: wgpu::ComputePipeline,
+    finish: wgpu::ComputePipeline,
+}
+
+impl CullPipelines {
+    fn new(device: &wgpu::Device) -> Self {
+        let wgsl = shader::cull().expect("the cull shader is valid, a test checks it");
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Oneiroi Cull"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+        let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Oneiroi Cull"),
+            entries: &[
+                buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
+                buffer(1, wgpu::BufferBindingType::Uniform),
+                buffer(2, wgpu::BufferBindingType::Storage { read_only: true }),
+                buffer(3, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer(4, wgpu::BufferBindingType::Storage { read_only: false }),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Oneiroi Cull"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = |entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        Self {
+            cull: pipeline("cs_cull"),
+            finish: pipeline("cs_finish"),
+            layout,
+        }
+    }
+}
+
+/// What a view needs to cull instances: where the visible ones go, the
+/// arguments of the draw after it, and the spheres around the shape.
+struct Culling {
+    uniform: wgpu::Buffer,
+    spheres: wgpu::Buffer,
+    visible: wgpu::Buffer,
+    indirect: wgpu::Buffer,
+}
+
+impl Culling {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            uniform: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Oneiroi Cull Args"),
+                size: size_of::<CullArgs>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            spheres: Self::storage(device, "Oneiroi Spheres", 16),
+            visible: Self::storage(device, "Oneiroi Visible", 4),
+            indirect: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Oneiroi Indirect"),
+                size: CULL_WORDS * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+                mapped_at_creation: false,
+            }),
+        }
+    }
+
+    fn storage(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Makes the buffers large enough for `rows` instances and `spheres`.
+    fn fit(&mut self, device: &wgpu::Device, rows: u32, spheres: usize) {
+        let visible = 4 * (1 + rows as u64);
+        if self.visible.size() < visible {
+            self.visible = Self::storage(device, "Oneiroi Visible", visible.next_power_of_two());
+        }
+        let spheres = 16 * spheres.max(1) as u64;
+        if self.spheres.size() < spheres {
+            self.spheres = Self::storage(device, "Oneiroi Spheres", spheres.next_power_of_two());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,8 +241,17 @@ struct Pipeline {
 
 enum Draw {
     Vertices { vertices: u32, instances: u32 },
-    /// One task shader for every few patches.
-    Tasks { groups: u32 },
+    /// One task shader for every few patches, folded.
+    Tasks { groups: (u32, u32) },
+    /// What the culling found worth drawing, with task shaders or without.
+    Indirect { buffer: wgpu::Buffer, tasks: bool },
+}
+
+/// How many patches counting goes over.
+enum Counted<'a> {
+    Patches(u32),
+    /// As many as the culling found, from its indirect buffer.
+    Culled(&'a wgpu::Buffer),
 }
 
 struct Prepared {
@@ -185,6 +326,7 @@ struct View {
     /// and uniforms stay, so it can almost always be used again.
     bound: Option<(BindKey, wgpu::BindGroup)>,
     instance_uniform: wgpu::Buffer,
+    culling: Option<Culling>,
 }
 
 /// What a bind group of a view is made of: the pipeline it is for, the
@@ -194,8 +336,9 @@ struct BindKey {
     pipeline: (&'static str, Kind),
     page: wgpu::Buffer,
     lod: bool,
-    /// The pages of the rows and of the offsets of instances.
-    instanced: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    /// The pages of the rows and of the offsets of instances, and where
+    /// the visible ones are.
+    instanced: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
 }
 
 impl View {
@@ -216,6 +359,7 @@ impl View {
             prepared: None,
             counter: Counter::new(device),
             bound: None,
+            culling: None,
         }
     }
 }
@@ -242,6 +386,7 @@ pub struct DrawStage {
     mesh_shaders: bool,
     views: Vec<View>,
     bind_groups: usize,
+    cull: Option<CullPipelines>,
 }
 
 impl DrawStage {
@@ -258,6 +403,7 @@ impl DrawStage {
                     .is_ok_and(|value| value.eq_ignore_ascii_case("off")),
             views: Vec::new(),
             bind_groups: 0,
+            cull: None,
         }
     }
 
@@ -604,6 +750,9 @@ impl DrawStage {
                 }
             }
         };
+        if instanced.is_some() && self.cull.is_none() {
+            self.cull = Some(CullPipelines::new(device));
+        }
         let key = (drawable.ty.name, kind);
         let Some(pipeline) = &self.pipelines[&key] else {
             return;
@@ -611,28 +760,37 @@ impl DrawStage {
         let slot = &mut self.views[index];
 
         let instances = match &instanced {
-            Some(instanced) => instanced.patches,
+            Some(instanced) => match instanced.slots {
+                0 => 0,
+                _ => instanced.rows.1.len / drawable.ty.words,
+            },
             None => handle.len / drawable.ty.words,
         };
         if instances == 0 {
             return;
         }
-        // Where the rows of instances and the groups of their shape are.
+        // Where the rows of instances and the groups of their shape are,
+        // and where the culling puts the visible ones.
         let extra = instanced.map(|instanced| {
             let args = InstanceArgs {
                 rows_offset: instanced.rows.1.offset,
-                rows: instanced.rows.1.len / drawable.ty.words,
+                rows: instances,
                 groups_offset: instanced.groups.1.offset,
                 groups: instanced.groups.1.len,
+                elements: instanced.elements,
+                slots: instanced.slots,
+                _padding: [0; 2],
             };
             queue.write_buffer(&slot.instance_uniform, 0, bytemuck::bytes_of(&args));
-            (instanced.rows.0.clone(), instanced.groups.0.clone())
+            let culling = slot.culling.get_or_insert_with(|| Culling::new(device));
+            culling.fit(device, instances, instanced.spheres.len());
+            (instanced.rows.0.clone(), instanced.groups.0.clone(), culling.visible.clone())
         });
         let view_projection = view.view_projection.to_cols_array_2d();
         let light = view.light.extend(0.0).to_array();
         let color = view.color.extend(1.0).to_array();
 
-        let (uniform, draw) = match (kind, auto) {
+        let (uniform, mut draw, vertices, count) = match (kind, auto) {
             (Kind::Lod(method), Some(auto)) => {
                 // Drawing the finest grid for every patch gets expensive
                 // quickly, a mesh shader only makes what is needed.
@@ -653,25 +811,14 @@ impl DrawStage {
                     _padding: 0,
                 };
                 queue.write_buffer(&slot.lod_uniform, 0, bytemuck::bytes_of(&args));
+                let vertices = LodShader::vertices(max_level);
                 let draw = match method {
                     LodMethod::MeshShader => Draw::Tasks {
-                        groups: instances.div_ceil(LodShader::TASK_GROUP),
+                        groups: folded(instances, LodShader::TASK_GROUP),
                     },
-                    LodMethod::VertexPulling => Draw::Vertices {
-                        vertices: LodShader::vertices(max_level),
-                        instances,
-                    },
+                    LodMethod::VertexPulling => Draw::Vertices { vertices, instances },
                 };
-
-                let counter = &mut slot.counter;
-                if auto.count
-                    && !counter.pending
-                    && let Some((count, layout)) = &pipeline.count
-                {
-                    let extra = extra.as_ref().map(|(rows, groups)| (rows, groups, &slot.instance_uniform));
-                    Self::count(device, queue, counter, count, layout, page, &slot.lod_uniform, extra, instances);
-                }
-                (&slot.lod_uniform, draw)
+                (&slot.lod_uniform, draw, vertices, auto.count)
             }
             _ => {
                 let (rings, sides) = (view.rings.max(1), view.sides.max(1));
@@ -689,14 +836,93 @@ impl DrawStage {
                     Topology::Surface => rings * sides * 6,
                     Topology::Line => rings * 2,
                 };
-                (&slot.uniform, Draw::Vertices { vertices, instances })
+                (&slot.uniform, Draw::Vertices { vertices, instances }, vertices, false)
             }
         };
+
+        // Instances are culled first, and then drawn as many as are left.
+        if let (Some(instanced), Some(culling), Some(cull)) = (instanced, &slot.culling, &self.cull) {
+            let viewport = view.auto.map_or((target_size.0 as f32, target_size.1 as f32), |auto| auto.viewport);
+            let args = CullArgs {
+                view_projection,
+                viewport: [viewport.0.max(1.0), viewport.1.max(1.0)],
+                min_pixels: instanced.min_pixels,
+                rows_offset: instanced.rows.1.offset,
+                rows: instances,
+                slots: instanced.slots,
+                vertices,
+                _padding: 0,
+            };
+            queue.write_buffer(&culling.uniform, 0, bytemuck::bytes_of(&args));
+            if !instanced.spheres.is_empty() {
+                queue.write_buffer(&culling.spheres, 0, bytemuck::cast_slice(instanced.spheres));
+            }
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Oneiroi Cull"),
+                layout: &cull.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: instanced.rows.0.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: culling.uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: culling.spheres.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: culling.visible.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: culling.indirect.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Oneiroi Cull"),
+            });
+            encoder.clear_buffer(&culling.visible, 0, Some(4));
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Oneiroi Cull"),
+                    timestamp_writes: None,
+                });
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_pipeline(&cull.cull);
+                let (x, y) = folded(instances, 64);
+                pass.dispatch_workgroups(x, y, 1);
+                pass.set_pipeline(&cull.finish);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            queue.submit([encoder.finish()]);
+            draw = Draw::Indirect {
+                buffer: culling.indirect.clone(),
+                tasks: matches!(draw, Draw::Tasks { .. }),
+            };
+        }
+
+        let counter = &mut slot.counter;
+        if count
+            && !counter.pending
+            && let Some((pipeline, layout)) = &pipeline.count
+        {
+            let counted = match &slot.culling {
+                Some(culling) if instanced.is_some() => Counted::Culled(&culling.indirect),
+                _ => Counted::Patches(instances),
+            };
+            let extra = extra.as_ref().map(|(rows, groups, visible)| (rows, groups, &slot.instance_uniform, visible));
+            Self::count(device, queue, counter, pipeline, layout, page, &slot.lod_uniform, extra, counted);
+        }
 
         let bind_key = BindKey {
             pipeline: key,
             page: page.clone(),
-            lod: matches!(draw, Draw::Tasks { .. }) || std::ptr::eq(uniform, &slot.lod_uniform),
+            lod: std::ptr::eq(uniform, &slot.lod_uniform),
             instanced: extra.clone(),
         };
         let bind_group = match &slot.bound {
@@ -712,8 +938,8 @@ impl DrawStage {
                         resource: uniform.as_entire_binding(),
                     },
                 ];
-                if let Some((rows, groups)) = &extra {
-                    entries.extend(instanced_bindings(rows, groups, &slot.instance_uniform));
+                if let Some((rows, groups, visible)) = &extra {
+                    entries.extend(instanced_bindings(rows, groups, &slot.instance_uniform, visible));
                 }
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(key.0),
@@ -742,8 +968,8 @@ impl DrawStage {
         layout: &wgpu::BindGroupLayout,
         page: &wgpu::Buffer,
         uniform: &wgpu::Buffer,
-        instanced: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer)>,
-        patches: u32,
+        instanced: Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer)>,
+        counted: Counted<'_>,
     ) {
         let mut entries = vec![
             wgpu::BindGroupEntry {
@@ -759,8 +985,8 @@ impl DrawStage {
                 resource: counter.buffer.as_entire_binding(),
             },
         ];
-        if let Some((rows, groups, args)) = instanced {
-            entries.extend(instanced_bindings(rows, groups, args));
+        if let Some((rows, groups, args, visible)) = instanced {
+            entries.extend(instanced_bindings(rows, groups, args, visible));
         }
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Oneiroi Count"),
@@ -776,7 +1002,13 @@ impl DrawStage {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(patches.div_ceil(LodShader::COUNT_GROUP), 1, 1);
+            match counted {
+                Counted::Patches(patches) => {
+                    let (x, y) = folded(patches, LodShader::COUNT_GROUP);
+                    pass.dispatch_workgroups(x, y, 1);
+                }
+                Counted::Culled(indirect) => pass.dispatch_workgroups_indirect(indirect, CULL_COUNT * 4),
+            }
         }
         encoder.copy_buffer_to_buffer(&counter.buffer, 0, &counter.readback, 0, 4);
         queue.submit([encoder.finish()]);
@@ -853,9 +1085,11 @@ impl DrawStage {
 
         pass.set_pipeline(&pipeline.pipeline);
         pass.set_bind_group(0, &prepared.bind_group, &[]);
-        match prepared.draw {
-            Draw::Vertices { vertices, instances } => pass.draw(0..vertices, 0..instances),
-            Draw::Tasks { groups } => pass.draw_mesh_tasks(groups, 1, 1),
+        match &prepared.draw {
+            Draw::Vertices { vertices, instances } => pass.draw(0..*vertices, 0..*instances),
+            Draw::Tasks { groups } => pass.draw_mesh_tasks(groups.0, groups.1, 1),
+            Draw::Indirect { buffer, tasks: true } => pass.draw_mesh_tasks_indirect(buffer, CULL_TASKS * 4),
+            Draw::Indirect { buffer, tasks: false } => pass.draw_indirect(buffer, CULL_DRAW * 4),
         }
     }
 }

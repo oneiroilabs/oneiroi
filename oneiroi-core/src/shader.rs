@@ -9,7 +9,7 @@ use std::fmt::{self, Write};
 
 use crate::{
     node::{Drawable, GpuKernel, NodeDef, Topology},
-    types::{DataType, Field, FieldType, Layout, TypeInfo},
+    types::{DataType, Field, FieldType, InstanceRow, Layout, TypeInfo},
 };
 
 /// How many elements one workgroup of a generated compute shader covers.
@@ -514,6 +514,9 @@ const SURFACE_STAGES: &str = "struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    if (!piece_present(instance)) {
+        return VertexOutput(vec4<f32>(0.0), vec3<f32>(0.0));
+    }
     // Six vertices per cell of the grid: two triangles which wind the
     // way the mesh of the same surface does.
     let cell = vertex / 6u;
@@ -541,6 +544,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
 const LINE_STAGES: &str = "@vertex
 fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+    if (!piece_present(instance)) {
+        return vec4<f32>(0.0);
+    }
     // Two vertices per step: where it starts and where it ends.
     let step = vertex / 2u + vertex % 2u;
     let position = line_point(element(instance), f32(step) / f32(args.rings));
@@ -563,11 +569,17 @@ const INSTANCED: &str = "struct InstanceArgs {
     // many there are. None at all are a single group of everything.
     groups_offset: u32,
     groups: u32,
+    // How many elements the shape has, and its longest group.
+    elements: u32,
+    slots: u32,
 }
 
 @group(0) @binding(3) var<storage, read> instance_rows: array<u32>;
 @group(0) @binding(4) var<storage, read> instance_groups: array<u32>;
 @group(0) @binding(5) var<uniform> instance_args: InstanceArgs;
+// How many instances are visible, and then which rows they are: see
+// `cull`, which made it before.
+@group(0) @binding(6) var<storage, read> instance_visible: array<u32>;
 
 fn instance_rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let t = 2.0 * cross(q.xyz, v);
@@ -582,7 +594,14 @@ fn instance_group_start(group: u32) -> u32 {
     if (instance_args.groups == 0u) {
         return 0u;
     }
-    return instance_groups[instance_args.groups_offset + group];
+    return min(instance_groups[instance_args.groups_offset + group], instance_args.elements);
+}
+
+fn instance_group_end(group: u32) -> u32 {
+    if (instance_args.groups == 0u) {
+        return instance_args.elements;
+    }
+    return min(instance_groups[instance_args.groups_offset + group + 1u], instance_args.elements);
 }
 ";
 
@@ -596,7 +615,7 @@ fn instance_group_start(group: u32) -> u32 {
 /// are the ones of the shape, turned, scaled and moved. Everything which
 /// works on pieces, like choosing their detail, then sees each instance
 /// where it is.
-fn draw_pieces(out: &mut String, drawable: &Drawable) -> &'static str {
+fn draw_pieces(out: &mut String, drawable: &Drawable, lod: bool) -> &'static str {
     let ty = &drawable.ty;
     let mut declared = Vec::new();
     let Some(shape) = ty.prototype else {
@@ -608,6 +627,10 @@ fn draw_pieces(out: &mut String, drawable: &Drawable) -> &'static str {
             ty.words,
             read_element(ty, "page", "base")
         );
+        let _ = writeln!(out, "fn piece_present(index: u32) -> bool {{\n    return true;\n}}\n");
+        if lod {
+            let _ = writeln!(out, "fn piece_count() -> u32 {{\n    return args.patches;\n}}\n");
+        }
         let _ = writeln!(out, "{}\n", drawable.wgsl.trim());
         return ty.wgsl;
     };
@@ -624,19 +647,25 @@ fn instance_row(index: u32) -> {row} {{
     return {read_row};
 }}
 
+// Every visible instance has `slots` places for pieces, as many as the
+// longest group of the shape has. Those beyond its own group are empty.
+fn piece_count() -> u32 {{
+    return instance_visible[0] * instance_args.slots;
+}}
+
+fn instance_of(index: u32) -> {row} {{
+    return instance_row(instance_visible[1u + index / instance_args.slots]);
+}}
+
+fn piece_present(index: u32) -> bool {{
+    let row = instance_of(index);
+    let start = instance_group_start(row.group);
+    return start + index % instance_args.slots < instance_group_end(row.group);
+}}
+
 fn element(index: u32) -> Placed {{
-    var low = 0u;
-    var high = instance_args.rows;
-    while (high - low > 1u) {{
-        let middle = (low + high) / 2u;
-        if (instance_row(middle).first <= index) {{
-            low = middle;
-        }} else {{
-            high = middle;
-        }}
-    }}
-    let row = instance_row(low);
-    let base = args.offset + (instance_group_start(row.group) + index - row.first) * {words}u;
+    let row = instance_of(index);
+    let base = args.offset + (instance_group_start(row.group) + index % instance_args.slots) * {words}u;
     return Placed({read}, row.transform);
 }}
 ",
@@ -683,6 +712,177 @@ pub struct InstanceArgs {
     pub rows: u32,
     pub groups_offset: u32,
     pub groups: u32,
+    /// How many elements the shape has.
+    pub elements: u32,
+    /// How many elements its longest group has.
+    pub slots: u32,
+    pub _padding: [u32; 2],
+}
+
+/// The uniform of [`cull`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CullArgs {
+    /// Column-major, as WGSL wants it.
+    pub view_projection: [[f32; 4]; 4],
+    /// The size in pixels of what is drawn into.
+    pub viewport: [f32; 2],
+    /// Instances smaller than this many pixels across are not drawn.
+    pub min_pixels: f32,
+    /// The word the first row starts at in its page, and how many there are.
+    pub rows_offset: u32,
+    pub rows: u32,
+    /// How many places for pieces each visible instance gets: see
+    /// [`InstanceArgs::slots`].
+    pub slots: u32,
+    /// How many vertices a draw without mesh shaders has per piece.
+    pub vertices: u32,
+    pub _padding: u32,
+}
+
+/// Where [`cull`] writes the arguments of what comes after it, in words of
+/// the indirect buffer: task shaders, a draw without them, and counting.
+pub const CULL_TASKS: u64 = 0;
+pub const CULL_DRAW: u64 = 4;
+pub const CULL_COUNT: u64 = 8;
+/// How long the indirect buffer is, in words.
+pub const CULL_WORDS: u64 = 12;
+
+/// How many workgroups one dimension of a dispatch takes, the rest goes on
+/// in the next one: see `FOLD` in the shaders.
+pub const FOLD: u32 = 32768;
+
+/// The shader which finds the instances which are worth drawing, before
+/// they are drawn. Instances are left out which are entirely beside what
+/// the camera sees, or smaller on screen than `min_pixels`. The sphere
+/// around each group of the shape is known, and turned, scaled and moved
+/// with an instance it is around it as well.
+///
+/// Bound in group 0: binding 0 the page of the rows, 1 a uniform
+/// [`CullArgs`], 2 the spheres (`array<vec4<f32>>`, center and radius),
+/// 3 where the visible ones go (`array<atomic<u32>>`, how many and then
+/// which rows; zero the first word before), 4 the indirect buffer.
+///
+/// Entry points: `cs_cull`, `ceil(rows / 64)` workgroups, and then
+/// `cs_finish`, a single one, which writes the arguments of the draw.
+pub fn cull() -> Result<String, ShaderError> {
+    let row = &InstanceRow::INFO;
+    let mut wgsl = String::new();
+    let out = &mut wgsl;
+    declare(out, &mut Vec::new(), row);
+    let _ = writeln!(
+        out,
+        "struct CullArgs {{
+    view_projection: mat4x4<f32>,
+    viewport: vec2<f32>,
+    min_pixels: f32,
+    rows_offset: u32,
+    rows: u32,
+    slots: u32,
+    vertices: u32,
+}}
+
+const FOLD: u32 = {FOLD}u;
+const PATCHES: u32 = {patches}u;
+const COUNT_GROUP: u32 = {count}u;
+
+@group(0) @binding(0) var<storage, read> page: array<u32>;
+@group(0) @binding(1) var<uniform> args: CullArgs;
+@group(0) @binding(2) var<storage, read> spheres: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> visible: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> indirect: array<u32>;
+
+fn row_at(index: u32) -> {name} {{
+    let base = args.rows_offset + index * {words}u;
+    return {read};
+}}
+
+fn rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {{
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}}
+
+fn matrix_row(m: mat4x4<f32>, i: u32) -> vec4<f32> {{
+    return vec4<f32>(m[0][i], m[1][i], m[2][i], m[3][i]);
+}}
+
+// Whether a sphere is entirely beyond a plane of what the camera sees.
+fn beyond(plane: vec4<f32>, center: vec3<f32>, radius: f32) -> bool {{
+    return dot(plane.xyz, center) + plane.w < -radius * length(plane.xyz);
+}}
+
+@compute @workgroup_size(64)
+fn cs_cull(@builtin(global_invocation_id) id: vec3<u32>) {{
+    if (id.x >= args.rows) {{
+        return;
+    }}
+    let row = row_at(id.x);
+    let sphere = spheres[row.group];
+    if (sphere.w < 0.0) {{
+        // An empty group: there is nothing to draw.
+        return;
+    }}
+    let t = row.transform;
+    let center = rotate(t.rotation, sphere.xyz) * t.scale + t.offset;
+    // Some room for what bulges out between the points the sphere was
+    // found with.
+    let radius = sphere.w * abs(t.scale) * 1.1 + 1e-4;
+
+    let m = args.view_projection;
+    let x = matrix_row(m, 0u);
+    let y = matrix_row(m, 1u);
+    let w = matrix_row(m, 3u);
+    if (beyond(w + x, center, radius) || beyond(w - x, center, radius)
+        || beyond(w + y, center, radius) || beyond(w - y, center, radius)
+        || beyond(w, center, radius)) {{
+        return;
+    }}
+    // How large it is on screen, where its center is in front.
+    let depth = dot(w.xyz, center) + w.w;
+    if (depth > radius) {{
+        let pixels = radius * length(y.xyz) / depth * args.viewport.y;
+        if (pixels < args.min_pixels) {{
+            return;
+        }}
+    }}
+    let slot = atomicAdd(&visible[0], 1u);
+    atomicStore(&visible[1u + slot], id.x);
+}}
+
+// Workgroups for `count` invocations which each take `per` of them, folded.
+fn folded(count: u32, per: u32) -> vec2<u32> {{
+    let groups = (count + per - 1u) / per;
+    return vec2<u32>(min(groups, FOLD), (groups + FOLD - 1u) / FOLD);
+}}
+
+@compute @workgroup_size(1)
+fn cs_finish() {{
+    let pieces = atomicLoad(&visible[0]) * args.slots;
+    let tasks = folded(pieces, PATCHES);
+    indirect[{tasks_at}] = tasks.x;
+    indirect[{tasks_at} + 1] = tasks.y;
+    indirect[{tasks_at} + 2] = 1u;
+    indirect[{draw_at}] = args.vertices;
+    indirect[{draw_at} + 1] = pieces;
+    indirect[{draw_at} + 2] = 0u;
+    indirect[{draw_at} + 3] = 0u;
+    let count = folded(pieces, COUNT_GROUP);
+    indirect[{count_at}] = count.x;
+    indirect[{count_at} + 1] = count.y;
+    indirect[{count_at} + 2] = 1u;
+}}
+",
+        patches = LodShader::TASK_GROUP,
+        count = LodShader::COUNT_GROUP,
+        name = row.wgsl,
+        words = row.words,
+        read = read_element(row, "page", "base"),
+        tasks_at = CULL_TASKS,
+        draw_at = CULL_DRAW,
+        count_at = CULL_COUNT,
+    );
+    validate("cull", &wgsl)?;
+    Ok(wgsl)
 }
 
 /// Writes the shader which draws values of a drawable type, and checks
@@ -700,7 +900,7 @@ pub fn draw(drawable: &Drawable) -> Result<DrawShader, ShaderError> {
         );
     }
     let _ = writeln!(out, "{DRAW_ARGS}");
-    draw_pieces(out, drawable);
+    draw_pieces(out, drawable, false);
     let _ = write!(
         out,
         "{}",
@@ -797,7 +997,11 @@ pub struct LodArgs {
     pub _padding: u32,
 }
 
-const LOD_COMMON: &str = "struct LodArgs {
+const LOD_COMMON: &str = "// Workgroups which go beyond what one dimension can count go on in the
+// next one: workgroup `x + y * FOLD`.
+const FOLD: u32 = 32768u;
+
+struct LodArgs {
     view_projection: mat4x4<f32>,
     light: vec4<f32>,
     color: vec4<f32>,
@@ -951,11 +1155,12 @@ fn lod_of(piece: {name}) -> Lod {{
 }}
 
 @compute @workgroup_size(64)
-fn cs_count(@builtin(global_invocation_id) id: vec3<u32>) {{
-    if (id.x >= args.patches) {{
+fn cs_count(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {{
+    let index = (group.x + group.y * FOLD) * 64u + local.x;
+    if (index >= piece_count() || !piece_present(index)) {{
         return;
     }}
-    let piece = element(id.x);
+    let piece = element(index);
     if (lod_hidden(piece)) {{
         return;
     }}
@@ -1001,6 +1206,9 @@ fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance
     );
     let index = vec2<u32>(cell / cells, cell % cells) + corners[vertex % 6u];
 
+    if (!piece_present(instance)) {
+        return VertexOutput(vec4<f32>(0.0), vec3<f32>(0.0), 0.0);
+    }
     let piece = element(instance);
     let lod = lod_of(piece);
     let uv = lod_uv(lod, vec2<u32>(args.max_level), index);
@@ -1076,12 +1284,12 @@ fn ts_main(
     @builtin(local_invocation_id) local: vec3<u32>,
 ) -> @builtin(mesh_task_size) vec3<u32> {
     let lane = local.x;
-    let first = group.x * PATCHES;
+    let first = (group.x + group.y * FOLD) * PATCHES;
     // Every patch on its own: whether it is there and how fine it gets.
     if (lane < PATCHES) {
         var shown = 0u;
         let index = first + lane;
-        if (index < args.patches) {
+        if (index < piece_count() && piece_present(index)) {
             let piece = element(index);
             if (!lod_hidden(piece)) {
                 let lod = lod_of(piece);
@@ -1279,7 +1487,7 @@ pub fn draw_lod(drawable: &Drawable, method: LodMethod) -> Result<LodShader, Sha
         "struct SurfacePoint {{\n    position: vec3<f32>,\n    normal: vec3<f32>,\n}}\n"
     );
     let _ = writeln!(out, "{LOD_COMMON}");
-    let piece = draw_pieces(out, drawable);
+    let piece = draw_pieces(out, drawable, true);
     let _ = writeln!(out, "{}", lod_typed(piece));
     let _ = write!(
         out,

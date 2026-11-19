@@ -293,14 +293,11 @@ impl Primitive for Shot {
         match session.shown() {
             Shown::Nothing => {}
             Shown::Drawn { key, drawable, shape } => {
-                // How many elements all instances have together, which only
-                // their rows tell.
-                let patches = shape.and_then(|(elements, groups)| {
-                    let words = drawable.ty.prototype?.words;
-                    let (store, _) = session.engine_mut().parts_mut();
-                    let shape_len = store.get(elements)?.len / words;
-                    session.instance_patches(key, groups, shape_len)
-                });
+                // What is known of the shape of instances, which the GPU
+                // culls them with.
+                let summary = shape
+                    .and_then(|(elements, groups)| session.shape_summary(&drawable, elements, groups))
+                    .cloned();
                 let (store, executor) = session.engine_mut().parts_mut();
                 let Some(gpu) = executor.gpu_mut() else {
                     return;
@@ -322,8 +319,8 @@ impl Primitive for Shot {
                     }
                     Some((elements, groups)) => {
                         let handles = (store.get(key), store.get(elements), store.get(groups));
-                        if let (Some(rows), Some(elements), Some(groups), Some(patches)) =
-                            (handles.0, handles.1, handles.2, patches)
+                        if let (Some(rows), Some(elements), Some(groups), Some(summary)) =
+                            (handles.0, handles.1, handles.2, &summary)
                             && let (Some(rows_page), Some(page)) = (gpu.page(rows.page), gpu.page(elements.page))
                         {
                             // Offsets which are empty may live in no page,
@@ -332,7 +329,12 @@ impl Primitive for Shot {
                             let instanced = Instanced {
                                 rows: (rows_page, rows),
                                 groups: (groups_page, groups),
-                                patches,
+                                spheres: &summary.spheres,
+                                elements: summary.elements,
+                                slots: summary.slots,
+                                // Smaller than a pixel across is too small
+                                // to see.
+                                min_pixels: 1.0,
                             };
                             pipeline.stage.prepare_instances_view(
                                 0, device, queue, size, &drawable, page, elements, instanced, &view,
