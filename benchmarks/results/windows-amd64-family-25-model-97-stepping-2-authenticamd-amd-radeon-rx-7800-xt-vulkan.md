@@ -1,6 +1,6 @@
 # Benchmarks
 
-windows, AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD with 16 threads, AMD Radeon RX 7800 XT on vulkan, driver AMD proprietary driver 26.10.1 (LLPC). Commit 19b4de1.
+windows, AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD with 16 threads, AMD Radeon RX 7800 XT on vulkan, driver AMD proprietary driver 26.11.2 (LLPC). Commit 79cbc2e.
 
 The time from an edit until its result is computed, the median of many edits. Below each table, where it goes: setting the new value (which hashes it) and planning are the same for every backend, `flush` is the executor, then waiting for the device. The device column is the time the GPU spends on compute passes, by its timestamps.
 
@@ -262,25 +262,25 @@ A ring of 10 patches put onto 64 frames along every curve by reference, the cont
 
 | size | cpu, 1 thread | cpu | gpu | gpu against cpu | gpu work |
 |---|---:|---:|---:|---:|---|
-| 1 × 32 | 80 µs | 137 µs | 228 µs | 1.7× slower | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
-| 16 × 32 | 1.23 ms | 388 µs | 240 µs | 1.6× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
-| 256 × 32 | 19.99 ms | 3.04 ms | 294 µs | 10.4× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
-| 1024 × 32 | 80.68 ms | 12.03 ms | 541 µs | 22.2× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
+| 1 × 32 | 80 µs | 130 µs | 245 µs | 1.9× slower | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
+| 16 × 32 | 1.33 ms | 410 µs | 247 µs | 1.7× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
+| 256 × 32 | 20.16 ms | 3.08 ms | 303 µs | 10.2× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
+| 1024 × 32 | 81.42 ms | 12.64 ms | 532 µs | 23.8× faster | 3 on gpu, 0 on cpu, 4 passes, 0 downloads |
 
 | size | backend | set | plan | flush | of which | wait | device |
 |---|---|---:|---:|---:|---|---:|---:|
-| 1 × 32 | cpu-1 | 0.2 µs | 1.3 µs | 79 µs | kernels 78 µs, store 0.5 µs, rest 0.5 µs | 0.0 µs | – |
-| 1 × 32 | cpu | 0.4 µs | 2.3 µs | 133 µs | kernels 131 µs, store 1.0 µs, rest 1.0 µs | 0.0 µs | – |
-| 1 × 32 | gpu | 0.4 µs | 1.9 µs | 63 µs | upload 6.0 µs, record 5.0 µs, submit 45 µs, download 0.2 µs, rest 6.4 µs | 162 µs | 84 µs |
-| 16 × 32 | cpu-1 | 0.5 µs | 1.5 µs | 1.23 ms | kernels 1.23 ms, store 2.8 µs, rest 0.6 µs | 0.0 µs | – |
-| 16 × 32 | cpu | 0.8 µs | 2.6 µs | 384 µs | kernels 377 µs, store 5.0 µs, rest 1.2 µs | 0.0 µs | – |
-| 16 × 32 | gpu | 0.7 µs | 2.0 µs | 65 µs | upload 7.1 µs, record 5.1 µs, submit 45 µs, download 0.2 µs, rest 7.9 µs | 170 µs | 92 µs |
-| 256 × 32 | cpu-1 | 8.2 µs | 10 µs | 19.98 ms | kernels 19.88 ms, store 96 µs, rest 2.6 µs | 0.0 µs | – |
-| 256 × 32 | cpu | 7.0 µs | 6.1 µs | 3.03 ms | kernels 2.95 ms, store 67 µs, rest 1.9 µs | 0.0 µs | – |
-| 256 × 32 | gpu | 6.4 µs | 4.6 µs | 93 µs | upload 22 µs, record 5.5 µs, submit 48 µs, download 0.2 µs, rest 18 µs | 188 µs | 107 µs |
-| 1024 × 32 | cpu-1 | 28 µs | 28 µs | 80.63 ms | kernels 80.11 ms, store 526 µs, rest 6.7 µs | 0.0 µs | – |
-| 1024 × 32 | cpu | 28 µs | 31 µs | 11.96 ms | kernels 11.45 ms, store 508 µs, rest 3.9 µs | 0.0 µs | – |
-| 1024 × 32 | gpu | 26 µs | 33 µs | 160 µs | upload 55 µs, record 5.5 µs, submit 53 µs, download 0.3 µs, rest 45 µs | 327 µs | 165 µs |
+| 1 × 32 | cpu-1 | 0.2 µs | 1.3 µs | 78 µs | kernels 77 µs, store 0.6 µs, rest 0.5 µs | 0.0 µs | – |
+| 1 × 32 | cpu | 0.4 µs | 2.3 µs | 127 µs | kernels 125 µs, store 1.0 µs, rest 0.9 µs | 0.0 µs | – |
+| 1 × 32 | gpu | 0.4 µs | 2.4 µs | 73 µs | upload 7.4 µs, record 5.8 µs, submit 51 µs, download 0.3 µs, rest 8.0 µs | 168 µs | 85 µs |
+| 16 × 32 | cpu-1 | 0.5 µs | 1.6 µs | 1.33 ms | kernels 1.32 ms, store 2.9 µs, rest 0.6 µs | 0.0 µs | – |
+| 16 × 32 | cpu | 0.8 µs | 2.7 µs | 406 µs | kernels 399 µs, store 5.5 µs, rest 1.4 µs | 0.0 µs | – |
+| 16 × 32 | gpu | 0.7 µs | 2.2 µs | 67 µs | upload 7.7 µs, record 5.2 µs, submit 46 µs, download 0.2 µs, rest 8.5 µs | 177 µs | 94 µs |
+| 256 × 32 | cpu-1 | 7.9 µs | 13 µs | 20.14 ms | kernels 20.01 ms, store 117 µs, rest 4.4 µs | 0.0 µs | – |
+| 256 × 32 | cpu | 7.1 µs | 7.5 µs | 3.06 ms | kernels 2.96 ms, store 86 µs, rest 2.1 µs | 0.0 µs | – |
+| 256 × 32 | gpu | 6.4 µs | 5.8 µs | 99 µs | upload 23 µs, record 5.3 µs, submit 51 µs, download 0.3 µs, rest 19 µs | 189 µs | 107 µs |
+| 1024 × 32 | cpu-1 | 28 µs | 28 µs | 81.36 ms | kernels 80.73 ms, store 618 µs, rest 5.8 µs | 0.0 µs | – |
+| 1024 × 32 | cpu | 32 µs | 30 µs | 12.58 ms | kernels 12.03 ms, store 547 µs, rest 4.5 µs | 0.0 µs | – |
+| 1024 × 32 | gpu | 25 µs | 12 µs | 163 µs | upload 56 µs, record 5.6 µs, submit 54 µs, download 0.3 µs, rest 46 µs | 329 µs | 166 µs |
 
 ## instances realized
 
@@ -288,25 +288,25 @@ The rings of `instances`, copied to where each one is.
 
 | size | cpu, 1 thread | cpu | gpu | gpu against cpu | gpu work |
 |---|---:|---:|---:|---:|---|
-| 1 × 32 | 161 µs | 159 µs | 416 µs | 2.6× slower | 4 on gpu, 0 on cpu, 5 passes, 1 downloads |
-| 16 × 32 | 2.66 ms | 876 µs | 435 µs | 2.0× faster | 4 on gpu, 0 on cpu, 5 passes, 1 downloads |
-| 256 × 32 | 47.34 ms | 12.64 ms | 676 µs | 18.7× faster | 4 on gpu, 0 on cpu, 5 passes, 1 downloads |
-| 1024 × 32 | 198.45 ms | 51.72 ms | 1.45 ms | 35.7× faster | 4 on gpu, 0 on cpu, 5 passes, 1 downloads |
+| 1 × 32 | 160 µs | 168 µs | 272 µs | 1.6× slower | 4 on gpu, 0 on cpu, 6 passes, 0 downloads |
+| 16 × 32 | 2.67 ms | 870 µs | 296 µs | 2.9× faster | 4 on gpu, 0 on cpu, 6 passes, 0 downloads |
+| 256 × 32 | 50.96 ms | 14.45 ms | 457 µs | 31.6× faster | 4 on gpu, 0 on cpu, 6 passes, 0 downloads |
+| 1024 × 32 | 201.80 ms | 54.20 ms | 1.01 ms | 53.7× faster | 4 on gpu, 0 on cpu, 6 passes, 0 downloads |
 
 | size | backend | set | plan | flush | of which | wait | device |
 |---|---|---:|---:|---:|---|---:|---:|
-| 1 × 32 | cpu-1 | 0.2 µs | 1.6 µs | 160 µs | kernels 157 µs, store 1.7 µs, rest 0.7 µs | 0.0 µs | – |
-| 1 × 32 | cpu | 0.4 µs | 2.8 µs | 156 µs | kernels 152 µs, store 2.6 µs, rest 1.2 µs | 0.0 µs | – |
-| 1 × 32 | gpu | 0.5 µs | 2.7 µs | 347 µs | upload 10 µs, record 8.1 µs, submit 90 µs, download 228 µs, rest 11 µs | 63 µs | 92 µs |
-| 16 × 32 | cpu-1 | 0.7 µs | 2.3 µs | 2.65 ms | kernels 2.62 ms, store 28 µs, rest 1.2 µs | 0.0 µs | – |
-| 16 × 32 | cpu | 0.9 µs | 3.3 µs | 871 µs | kernels 842 µs, store 27 µs, rest 2.2 µs | 0.0 µs | – |
-| 16 × 32 | gpu | 0.8 µs | 2.5 µs | 357 µs | upload 11 µs, record 7.3 µs, submit 85 µs, download 242 µs, rest 12 µs | 73 µs | 108 µs |
-| 256 × 32 | cpu-1 | 9.4 µs | 13 µs | 47.32 ms | kernels 46.37 ms, store 942 µs, rest 6.8 µs | 0.0 µs | – |
-| 256 × 32 | cpu | 9.0 µs | 11 µs | 12.62 ms | kernels 11.71 ms, store 950 µs, rest 5.7 µs | 0.0 µs | – |
-| 256 × 32 | gpu | 8.2 µs | 5.9 µs | 469 µs | upload 31 µs, record 8.4 µs, submit 99 µs, download 291 µs, rest 37 µs | 191 µs | 224 µs |
-| 1024 × 32 | cpu-1 | 34 µs | 33 µs | 198.38 ms | kernels 194.81 ms, store 3.68 ms, rest 11 µs | 0.0 µs | – |
-| 1024 × 32 | cpu | 35 µs | 34 µs | 51.65 ms | kernels 47.98 ms, store 3.72 ms, rest 8.3 µs | 0.0 µs | – |
-| 1024 × 32 | gpu | 32 µs | 28 µs | 918 µs | upload 77 µs, record 8.7 µs, submit 107 µs, download 582 µs, rest 138 µs | 443 µs | 598 µs |
+| 1 × 32 | cpu-1 | 0.2 µs | 1.6 µs | 158 µs | kernels 156 µs, store 1.7 µs, rest 0.7 µs | 0.0 µs | – |
+| 1 × 32 | cpu | 0.5 µs | 3.0 µs | 165 µs | kernels 160 µs, store 2.9 µs, rest 1.4 µs | 0.0 µs | – |
+| 1 × 32 | gpu | 0.4 µs | 2.5 µs | 86 µs | upload 7.3 µs, record 7.6 µs, submit 60 µs, download 0.3 µs, rest 9.8 µs | 183 µs | 94 µs |
+| 16 × 32 | cpu-1 | 0.7 µs | 2.7 µs | 2.66 ms | kernels 2.63 ms, store 36 µs, rest 1.2 µs | 0.0 µs | – |
+| 16 × 32 | cpu | 0.9 µs | 3.2 µs | 866 µs | kernels 832 µs, store 27 µs, rest 2.0 µs | 0.0 µs | – |
+| 16 × 32 | gpu | 0.8 µs | 2.8 µs | 92 µs | upload 8.4 µs, record 8.5 µs, submit 62 µs, download 0.3 µs, rest 12 µs | 200 µs | 110 µs |
+| 256 × 32 | cpu-1 | 8.6 µs | 12 µs | 50.94 ms | kernels 49.95 ms, store 966 µs, rest 7.2 µs | 0.0 µs | – |
+| 256 × 32 | cpu | 10 µs | 13 µs | 14.42 ms | kernels 13.43 ms, store 1.01 ms, rest 6.2 µs | 0.0 µs | – |
+| 256 × 32 | gpu | 7.0 µs | 6.0 µs | 124 µs | upload 24 µs, record 8.1 µs, submit 68 µs, download 0.3 µs, rest 22 µs | 320 µs | 227 µs |
+| 1024 × 32 | cpu-1 | 31 µs | 31 µs | 201.73 ms | kernels 197.92 ms, store 3.70 ms, rest 11 µs | 0.0 µs | – |
+| 1024 × 32 | cpu | 35 µs | 34 µs | 54.13 ms | kernels 50.40 ms, store 3.56 ms, rest 10 µs | 0.0 µs | – |
+| 1024 × 32 | gpu | 27 µs | 30 µs | 198 µs | upload 58 µs, record 8.7 µs, submit 71 µs, download 0.3 µs, rest 60 µs | 772 µs | 602 µs |
 
 ## mesh
 
