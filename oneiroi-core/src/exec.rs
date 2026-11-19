@@ -1387,7 +1387,7 @@ mod tests {
         use super::*;
         use crate::{
             node::GpuKernel,
-            types::{InstanceRow, Similarity, TypeInfo},
+            types::{InstanceRow, InstanceTotal, Similarity, TypeInfo},
         };
 
         const NUMBERS: TypeInfo = TypeInfo::instances("instances<f32>", &f32::INFO);
@@ -1421,7 +1421,8 @@ mod tests {
                     })
                     .collect();
                 outputs.alloc::<InstanceRow>(0, rows.len()).copy_from_slice(&rows);
-                outputs.set_total(0, inputs.get::<f32>(1).len() as u32 * len);
+                let points = inputs.get::<f32>(1).len() as u32;
+                outputs.set_total(0, InstanceTotal::repeated(points, InstanceTotal::single(groups.len() as u32, len), groups.len() as u32));
             },
             gpu: &[],
         };
@@ -1469,7 +1470,7 @@ mod tests {
                             .map(move |value| value + row.transform.offset[0])
                     })
                     .collect();
-                assert_eq!(values.len(), inputs.total(0) as usize, "the total is what the copies have");
+                assert_eq!(values.len(), inputs.total(0).elements as usize, "the total is what the copies have");
                 outputs.set(0, &values);
             },
             gpu: &[],
@@ -1606,7 +1607,7 @@ mod tests {
                 gpu: &[GpuKernel {
                     wgsl: "
 fn realize(index: u32) -> f32 {
-    let row = in_instances(0u);
+    let row = in_instances(in_instances_row_of(index));
     let start = in_instances_prototype_start(row.group);
     let end = in_instances_prototype_end(row.group);
     let count = in_instances_prototype_groups() + in_instances_prototype_len() + in_instances_total();

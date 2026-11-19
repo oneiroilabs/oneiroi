@@ -392,12 +392,45 @@ fn in_{name}_prototype_end(group: u32) -> u32 {{
     return min(pages[calls[call + {groups}u]].words[calls[call + {groups_offset}u] + group + 1u], in_{name}_prototype_len());
 }}
 
-// How many elements all copies of the instances have together.
-fn in_{name}_total() -> u32 {{
-    if (calls[call + {total_len}u] == 0u) {{
+// How many elements all copies of the instances have together, and how
+// their rows repeat: see `InstanceTotal`.
+fn in_{name}_total_word(word: u32) -> u32 {{
+    if (calls[call + {total_len}u] <= word) {{
         return 0u;
     }}
-    return pages[calls[call + {total}u]].words[calls[call + {total_offset}u]];
+    return pages[calls[call + {total}u]].words[calls[call + {total_offset}u] + word];
+}}
+
+fn in_{name}_total() -> u32 {{
+    return in_{name}_total_word(0u);
+}}
+
+// The row the element `index` of all copies belongs to: the block it is
+// in by dividing, and then the row among the rows of the first block.
+fn in_{name}_row_of(index: u32) -> u32 {{
+    var rows = in_{name}_total_word(1u);
+    var elements = in_{name}_total_word(2u);
+    var block = 0u;
+    var within = index;
+    if (rows == 0u || elements == 0u) {{
+        rows = in_{name}_len();
+    }} else {{
+        block = index / elements;
+        within = index % elements;
+    }}
+    var low = 0u;
+    var high = rows;
+    while (high - low > 1u) {{
+        let middle = (low + high) / 2u;
+        // Only the word which says where the row starts.
+        let first = pages[calls[call + {rows_page}u]].words[calls[call + {rows_offset}u] + middle * {row_words}u + {first_word}u];
+        if (first <= within) {{
+            low = middle;
+        }} else {{
+            high = middle;
+        }}
+    }}
+    return block * rows + low;
 }}
 ",
             len = at + 2,
@@ -406,6 +439,10 @@ fn in_{name}_total() -> u32 {{
             groups_offset = groups + 1,
             total_len = total + 2,
             total_offset = total + 1,
+            rows_page = *index * 3,
+            rows_offset = *index * 3 + 1,
+            row_words = InstanceRow::INFO.words,
+            first_word = InstanceRow::INFO.words - 1,
         );
     }
 

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     store::{Handle, Store},
-    types::{DataType, PortDefault, Trait, TypeInfo},
+    types::{DataType, InstanceTotal, PortDefault, Trait, TypeInfo},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -201,10 +201,9 @@ impl<'a> Inputs<'a> {
     /// How many elements all copies of an input of instances have together.
     /// Its producer says so without looking at any rows, so it is known on
     /// the CPU while the rows may be on the GPU only.
-    pub fn total(&self, index: usize) -> u32 {
+    pub fn total(&self, index: usize) -> InstanceTotal {
         let hidden = hidden_prototype(self.ports, index).expect("only instances have a total");
-        let total: &[u32] = self.store.slice(self.handles[hidden + 2]);
-        total.first().copied().unwrap_or(0)
+        InstanceTotal::of_words(self.store.slice(self.handles[hidden + 2]))
     }
 
     /// How many groups an input has, without looking at its offsets: they
@@ -281,9 +280,9 @@ impl Outputs {
 
     /// How many elements all copies of an output of instances have
     /// together, see [`Inputs::total`].
-    pub fn set_total(&mut self, index: usize, total: u32) {
+    pub fn set_total(&mut self, index: usize, total: InstanceTotal) {
         let hidden = hidden_total(self.ports, index).expect("only instances have a total");
-        self.buffers[hidden] = vec![total];
+        self.buffers[hidden] = total.words();
     }
 
     /// Where the groups of a grouped output start, and where the last one

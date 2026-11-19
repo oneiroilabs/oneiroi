@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use glam::{Mat3, Quat, Vec3};
 use oneiroi_core::{
     node::{Caps, Drawable, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
-    types::{DataType, InstanceRow, PortDefault, Similarity, TypeInfo},
+    types::{DataType, InstanceRow, InstanceTotal, PortDefault, Similarity, TypeInfo},
 };
 use rayon::prelude::*;
 
@@ -142,23 +142,8 @@ fn placement_of(t: Similarity) -> Placement {
     return Placement(rotation, t.scale, t.offset);
 }
 
-// The row the element `index` of all copies belongs to.
-fn realize_row(index: u32) -> u32 {
-    var low = 0u;
-    var high = in_instances_len();
-    while (high - low > 1u) {
-        let middle = (low + high) / 2u;
-        if (in_instances(middle).first <= index) {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    return low;
-}
-
 fn realize_shapes(index: u32) -> Shape {
-    let row = in_instances(realize_row(index));
+    let row = in_instances(in_instances_row_of(index));
     let element = in_instances_prototype(in_instances_prototype_start(row.group) + index - row.first);
     return placed(element, placement_of(row.transform));
 }
@@ -431,7 +416,7 @@ fn instances_example<S: Shape>(which: usize) -> (Vec<u32>, Vec<u32>, Vec<u32>, V
     let (shape, offsets) = &examples[which.min(examples.len() - 1)];
     let rows = example_rows(shape.len(), offsets);
     let total = group_ranges(shape.len(), offsets).iter().map(|range| range.len() as u32).sum();
-    (words(&rows), Vec::new(), words(shape), offsets.clone(), vec![total])
+    (words(&rows), Vec::new(), words(shape), offsets.clone(), InstanceTotal::single(rows.len() as u32, total).words())
 }
 
 /// The rows of instances of a shape on every point: one per point and
@@ -439,24 +424,24 @@ fn instances_example<S: Shape>(which: usize) -> (Vec<u32>, Vec<u32>, Vec<u32>, V
 fn instance<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let points = inputs.get::<EvaluatedFrame>(0);
     let groups = inputs.groups(1);
-    let len = inputs.len(1) as u32;
+    let covered = covered(inputs, 1);
+    let starts = group_firsts(&groups);
     let scale = inputs.get::<f32>(2).first().copied().unwrap_or(1.0);
     let rows: Vec<InstanceRow> = points
         .par_iter()
         .enumerate()
         .flat_map_iter(|(point, frame)| {
             let transform = onto_frame(frame, scale);
-            let groups = groups.clone();
-            groups.into_iter().enumerate().map(move |(group, range)| InstanceRow {
+            starts.iter().enumerate().map(move |(group, start)| InstanceRow {
                 transform,
                 group: group as u32,
-                first: point as u32 * len + range.start as u32,
+                first: point as u32 * covered + start,
             })
         })
         .collect();
     outputs.set(0, &rows);
     outputs.set_groups(0, &per_point(points.len(), groups_count(inputs)));
-    outputs.set_total(0, points.len() as u32 * covered(inputs, 1));
+    outputs.set_total(0, instance_total(inputs));
 }
 
 fn groups_count(inputs: &Inputs<'_>) -> usize {
@@ -469,6 +454,29 @@ fn covered(inputs: &Inputs<'_>, index: usize) -> u32 {
     inputs.groups(index).iter().map(|range| range.len() as u32).sum()
 }
 
+/// Where the copy of each group starts in a copy of all of them.
+fn group_firsts(groups: &[std::ops::Range<usize>]) -> Vec<u32> {
+    groups
+        .iter()
+        .scan(0, |first, range| {
+            let start = *first;
+            *first += range.len() as u32;
+            Some(start)
+        })
+        .collect()
+}
+
+/// A block of instances per point of a shape, each with a row per group.
+fn instance_total(inputs: &Inputs<'_>) -> InstanceTotal {
+    let groups = inputs.group_count(1) as u32;
+    InstanceTotal::repeated(inputs.len(0) as u32, InstanceTotal::single(groups, covered(inputs, 1)), groups)
+}
+
+/// A block of the given instances per point.
+fn instance_instances_total(inputs: &Inputs<'_>) -> InstanceTotal {
+    InstanceTotal::repeated(inputs.len(0) as u32, inputs.total(1), inputs.len(1) as u32)
+}
+
 /// Offsets of `points` groups of `each` rows.
 fn per_point(points: usize, each: usize) -> Vec<u32> {
     (0..=points).map(|point| (point * each) as u32).collect()
@@ -479,7 +487,7 @@ fn instance_instances<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let points = inputs.get::<EvaluatedFrame>(0);
     let given = inputs.get::<InstanceRow>(1);
     let scale = inputs.get::<f32>(2).first().copied().unwrap_or(1.0);
-    let total = inputs.total(1);
+    let total = inputs.total(1).elements;
     let rows: Vec<InstanceRow> = points
         .par_iter()
         .enumerate()
@@ -494,7 +502,7 @@ fn instance_instances<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
         .collect();
     outputs.set(0, &rows);
     outputs.set_groups(0, &per_point(points.len(), given.len()));
-    outputs.set_total(0, points.len() as u32 * total);
+    outputs.set_total(0, instance_instances_total(inputs));
 }
 
 /// The transform [`TRANSFORM`] is given.
@@ -522,8 +530,8 @@ fn transform<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
             Some(row)
         })
         .collect();
+    outputs.set_total(0, InstanceTotal::single(rows.len() as u32, covered(inputs, 0)));
     outputs.set(0, &rows);
-    outputs.set_total(0, covered(inputs, 0));
 }
 
 /// Instances put further: the transform on top of where they are.
@@ -605,7 +613,8 @@ fn instance_rows(index: u32) -> InstanceRow {
     let groups = in_shape_groups();
     let point = index / groups;
     let group = index % groups;
-    return InstanceRow(instance_frame(point), group, point * in_shape_len() + in_shape_start(group));
+    let covered = in_shape_end(groups - 1u) - in_shape_start(0u);
+    return InstanceRow(instance_frame(point), group, point * covered + in_shape_start(group) - in_shape_start(0u));
 }
 
 fn instance_offsets(point: u32) -> u32 {
@@ -627,7 +636,7 @@ fn instance_offsets(point: u32) -> u32 {
             GpuOutput {
                 entry: "",
                 len: |_| 1,
-                words: Some(|inputs| vec![inputs.len(0) as u32 * covered(inputs, 1)]),
+                words: Some(|inputs| instance_total(inputs).words()),
             },
         ],
         requires: Caps::NONE,
@@ -682,7 +691,7 @@ fn instance_offsets(point: u32) -> u32 {
             GpuOutput {
                 entry: "",
                 len: |_| 1,
-                words: Some(|inputs| vec![inputs.len(0) as u32 * inputs.total(1)]),
+                words: Some(|inputs| instance_instances_total(inputs).words()),
             },
         ],
         requires: Caps::NONE,
@@ -732,7 +741,7 @@ fn transform_offsets(group: u32) -> u32 {
             GpuOutput {
                 entry: "",
                 len: |_| 1,
-                words: Some(|inputs| vec![covered(inputs, 0)]),
+                words: Some(|inputs| InstanceTotal::single(inputs.group_count(0) as u32, covered(inputs, 0)).words()),
             },
         ],
         requires: Caps::NONE,
@@ -773,7 +782,7 @@ fn transform_rows(index: u32) -> InstanceRow {
             GpuOutput {
                 entry: "",
                 len: |_| 1,
-                words: Some(|inputs| vec![inputs.total(0)]),
+                words: Some(|inputs| inputs.total(0).words()),
             },
         ],
         requires: Caps::NONE,
@@ -799,7 +808,7 @@ impl<P: Placeable> Ports<P> {
             // without anybody looking at their rows.
             GpuOutput {
                 entry: "realize_shapes",
-                len: |inputs| inputs.total(0) as usize,
+                len: |inputs| inputs.total(0).elements as usize,
                 words: None,
             },
             GpuOutput {
@@ -819,7 +828,29 @@ impl<P: Placeable> Ports<P> {
             },
             || {
                 let (_, _, shape, offsets, _) = instances_example::<P>(0);
-                vec![Vec::new(), shape, offsets, vec![0]]
+                vec![Vec::new(), shape, offsets, InstanceTotal::default().words()]
+            },
+            // A block of rows for each of three points, as Instance on
+            // Points makes them: the row of an element is found by dividing.
+            || {
+                let examples = P::examples();
+                let (shape, offsets) = &examples[0];
+                let block = example_rows(shape.len(), offsets);
+                let elements: u32 = group_ranges(shape.len(), offsets).iter().map(|range| range.len() as u32).sum();
+                let rows: Vec<InstanceRow> = (0..3u32)
+                    .flat_map(|point| {
+                        block.iter().map(move |row| InstanceRow {
+                            first: point * elements + row.first,
+                            transform: Similarity {
+                                offset: [point as f32 * 2.0, 0.0, 0.0],
+                                ..row.transform
+                            },
+                            ..*row
+                        })
+                    })
+                    .collect();
+                let total = InstanceTotal::repeated(3, InstanceTotal::single(block.len() as u32, elements), block.len() as u32);
+                vec![words(&rows), words(shape), offsets.clone(), total.words()]
             },
         ],
         stages: &[],

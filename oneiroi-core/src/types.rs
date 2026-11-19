@@ -310,6 +310,54 @@ pub struct InstanceRow {
     pub first: u32,
 }
 
+/// How many elements all copies of instances have together, and how their
+/// rows repeat: in blocks of `block_rows` rows which cover `block_elements`
+/// elements each, every block with the same groups in the same order.
+///
+/// Instances on points are a block per point, for example. The row of an
+/// element of all copies is then found by dividing, and by looking among
+/// the rows of one block only. Without any blocks (`block_rows` of zero)
+/// all rows are a single one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InstanceTotal {
+    pub elements: u32,
+    pub block_rows: u32,
+    pub block_elements: u32,
+}
+
+impl InstanceTotal {
+    /// Instances which are a single block.
+    pub fn single(rows: u32, elements: u32) -> Self {
+        Self {
+            elements,
+            block_rows: rows,
+            block_elements: elements,
+        }
+    }
+
+    /// `count` times the instances of `block`, one after the other.
+    pub fn repeated(count: u32, block: InstanceTotal, rows: u32) -> Self {
+        Self {
+            elements: count * block.elements,
+            block_rows: rows,
+            block_elements: block.elements,
+        }
+    }
+
+    pub fn words(&self) -> Vec<u32> {
+        vec![self.elements, self.block_rows, self.block_elements]
+    }
+
+    pub fn of_words(words: &[u32]) -> Self {
+        let word = |index: usize| words.get(index).copied().unwrap_or(0);
+        Self {
+            elements: word(0),
+            block_rows: word(1),
+            block_elements: word(2),
+        }
+    }
+}
+
 impl DataType for InstanceRow {
     type ConfigurationOptions = ();
 
