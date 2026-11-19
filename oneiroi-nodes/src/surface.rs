@@ -201,38 +201,38 @@ pub fn detail<S: Surface>(patches: &[S], tolerance: f32) -> (usize, usize) {
 pub const PROBES: usize = 8;
 
 /// One patch as a grid of `rings` by `sides` cells, its vertices numbered
-/// from `first` on.
+/// from `first` on, written into room for exactly as many.
+#[allow(clippy::too_many_arguments)]
 fn grid<S: Surface>(
     patch: &S,
     rings: usize,
     sides: usize,
     first: usize,
-) -> (Vec<Vec3>, Vec<Vec3>, Vec<Vec2>, Vec<u32>) {
-    let count = (rings + 1) * (sides + 1);
-    let mut positions = Vec::with_capacity(count);
-    let mut normals = Vec::with_capacity(count);
-    let mut uvs = Vec::with_capacity(count);
+    positions: &mut [Vec3],
+    normals: &mut [Vec3],
+    uvs: &mut [Vec2],
+    indices: &mut [u32],
+) {
+    let mut vertex = 0;
     for ring in 0..=rings {
         let u = ring as f32 / rings as f32;
         for side in 0..=sides {
             let v = side as f32 / sides as f32;
-            let (position, normal) = patch.point(u, v);
-            positions.push(position);
-            normals.push(normal);
-            uvs.push(patch.uv(u, v));
+            (positions[vertex], normals[vertex]) = patch.point(u, v);
+            uvs[vertex] = patch.uv(u, v);
+            vertex += 1;
         }
     }
-    let mut indices = Vec::with_capacity(rings * sides * 6);
+    let mut corners = indices.chunks_exact_mut(6);
     for ring in 0..rings {
         for side in 0..sides {
             let a = (first + ring * (sides + 1) + side) as u32;
             let b = a + 1;
             let c = a + sides as u32 + 1;
             let d = c + 1;
-            indices.extend_from_slice(&[a, b, c, b, d, c]);
+            corners.next().unwrap().copy_from_slice(&[a, b, c, b, d, c]);
         }
     }
-    (positions, normals, uvs, indices)
 }
 
 /// Every patch becomes a grid of its own. Patches which meet share their
@@ -242,34 +242,48 @@ fn tessellate<S: Surface>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let patches = inputs.get::<S>(0);
     let tolerance = inputs.value::<f32>(1);
 
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    let mut uvs = Vec::new();
-    let mut indices = Vec::new();
-    for surface in inputs.groups(0) {
-        let surface = &patches[surface];
-        let (rings, sides) = detail(surface, tolerance);
-        let per_patch = (rings + 1) * (sides + 1);
-        // Every patch has as many vertices, so each knows where its own
-        // start, and they are made on every core.
-        let grids: Vec<_> = surface
-            .par_iter()
-            .enumerate()
-            .map(|(index, patch)| {
-                let first = positions.len() + index * per_patch;
-                grid(patch, rings, sides, first)
-            })
-            .collect();
-        for (grid_positions, grid_normals, grid_uvs, grid_indices) in grids {
-            positions.extend(grid_positions);
-            normals.extend(grid_normals);
-            uvs.extend(grid_uvs);
-            indices.extend(grid_indices);
-        }
-    }
+    // Every patch of a surface has as many vertices, so how many there are
+    // in all is known before any is made.
+    let surfaces: Vec<_> = inputs
+        .groups(0)
+        .into_iter()
+        .map(|surface| {
+            let (rings, sides) = detail(&patches[surface.clone()], tolerance);
+            (surface, rings, sides)
+        })
+        .collect();
+    let (vertices, corners) = surfaces.iter().fold((0, 0), |(vertices, corners), (surface, rings, sides)| {
+        let patches = surface.len();
+        (vertices + patches * (rings + 1) * (sides + 1), corners + patches * rings * sides * 6)
+    });
 
-    outputs.set(0, &positions);
-    outputs.set(1, &normals);
-    outputs.set(2, &uvs);
-    outputs.set(3, &indices);
+    // Each patch writes its grid right where it is kept, on every core.
+    let mut positions = outputs.alloc_unset::<Vec3>(0, vertices);
+    let mut normals = outputs.alloc_unset::<Vec3>(1, vertices);
+    let mut uvs = outputs.alloc_unset::<Vec2>(2, vertices);
+    let mut indices = outputs.alloc_unset::<u32>(3, corners);
+    let mut first = 0;
+    for (surface, rings, sides) in surfaces {
+        let per_patch = (rings + 1) * (sides + 1);
+        let per_patch_corners = rings * sides * 6;
+        let count = surface.len();
+        let (p, rest) = std::mem::take(&mut positions).split_at_mut(count * per_patch);
+        positions = rest;
+        let (n, rest) = std::mem::take(&mut normals).split_at_mut(count * per_patch);
+        normals = rest;
+        let (u, rest) = std::mem::take(&mut uvs).split_at_mut(count * per_patch);
+        uvs = rest;
+        let (i, rest) = std::mem::take(&mut indices).split_at_mut(count * per_patch_corners);
+        indices = rest;
+        p.par_chunks_mut(per_patch)
+            .zip(n.par_chunks_mut(per_patch))
+            .zip(u.par_chunks_mut(per_patch))
+            .zip(i.par_chunks_mut(per_patch_corners))
+            .zip(&patches[surface])
+            .enumerate()
+            .for_each(|(index, ((((p, n), u), i), patch))| {
+                grid(patch, rings, sides, first + index * per_patch, p, n, u, i)
+            });
+        first += count * per_patch;
+    }
 }

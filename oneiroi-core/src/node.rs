@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    store::{Handle, Store},
+    store::{ContentKey, Handle, Store},
     types::{DataType, InstanceTotal, PortDefault, Trait, TypeInfo},
 };
 
@@ -118,18 +118,38 @@ pub enum Groups {
 /// of the elements, and the last offset is where the last group ends.
 /// No offsets at all means a single group of everything.
 pub struct Inputs<'a> {
-    pub(crate) store: &'a Store,
     pub(crate) ports: &'static [PortDecl],
     pub(crate) handles: &'a [Handle],
+    /// The words of every handle.
+    pub(crate) words: Vec<&'a [u32]>,
 }
 
 impl<'a> Inputs<'a> {
     pub fn new(store: &'a Store, node: &NodeDef, handles: &'a [Handle]) -> Self {
         Self {
-            store,
             ports: node.inputs,
             handles,
+            words: handles.iter().map(|handle| store.words(*handle)).collect(),
         }
+    }
+
+    /// [`Inputs::new`] which does not keep the store borrowed, so that the
+    /// outputs can be written into it meanwhile.
+    ///
+    /// # Safety
+    ///
+    /// The values of `handles` must stay in the store, unchanged, for as
+    /// long as the inputs live: see [`Store::words_unbound`].
+    pub(crate) unsafe fn unbound(store: &Store, ports: &'static [PortDecl], handles: &'a [Handle]) -> Self {
+        Self {
+            ports,
+            handles,
+            words: handles.iter().map(|handle| unsafe { store.words_unbound(*handle) }).collect(),
+        }
+    }
+
+    fn slice<T: DataType>(&self, index: usize) -> &'a [T] {
+        bytemuck::cast_slice(self.words[index])
     }
 
     /// How many elements an input has. Unlike [`Inputs::get`] this never
@@ -140,7 +160,7 @@ impl<'a> Inputs<'a> {
 
     pub fn get<T: DataType>(&self, index: usize) -> &'a [T] {
         debug_assert!(self.ports[index].ty.stored_as(&T::INFO), "{}", self.ports[index].name);
-        self.store.slice(self.handles[index])
+        self.slice(index)
     }
 
     /// The first element of an input, for ports which carry a single value.
@@ -154,7 +174,7 @@ impl<'a> Inputs<'a> {
     /// The offsets of a grouped input, if it has groups.
     pub fn offsets(&self, index: usize) -> Option<&'a [u32]> {
         let hidden = hidden_input(self.ports, index)?;
-        let offsets: &[u32] = self.store.slice(self.handles[hidden]);
+        let offsets: &[u32] = self.slice(hidden);
         (!offsets.is_empty()).then_some(offsets)
     }
 
@@ -174,7 +194,7 @@ impl<'a> Inputs<'a> {
     /// The shape an input of instances refers to.
     pub fn prototype<T: DataType>(&self, index: usize) -> &'a [T] {
         let hidden = hidden_prototype(self.ports, index).expect("only instances have a shape");
-        self.store.slice(self.handles[hidden])
+        self.slice(hidden)
     }
 
     /// How many elements the shape of an input of instances has.
@@ -188,7 +208,7 @@ impl<'a> Inputs<'a> {
     pub fn prototype_groups(&self, index: usize) -> Vec<std::ops::Range<usize>> {
         let hidden = hidden_prototype(self.ports, index).expect("only instances have a shape");
         let len = self.prototype_len(index);
-        let offsets: &[u32] = self.store.slice(self.handles[hidden + 1]);
+        let offsets: &[u32] = self.slice(hidden + 1);
         match offsets.is_empty() {
             true => vec![0..len],
             false => offsets
@@ -203,7 +223,7 @@ impl<'a> Inputs<'a> {
     /// the CPU while the rows may be on the GPU only.
     pub fn total(&self, index: usize) -> InstanceTotal {
         let hidden = hidden_prototype(self.ports, index).expect("only instances have a total");
-        InstanceTotal::of_words(self.store.slice(self.handles[hidden + 2]))
+        InstanceTotal::of_words(self.slice(hidden + 2))
     }
 
     /// How many groups an input has, without looking at its offsets: they
@@ -259,30 +279,66 @@ pub(crate) fn hidden_output(ports: &[PortDecl], index: usize) -> Option<usize> {
 
 /// The outputs a [`CpuKernel`] fills, in the order of [`NodeDef::outputs`].
 /// An output which is not written stays empty.
-pub struct Outputs {
+///
+/// They are written right into the store, where they are kept: nothing is
+/// copied once the kernel is done.
+pub struct Outputs<'a> {
     pub(crate) ports: &'static [PortDecl],
-    pub(crate) buffers: Vec<Vec<u32>>,
+    store: &'a mut Store,
+    /// Under which key each output and everything behind it goes.
+    keys: &'a [ContentKey],
+    written: Vec<bool>,
 }
 
-impl Outputs {
+impl<'a> Outputs<'a> {
+    pub(crate) fn new(store: &'a mut Store, ports: &'static [PortDecl], keys: &'a [ContentKey]) -> Self {
+        Self {
+            ports,
+            store,
+            keys,
+            written: vec![false; keys.len()],
+        }
+    }
+
+    /// Room for `words` words of output `index` (or of what comes along
+    /// with the outputs), as it is: not zeroed.
+    fn words(&mut self, index: usize, words: usize) -> &'a mut [u32] {
+        assert!(!self.written[index], "`{}` is written once", self.ports.get(index).map_or("a hidden output", |port| port.name));
+        let handle = self.store.reserve_output(self.keys[index], words as u32);
+        self.written[index] = true;
+        // SAFETY: the room is new and only this slice reaches it, since
+        // every output is reserved once. Nothing is evicted or removed
+        // while a kernel runs, and a kernel can not keep the slice past
+        // its run, so it is gone before the output is committed.
+        unsafe { self.store.output_words(handle) }
+    }
+
     pub fn set<T: DataType>(&mut self, index: usize, values: &[T]) {
-        self.alloc(index, values.len()).copy_from_slice(values);
+        debug_assert!(self.ports[index].ty.stored_as(&T::INFO), "{}", self.ports[index].name);
+        let words: &[u32] = bytemuck::cast_slice(values);
+        self.words(index, words.len()).copy_from_slice(words);
     }
 
     /// Zeroed space for `len` elements to write the output in place.
-    pub fn alloc<T: DataType>(&mut self, index: usize, len: usize) -> &mut [T] {
+    /// Every output can be had at the same time.
+    pub fn alloc<T: DataType>(&mut self, index: usize, len: usize) -> &'a mut [T] {
+        let values = self.alloc_unset::<T>(index, len);
+        bytemuck::cast_slice_mut::<T, u32>(values).fill(0);
+        values
+    }
+
+    /// [`Outputs::alloc`] without the zeroing, for a kernel which writes
+    /// every element: what is in it at first is left over from before.
+    pub fn alloc_unset<T: DataType>(&mut self, index: usize, len: usize) -> &'a mut [T] {
         debug_assert!(self.ports[index].ty.stored_as(&T::INFO), "{}", self.ports[index].name);
-        let buffer = &mut self.buffers[index];
-        buffer.clear();
-        buffer.resize(len * T::INFO.words as usize, 0);
-        bytemuck::cast_slice_mut(buffer)
+        bytemuck::cast_slice_mut(self.words(index, len * T::INFO.words as usize))
     }
 
     /// How many elements all copies of an output of instances have
     /// together, see [`Inputs::total`].
     pub fn set_total(&mut self, index: usize, total: InstanceTotal) {
         let hidden = hidden_total(self.ports, index).expect("only instances have a total");
-        self.buffers[hidden] = total.words();
+        self.words(hidden, 3).copy_from_slice(&total.words());
     }
 
     /// Where the groups of a grouped output start, and where the last one
@@ -290,11 +346,24 @@ impl Outputs {
     pub fn set_groups(&mut self, index: usize, offsets: &[u32]) {
         let hidden = hidden_output(self.ports, index)
             .expect("only an output which is grouped on its own has offsets to set");
-        self.buffers[hidden] = offsets.to_vec();
+        self.words(hidden, offsets.len()).copy_from_slice(offsets);
+    }
+
+    /// Makes everything written readable, and leaves what was not written
+    /// empty.
+    pub(crate) fn finish(self) {
+        for (key, written) in self.keys.iter().zip(self.written) {
+            match written {
+                true => self.store.commit(*key),
+                false => {
+                    self.store.insert(*key, &[]);
+                }
+            }
+        }
     }
 }
 
-pub type CpuKernel = fn(&Inputs<'_>, &mut Outputs);
+pub type CpuKernel = fn(&Inputs<'_>, &mut Outputs<'_>);
 
 /// What a GPU kernel needs from the device it runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

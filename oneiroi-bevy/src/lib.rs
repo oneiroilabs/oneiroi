@@ -107,7 +107,7 @@ impl Oneiroi {
     }
 
     pub fn set<T: DataType>(
-        &self,
+        &mut self,
         instance: &mut OneiroiInstance,
         name: &str,
         value: &[T],
@@ -276,7 +276,7 @@ mod tests {
         let world = app.world_mut();
         let mut instance = world.entity_mut(entity).take::<OneiroiInstance>().unwrap();
         world
-            .resource::<Oneiroi>()
+            .resource_mut::<Oneiroi>()
             .set(&mut instance, "radius", &[radius])
             .unwrap();
         world.entity_mut(entity).insert(instance);

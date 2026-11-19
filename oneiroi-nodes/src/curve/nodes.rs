@@ -524,12 +524,12 @@ fn translate_example(points: &[usize], offset: [f32; 3]) -> Vec<Vec<u32>> {
 
 fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let offset = inputs.value::<Vec3>(1);
-    let moved: Vec<_> = inputs
-        .get::<CubicNurbsSegmentCache>(0)
-        .par_iter()
-        .map(|segment| segment.translated(offset))
-        .collect();
-    outputs.set(0, &moved);
+    let segments = inputs.get::<CubicNurbsSegmentCache>(0);
+    outputs
+        .alloc_unset::<CubicNurbsSegmentCache>(0, segments.len())
+        .par_iter_mut()
+        .zip(segments)
+        .for_each(|(moved, segment)| *moved = segment.translated(offset));
 }
 
 /// A sphere around the segments in `words`, found by looking at a few

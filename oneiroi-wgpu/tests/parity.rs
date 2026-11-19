@@ -58,7 +58,7 @@ fn program<E: Executor>(engine: &mut Engine<E>, node: &'static NodeDef) -> Progr
 
 /// Hands the words of an example to the parameters, see
 /// [`GpuKernel::examples`](oneiroi_core::node::GpuKernel::examples).
-fn set<E: Executor>(engine: &Engine<E>, instance: &mut Instance, node: &NodeDef, example: &[Vec<u32>]) {
+fn set<E: Executor>(engine: &mut Engine<E>, instance: &mut Instance, node: &NodeDef, example: &[Vec<u32>]) {
     let grouped = node.inputs.iter().filter(|port| port.card == Card::Grouped);
     // The shapes of instances come behind all offsets, see `NodeDef::all_inputs`.
     let shapes = node.inputs.iter().filter(|port| port.ty.prototype.is_some()).flat_map(|port| {
@@ -124,8 +124,8 @@ fn every_kernel_computes_what_the_cpu_computes() {
         for (index, example) in kernel.examples.iter().enumerate() {
             let example = example();
             let (mut a, mut b) = (gpu.instantiate(on_gpu), cpu.instantiate(on_cpu));
-            set(&gpu, &mut a, node, &example);
-            set(&cpu, &mut b, node, &example);
+            set(&mut gpu, &mut a, node, &example);
+            set(&mut cpu, &mut b, node, &example);
 
             gpu.evaluate([&mut a]);
             cpu.evaluate([&mut b]);

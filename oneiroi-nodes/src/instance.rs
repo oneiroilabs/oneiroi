@@ -554,22 +554,23 @@ fn realize<P: Placeable>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let rows = inputs.get::<InstanceRow>(0);
     let shape = inputs.prototype::<P>(0);
     let groups = inputs.prototype_groups(0);
-    let copies: Vec<Vec<P>> = rows
-        .par_iter()
-        .map(|row| {
-            let place = Placement::of(&row.transform);
-            let range = groups.get(row.group as usize).cloned().unwrap_or(0..0);
-            shape[range].iter().map(|value| value.placed(&place)).collect()
-        })
-        .collect();
-    let mut offsets = Vec::with_capacity(copies.len() + 1);
-    let mut placed = Vec::new();
-    for copy in copies {
-        offsets.push(placed.len() as u32);
-        placed.extend(copy);
+    let range = |row: &InstanceRow| groups.get(row.group as usize).cloned().unwrap_or(0..0);
+    let mut offsets = Vec::with_capacity(rows.len() + 1);
+    offsets.push(0);
+    for row in rows {
+        offsets.push(offsets[offsets.len() - 1] + range(row).len() as u32);
     }
-    offsets.push(placed.len() as u32);
-    outputs.set(0, &placed);
+    // Every copy is written where it is kept, on its own core.
+    let placed = outputs.alloc_unset::<P>(0, offsets[rows.len()] as usize);
+    crate::parallel::split_at_offsets(placed, &offsets)
+        .into_par_iter()
+        .zip(rows)
+        .for_each(|(copy, row)| {
+            let place = Placement::of(&row.transform);
+            for (copy, value) in copy.iter_mut().zip(&shape[range(row)]) {
+                *copy = value.placed(&place);
+            }
+        });
     outputs.set_groups(0, &offsets);
 }
 

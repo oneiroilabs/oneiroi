@@ -146,7 +146,7 @@ fn setup(
 
 fn pulse(
     time: Res<Time>,
-    oneiroi: Res<Oneiroi>,
+    mut oneiroi: ResMut<Oneiroi>,
     mut tubes: Query<&mut OneiroiInstance, With<Pulse>>,
 ) {
     let radius = 0.2 + 0.1 * (time.elapsed_secs() * 2.0).sin();
@@ -155,7 +155,7 @@ fn pulse(
     }
 }
 
-fn wave(time: Res<Time>, oneiroi: Res<Oneiroi>, mut tubes: Query<&mut OneiroiInstance, With<Wave>>) {
+fn wave(time: Res<Time>, mut oneiroi: ResMut<Oneiroi>, mut tubes: Query<&mut OneiroiInstance, With<Wave>>) {
     for mut tube in &mut tubes {
         oneiroi
             .set(&mut tube, "points", &points(time.elapsed_secs()))

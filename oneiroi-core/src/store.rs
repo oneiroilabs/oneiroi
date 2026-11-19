@@ -7,7 +7,12 @@
 //! Entries are looked up by [`ContentKey`]. Everything in here can be
 //! recomputed from parameters, so the store is free to evict.
 
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    ptr::NonNull,
+    sync::{Arc, Weak},
+};
 
 use xxhash_rust::xxh3::Xxh3;
 
@@ -88,19 +93,79 @@ pub struct Handle {
     pub len: u32,
 }
 
+/// The words of a page. They never move while the page lives, so a part of
+/// them can be written while other parts are read, see
+/// [`Store::output_words`].
+struct Words {
+    ptr: NonNull<u32>,
+    len: usize,
+}
+
+// The words are owned like a `Box<[u32]>` and only reached through it.
+unsafe impl Send for Words {}
+unsafe impl Sync for Words {}
+
+impl Words {
+    fn zeroed(len: usize) -> Self {
+        let boxed: Box<[u32]> = vec![0; len].into_boxed_slice();
+        let ptr = NonNull::new(Box::into_raw(boxed) as *mut u32).expect("a box is never null");
+        Self { ptr, len }
+    }
+
+    fn all(&self) -> &[u32] {
+        // SAFETY: `ptr` owns `len` initialized words for as long as `self`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn get(&self, offset: usize, len: usize) -> &[u32] {
+        &self.all()[offset..][..len]
+    }
+
+    fn get_mut(&mut self, offset: usize, len: usize) -> &mut [u32] {
+        // SAFETY: `&mut self` makes this the only access.
+        unsafe { self.range_mut(offset, len) }
+    }
+
+    /// The words `offset..offset + len` to write.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may read or write these words while the slice lives.
+    /// Other words of the page may be read and written meanwhile, since the
+    /// slice is made from the pointer and not from a borrow of all words.
+    unsafe fn range_mut<'a>(&self, offset: usize, len: usize) -> &'a mut [u32] {
+        assert!(offset + len <= self.len, "the words are inside the page");
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(offset), len) }
+    }
+}
+
+impl Drop for Words {
+    fn drop(&mut self) {
+        // SAFETY: made from this box in `zeroed`, and dropped once.
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len)));
+        }
+    }
+}
+
+/// How many dirty runs a page keeps before it merges them.
+const DIRTY_RUNS: usize = 1024;
+
 struct Page {
-    words: Vec<u32>,
+    words: Words,
     /// Free `(offset, len)` runs, sorted by offset and never adjacent.
     free: Vec<(u32, u32)>,
     /// The runs of words written since somebody last asked, as
-    /// `(start, end)`, sorted and never touching each other.
+    /// `(start, end)`, in the order they were written. Without anybody
+    /// asking, as when nothing mirrors the pages, they are merged once
+    /// there are many, so they never grow without bound.
     dirty: Vec<(u32, u32)>,
 }
 
 impl Page {
     fn new(words: u32) -> Self {
         Self {
-            words: vec![0; words as usize],
+            words: Words::zeroed(words as usize),
             free: vec![(0, words)],
             dirty: Vec::new(),
         }
@@ -118,17 +183,53 @@ impl Page {
     }
 
     fn mark_dirty(&mut self, start: u32, end: u32) {
-        let (mut start, mut end) = (start, end);
-        self.dirty.retain(|&(from, to)| {
-            let apart = to < start || end < from;
-            if !apart {
-                start = start.min(from);
-                end = end.max(to);
+        self.dirty.push((start, end));
+        if self.dirty.len() > DIRTY_RUNS {
+            self.merge_dirty();
+        }
+    }
+
+    /// The dirty runs sorted and merged where they touch. Should there
+    /// still be many, the smallest gaps between them are taken in too: a
+    /// little more is uploaded, in far fewer pieces.
+    fn merge_dirty(&mut self) {
+        let dirty = &mut self.dirty;
+        dirty.sort_unstable();
+        let mut kept = 0;
+        for index in 0..dirty.len() {
+            let (start, end) = dirty[index];
+            match kept > 0 && start <= dirty[kept - 1].1 {
+                true => dirty[kept - 1].1 = dirty[kept - 1].1.max(end),
+                false => {
+                    dirty[kept] = (start, end);
+                    kept += 1;
+                }
             }
-            apart
-        });
-        let index = self.dirty.partition_point(|&(from, _)| from < start);
-        self.dirty.insert(index, (start, end));
+        }
+        dirty.truncate(kept);
+
+        if dirty.len() > DIRTY_RUNS / 2 {
+            let mut gaps: Vec<u32> = dirty.windows(2).map(|pair| pair[1].0 - pair[0].1).collect();
+            let bridged = dirty.len() - DIRTY_RUNS / 4;
+            let widest = *gaps.select_nth_unstable(bridged - 1).1;
+            let mut kept = 0;
+            for index in 0..dirty.len() {
+                let (start, end) = dirty[index];
+                match kept > 0 && start - dirty[kept - 1].1 <= widest {
+                    true => dirty[kept - 1].1 = end,
+                    false => {
+                        dirty[kept] = (start, end);
+                        kept += 1;
+                    }
+                }
+            }
+            dirty.truncate(kept);
+        }
+    }
+
+    fn take_dirty(&mut self) -> Vec<(u32, u32)> {
+        self.merge_dirty();
+        std::mem::take(&mut self.dirty)
     }
 
     fn free(&mut self, offset: u32, len: u32) {
@@ -153,6 +254,9 @@ struct Entry {
     resident: bool,
     /// The entry this one is a part of. It owns no memory of its own.
     alias_of: Option<ContentKey>,
+    /// Who needs the value to stay, like an instance whose parameter it
+    /// is: it is never evicted while one of them lives.
+    holders: Vec<Weak<()>>,
 }
 
 pub struct Store {
@@ -241,6 +345,7 @@ impl Store {
                 last_used: self.frame,
                 resident: false,
                 alias_of: Some(parent),
+                holders: Vec::new(),
             },
         );
         Some(handle)
@@ -262,12 +367,141 @@ impl Store {
 
         let handle = self.reserve(key, words.len() as u32);
         let page = &mut self.pages[handle.page as usize];
-        page.words[handle.offset as usize..][..words.len()].copy_from_slice(words);
+        page.words.get_mut(handle.offset as usize, words.len()).copy_from_slice(words);
         if !words.is_empty() {
             page.mark_dirty(handle.offset, handle.offset + handle.len);
         }
         self.entries.get_mut(&key).unwrap().resident = true;
         handle
+    }
+
+    /// Stores `words` as a value of type `ty` under its
+    /// [`ContentKey::of_data`], which is found while the words are copied:
+    /// they are read once for both. An existing entry is kept as it is.
+    pub fn insert_data(&mut self, ty: &TypeInfo, words: &[u32]) -> (ContentKey, Handle) {
+        /// Small enough for what was just copied to be hashed from cache.
+        const CHUNK: usize = 1 << 12;
+
+        let handle = self.alloc(words.len() as u32);
+        let mut hasher = KeyHasher::new(0);
+        hasher.write(ty.name);
+        // What hashing a slice writes: its length, and then its bytes.
+        hasher.0.write_usize(words.len());
+        let target = self.pages[handle.page as usize]
+            .words
+            .get_mut(handle.offset as usize, words.len());
+        for (target, source) in target.chunks_mut(CHUNK).zip(words.chunks(CHUNK)) {
+            target.copy_from_slice(source);
+            hasher.0.write(bytemuck::cast_slice(source));
+        }
+        let key = hasher.finish();
+
+        if self.entries.contains_key(&key) {
+            // The words were here already, the copy is not needed.
+            self.pages[handle.page as usize].free(handle.offset, handle.len);
+            return (key, self.insert(key, words));
+        }
+        self.used_words += handle.len as u64;
+        if !words.is_empty() {
+            self.pages[handle.page as usize].mark_dirty(handle.offset, handle.offset + handle.len);
+        }
+        self.entries.insert(
+            key,
+            Entry {
+                handle,
+                last_used: self.frame,
+                resident: true,
+                alias_of: None,
+                holders: Vec::new(),
+            },
+        );
+        (key, handle)
+    }
+
+    /// Keeps the value of `key` from being evicted for as long as `holder`
+    /// lives, or until it is [released](Store::release).
+    pub fn hold(&mut self, key: ContentKey, holder: &Arc<()>) {
+        if let Some(entry) = self.entries.get_mut(&key)
+            && !entry.holders.iter().any(|held| held.as_ptr() == Arc::as_ptr(holder))
+        {
+            entry.holders.push(Arc::downgrade(holder));
+        }
+    }
+
+    /// Lets the value of `key` be evicted again, as far as `holder` is
+    /// concerned.
+    pub fn release(&mut self, key: ContentKey, holder: &Arc<()>) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.holders.retain(|held| held.as_ptr() != Arc::as_ptr(holder));
+        }
+    }
+
+    /// Room for the value of `key`, to be written in place: a CPU kernel
+    /// writes its outputs right where they are kept. Nothing else may be
+    /// stored under `key` yet. [`Store::commit`] it once it is written.
+    pub fn reserve_output(&mut self, key: ContentKey, len: u32) -> Handle {
+        self.remove(key);
+        let handle = self.alloc(len);
+        self.used_words += len as u64;
+        self.entries.insert(
+            key,
+            Entry {
+                handle,
+                last_used: self.frame,
+                resident: false,
+                alias_of: None,
+                holders: Vec::new(),
+            },
+        );
+        handle
+    }
+
+    /// The words of a value reserved with [`Store::reserve_output`], to
+    /// write it.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may read or write these words while the slice lives,
+    /// and nothing may be evicted or removed meanwhile. Other values may
+    /// be read meanwhile, see [`Store::words_unbound`].
+    pub unsafe fn output_words<'a>(&self, handle: Handle) -> &'a mut [u32] {
+        unsafe { self.pages[handle.page as usize].words.range_mut(handle.offset as usize, handle.len as usize) }
+    }
+
+    /// The words of a value, not bound to a borrow of the store.
+    ///
+    /// # Safety
+    ///
+    /// The value must not be removed, evicted or written while the slice
+    /// lives. Other values may be reserved and written meanwhile.
+    pub unsafe fn words_unbound<'a>(&self, handle: Handle) -> &'a [u32] {
+        let words = self.pages[handle.page as usize].words.get(handle.offset as usize, handle.len as usize);
+        unsafe { std::slice::from_raw_parts(words.as_ptr(), words.len()) }
+    }
+
+    /// Says that a value written in place is complete: it can be read,
+    /// and a backend which mirrors the pages takes it over.
+    pub fn commit(&mut self, key: ContentKey) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.resident = true;
+            let handle = entry.handle;
+            if handle.len > 0 {
+                self.pages[handle.page as usize].mark_dirty(handle.offset, handle.offset + handle.len);
+            }
+        }
+    }
+
+    /// Takes the value of `key` out, if it is here and nothing is a part of
+    /// it.
+    fn remove(&mut self, key: ContentKey) {
+        let Some(entry) = self.entries.remove(&key) else {
+            return;
+        };
+        if entry.alias_of.is_none() {
+            self.pages[entry.handle.page as usize].free(entry.handle.offset, entry.handle.len);
+            self.used_words -= entry.handle.len as u64;
+            self.entries.retain(|_, part| part.alias_of != Some(key));
+        }
     }
 
     /// Makes room for a value of `len` words which a backend computes and
@@ -288,6 +522,7 @@ impl Store {
                 // Nothing is as good on one side as on the other.
                 resident: len == 0,
                 alias_of: None,
+                holders: Vec::new(),
             },
         );
         handle
@@ -305,7 +540,9 @@ impl Store {
         entry.resident = true;
         let handle = entry.handle;
         // The backend has these words already, so they are not dirty.
-        self.pages[handle.page as usize].words[handle.offset as usize..][..words.len()]
+        self.pages[handle.page as usize]
+            .words
+            .get_mut(handle.offset as usize, words.len())
             .copy_from_slice(words);
         true
     }
@@ -332,7 +569,7 @@ impl Store {
     }
 
     pub fn words(&self, handle: Handle) -> &[u32] {
-        &self.pages[handle.page as usize].words[handle.offset as usize..][..handle.len as usize]
+        self.pages[handle.page as usize].words.get(handle.offset as usize, handle.len as usize)
     }
 
     pub fn slice<T: DataType>(&self, handle: Handle) -> &[T] {
@@ -354,10 +591,13 @@ impl Store {
             return 0;
         }
 
+        for entry in self.entries.values_mut() {
+            entry.holders.retain(|holder| holder.strong_count() > 0);
+        }
         let mut candidates: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.last_used < self.frame)
+            .filter(|(_, entry)| entry.last_used < self.frame && entry.holders.is_empty())
             .map(|(key, entry)| (entry.last_used, *key))
             .collect();
         candidates.sort_unstable();
@@ -410,7 +650,7 @@ impl Store {
             .iter_mut()
             .enumerate()
             .flat_map(|(index, page)| {
-                std::mem::take(&mut page.dirty)
+                page.take_dirty()
                     .into_iter()
                     .map(move |(start, end)| (index as u32, start..end))
             })
@@ -419,7 +659,7 @@ impl Store {
 
     /// The raw pages, in the order a GPU backend binds them.
     pub fn pages(&self) -> impl ExactSizeIterator<Item = &[u32]> {
-        self.pages.iter().map(|page| page.words.as_slice())
+        self.pages.iter().map(|page| page.words.all())
     }
 }
 
@@ -486,6 +726,54 @@ mod tests {
         let reused = store.insert(key(3), &[3; 4]);
         assert_eq!(reused.page, 0);
         assert_eq!(store.pages().len(), 1);
+    }
+
+    #[test]
+    fn data_is_keyed_while_it_is_copied() {
+        let mut store = Store::with_page_words(8);
+        // More than one chunk of hashing, and nothing at all.
+        let words: Vec<u32> = (0..10_000).collect();
+        for words in [&words[..], &[]] {
+            let (key, handle) = store.insert_data(&u32::INFO, words);
+            assert_eq!(key, ContentKey::of_data(&u32::INFO, words));
+            assert_eq!(store.words(handle), words);
+        }
+        // What is there already is neither copied nor stored twice.
+        let used = store.used_words();
+        store.insert_data(&u32::INFO, &words);
+        assert_eq!(store.used_words(), used);
+    }
+
+    #[test]
+    fn held_values_stay_until_their_holder_is_gone() {
+        let mut store = Store::with_page_words(8);
+        let holder = Arc::new(());
+        let (held, _) = store.insert_data(&u32::INFO, &[1; 4]);
+        store.hold(held, &holder);
+        store.hold(held, &holder);
+        store.insert(key(2), &[2; 4]);
+        store.end_frame();
+
+        assert_eq!(store.evict(0), 1);
+        assert!(store.contains(held) && !store.contains(key(2)));
+
+        store.release(held, &holder);
+        store.hold(held, &holder);
+        drop(holder);
+        assert_eq!(store.evict(0), 1);
+        assert!(!store.contains(held));
+    }
+
+    #[test]
+    fn outputs_are_written_in_place() {
+        let mut store = Store::with_page_words(8);
+        let handle = store.reserve_output(key(1), 3);
+        assert!(store.contains(key(1)) && store.read::<u32>(key(1)).is_none());
+        // SAFETY: nothing else reads or writes the reserved words.
+        unsafe { store.output_words(handle) }.copy_from_slice(&[4, 5, 6]);
+        store.commit(key(1));
+        assert_eq!(store.read::<u32>(key(1)), Some(&[4, 5, 6][..]));
+        assert_eq!(store.take_dirty(), [(0, 0..3)]);
     }
 
     #[test]
@@ -570,9 +858,27 @@ mod tests {
         page.mark_dirty(0, 2);
         page.mark_dirty(20, 22);
         page.mark_dirty(2, 10);
-        assert_eq!(page.dirty, vec![(0, 12), (20, 22)]);
+        assert_eq!(page.take_dirty(), vec![(0, 12), (20, 22)]);
+        page.mark_dirty(0, 12);
+        page.mark_dirty(20, 22);
         page.mark_dirty(11, 21);
-        assert_eq!(page.dirty, vec![(0, 22)]);
+        assert_eq!(page.take_dirty(), vec![(0, 22)]);
+    }
+
+    #[test]
+    fn many_writes_stay_few_runs() {
+        let mut page = Page::new(1 << 20);
+        let writes = (0..100_000u32).map(|index| (index * 7919) % 100_000 * 8);
+        for start in writes.clone() {
+            page.mark_dirty(start, start + 2);
+        }
+        let dirty = page.take_dirty();
+        assert!(dirty.len() <= DIRTY_RUNS / 2);
+        // Nothing which was written is left out.
+        assert!(dirty.windows(2).all(|pair| pair[0].1 < pair[1].0));
+        for start in writes {
+            assert!(dirty.iter().any(|&(from, to)| from <= start && start + 2 <= to));
+        }
     }
 
     #[test]

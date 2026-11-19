@@ -26,3 +26,15 @@ pub(crate) fn per_group<T: Send>(
     }
     (all, offsets)
 }
+
+/// `values` cut where `offsets` say, into one part for each pair of them,
+/// to write every part on its own core.
+pub(crate) fn split_at_offsets<'a, T>(mut values: &'a mut [T], offsets: &[u32]) -> Vec<&'a mut [T]> {
+    let mut parts = Vec::with_capacity(offsets.len().saturating_sub(1));
+    for pair in offsets.windows(2) {
+        let (part, rest) = std::mem::take(&mut values).split_at_mut((pair[1] - pair[0]) as usize);
+        parts.push(part);
+        values = rest;
+    }
+    parts
+}

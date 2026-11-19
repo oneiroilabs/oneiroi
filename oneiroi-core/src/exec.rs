@@ -117,7 +117,6 @@ impl Phases {
 #[derive(Default)]
 pub struct CpuExecutor {
     handles: Vec<Handle>,
-    buffers: Vec<Vec<u32>>,
     phases: Phases,
 }
 
@@ -139,30 +138,19 @@ impl Executor for CpuExecutor {
                     .expect("planned inputs are stored before they are read")
             }));
 
-            let mut buffers = std::mem::take(&mut self.buffers);
-            buffers.iter_mut().for_each(Vec::clear);
-            // The declared outputs and the offsets of the grouped ones.
-            buffers.resize_with(item.outputs.len().max(buffers.len()), Vec::new);
-            let mut outputs = Outputs {
-                ports: item.node.outputs,
-                buffers,
-            };
-
-            let inputs = Inputs {
-                store,
-                ports: item.node.inputs,
-                handles: &self.handles,
-            };
+            // SAFETY: the inputs were stored before the work was planned
+            // and nothing is evicted while it runs. The outputs are kept
+            // under other keys, in room which is reserved anew, so writing
+            // them never touches what the inputs read.
+            let inputs = unsafe { Inputs::unbound(store, item.node.inputs, &self.handles) };
+            let mut outputs = Outputs::new(store, item.node.outputs, &item.outputs);
             let start = Instant::now();
             (item.node.cpu)(&inputs, &mut outputs);
             self.phases.since("kernels", start);
 
             let start = Instant::now();
-            for (key, words) in item.outputs.iter().zip(&outputs.buffers) {
-                store.insert(*key, words);
-            }
+            outputs.finish();
             self.phases.since("store", start);
-            self.buffers = outputs.buffers;
         }
     }
 }
@@ -246,8 +234,9 @@ struct Scope<'a> {
 struct Planner<'a> {
     programs: &'a ProgramSet,
     store: &'a mut Store,
-    /// The parameter values of the instance being planned.
-    params: &'a [Box<[u32]>],
+    /// Whether a missing parameter is at its default. Otherwise every
+    /// parameter is in the store already.
+    defaults: bool,
     work: &'a mut Vec<Step>,
     scheduled: &'a mut HashSet<ContentKey>,
 }
@@ -265,8 +254,11 @@ impl Planner<'_> {
         match &scope.program.slot(slot).source {
             SlotSource::Param(index) => match scope.caller {
                 Some((caller, args)) => self.ensure(caller, args[*index as usize]),
+                // A value which was set is held in the store, so only a
+                // default can be missing.
                 None => {
-                    self.store.insert(key, &self.params[*index as usize]);
+                    assert!(self.defaults, "parameters are stored before they are planned");
+                    self.store.insert(key, &scope.program.params[*index as usize].default);
                 }
             },
             SlotSource::Const { words, .. } => {
@@ -372,8 +364,10 @@ impl std::error::Error for ParamError {}
 /// are shared with every other instance that asks for the same thing.
 pub struct Instance {
     program: ProgramId,
-    params: Vec<Box<[u32]>>,
+    /// The values of the parameters are in the store, held there for as
+    /// long as this lives.
     param_keys: Vec<ContentKey>,
+    alive: std::sync::Arc<()>,
     /// Outdated once a parameter changes.
     keys: Option<Keys>,
 }
@@ -449,7 +443,6 @@ impl<E: Executor> Engine<E> {
     /// A new instance with every parameter at its default.
     pub fn instantiate(&self, program: ProgramId) -> Instance {
         let decl = self.programs.get(program);
-        let params: Vec<_> = decl.params.iter().map(|p| p.default.clone()).collect();
         let param_keys = decl
             .params
             .iter()
@@ -457,14 +450,14 @@ impl<E: Executor> Engine<E> {
             .collect();
         Instance {
             program,
-            params,
             param_keys,
+            alive: std::sync::Arc::new(()),
             keys: None,
         }
     }
 
     pub fn set_param<T: DataType>(
-        &self,
+        &mut self,
         instance: &mut Instance,
         name: &str,
         value: &[T],
@@ -486,7 +479,7 @@ impl<E: Executor> Engine<E> {
 
     /// [`Engine::set_param`] for a value which is only known by its words.
     pub fn set_param_words(
-        &self,
+        &mut self,
         instance: &mut Instance,
         name: &str,
         words: &[u32],
@@ -503,12 +496,15 @@ impl<E: Executor> Engine<E> {
             });
         }
 
-        let key = ContentKey::of_data(&ty, words);
-        if key != instance.param_keys[index] {
-            instance.params[index] = words.into();
+        // Straight into the store, hashed while it is copied.
+        let (key, _) = self.store.insert_data(&ty, words);
+        let old = instance.param_keys[index];
+        if key != old {
+            self.store.release(old, &instance.alive);
             instance.param_keys[index] = key;
             instance.keys = None;
         }
+        self.store.hold(key, &instance.alive);
         Ok(())
     }
 
@@ -544,7 +540,7 @@ impl<E: Executor> Engine<E> {
             let mut planner = Planner {
                 programs: &self.programs,
                 store: &mut self.store,
-                params: &instance.params,
+                defaults: true,
                 work: &mut self.work,
                 scheduled: &mut self.scheduled,
             };
@@ -677,8 +673,7 @@ impl<E: Executor> Engine<E> {
             let mut planner = Planner {
                 programs: &self.programs,
                 store: &mut self.store,
-                // Every parameter is in the store already.
-                params: &[],
+                defaults: false,
                 work: &mut steps,
                 scheduled: &mut scheduled,
             };
@@ -907,6 +902,30 @@ mod tests {
         // Going back to a value that was seen before costs nothing.
         engine.set_param(&mut instance, "scale", &[10f32]).unwrap();
         assert_eq!(engine.evaluate([&mut instance]), 0);
+    }
+
+    #[test]
+    fn set_parameters_survive_eviction() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(program());
+        let mut instance = engine.instantiate(id);
+        engine.set_param(&mut instance, "offset", &[1.5f32]).unwrap();
+        engine.evaluate([&mut instance]);
+
+        engine.end_frame(u64::MAX);
+        engine.end_frame(0);
+        assert_eq!(engine.evaluate([&mut instance]), 4);
+        assert_eq!(
+            engine.read::<f32>(&instance, "out"),
+            Some(&[13.5, 25.5, 37.5][..])
+        );
+
+        // Once nothing holds it, the value may go like any other.
+        let key = ContentKey::of_data(&f32::INFO, &[1.5f32.to_bits()]);
+        drop(instance);
+        engine.end_frame(u64::MAX);
+        engine.end_frame(0);
+        assert!(!engine.store().contains(key));
     }
 
     #[test]
