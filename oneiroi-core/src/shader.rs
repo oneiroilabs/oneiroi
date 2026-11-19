@@ -244,6 +244,7 @@ pub fn compute(node: &NodeDef, kernel: &GpuKernel) -> Result<ComputeShader, Shad
         .iter()
         .map(|port| port.ty)
         .chain(node.hidden_outputs().map(|_| u32::INFO))
+        .chain(node.total_outputs().map(|_| u32::INFO))
         .collect();
     if kernel.outputs.len() != outputs.len() {
         return Err(ShaderError::Outputs {
@@ -353,8 +354,9 @@ fn in_{name}_group_of(index: u32) -> u32 {{
         let name = port.name;
         let shape = port.ty.prototype.expect("only instances have a shape");
         let (ty, words) = (shape.wgsl, shape.words);
-        let at = (node.inputs.len() + hidden.len() + 2 * place) * 3;
+        let at = (node.inputs.len() + hidden.len() + 3 * place) * 3;
         let groups = at + 3;
+        let total = at + 6;
         let element = read_element(shape, "pages[page].words", "base");
         let _ = writeln!(
             out,
@@ -389,11 +391,21 @@ fn in_{name}_prototype_end(group: u32) -> u32 {{
     }}
     return min(pages[calls[call + {groups}u]].words[calls[call + {groups_offset}u] + group + 1u], in_{name}_prototype_len());
 }}
+
+// How many elements all copies of the instances have together.
+fn in_{name}_total() -> u32 {{
+    if (calls[call + {total_len}u] == 0u) {{
+        return 0u;
+    }}
+    return pages[calls[call + {total}u]].words[calls[call + {total_offset}u]];
+}}
 ",
             len = at + 2,
             offset = at + 1,
             groups_len = groups + 2,
             groups_offset = groups + 1,
+            total_len = total + 2,
+            total_offset = total + 1,
         );
     }
 

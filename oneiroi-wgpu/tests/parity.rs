@@ -7,7 +7,7 @@
 use oneiroi_core::{
     exec::{Engine, Executor, Instance},
     node::{Card, NodeDef, NodeRegistry},
-    program::{ProgramBuilder, ProgramId, groups_param, prototype_param},
+    program::{ProgramBuilder, ProgramId, groups_param, prototype_param, total_param},
     types::Scalar,
 };
 use oneiroi_wgpu::GpuExecutor;
@@ -63,7 +63,7 @@ fn set<E: Executor>(engine: &Engine<E>, instance: &mut Instance, node: &NodeDef,
     // The shapes of instances come behind all offsets, see `NodeDef::all_inputs`.
     let shapes = node.inputs.iter().filter(|port| port.ty.prototype.is_some()).flat_map(|port| {
         let shape = prototype_param(port.name);
-        [shape.clone(), groups_param(&shape)]
+        [shape.clone(), groups_param(&shape), total_param(port.name)]
     });
     let names = node
         .inputs

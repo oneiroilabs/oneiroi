@@ -198,6 +198,15 @@ impl<'a> Inputs<'a> {
         }
     }
 
+    /// How many elements all copies of an input of instances have together.
+    /// Its producer says so without looking at any rows, so it is known on
+    /// the CPU while the rows may be on the GPU only.
+    pub fn total(&self, index: usize) -> u32 {
+        let hidden = hidden_prototype(self.ports, index).expect("only instances have a total");
+        let total: &[u32] = self.store.slice(self.handles[hidden + 2]);
+        total.first().copied().unwrap_or(0)
+    }
+
     /// How many groups an input has, without looking at its offsets: they
     /// may be on the GPU only. The same as the length of
     /// [`Inputs::groups`].
@@ -220,14 +229,25 @@ pub(crate) fn hidden_input(ports: &[PortDecl], index: usize) -> Option<usize> {
     })
 }
 
-/// Where the shape of input `index` of instances is handed over, and its
-/// offsets right after: behind the offsets of all grouped inputs, in the
-/// order of the inputs of instances.
+/// Where the shape of input `index` of instances is handed over, its
+/// offsets right after and then the total of the instances: behind the
+/// offsets of all grouped inputs, in the order of the inputs of instances.
 pub(crate) fn hidden_prototype(ports: &[PortDecl], index: usize) -> Option<usize> {
     ports[index].ty.prototype.map(|_| {
         let grouped = ports.iter().filter(|p| p.card == Card::Grouped).count();
         let before = ports[..index].iter().filter(|p| p.ty.prototype.is_some()).count();
-        ports.len() + grouped + 2 * before
+        ports.len() + grouped + 3 * before
+    })
+}
+
+/// Where the total of output `index` of instances goes: behind the
+/// offsets of the outputs with groups of their own, in the order of the
+/// outputs of instances.
+pub(crate) fn hidden_total(ports: &[PortDecl], index: usize) -> Option<usize> {
+    let own = |port: &PortDecl| port.card == Card::Grouped && port.groups == Groups::Own;
+    ports[index].ty.prototype.map(|_| {
+        let before = ports[..index].iter().filter(|p| p.ty.prototype.is_some()).count();
+        ports.len() + ports.iter().filter(|p| own(p)).count() + before
     })
 }
 
@@ -257,6 +277,13 @@ impl Outputs {
         buffer.clear();
         buffer.resize(len * T::INFO.words as usize, 0);
         bytemuck::cast_slice_mut(buffer)
+    }
+
+    /// How many elements all copies of an output of instances have
+    /// together, see [`Inputs::total`].
+    pub fn set_total(&mut self, index: usize, total: u32) {
+        let hidden = hidden_total(self.ports, index).expect("only instances have a total");
+        self.buffers[hidden] = vec![total];
     }
 
     /// Where the groups of a grouped output start, and where the last one
@@ -303,8 +330,10 @@ impl Caps {
 #[derive(Debug, Clone, Copy)]
 pub struct GpuKernel {
     pub wgsl: &'static str,
-    /// One per output, in the order of the outputs, and then one per
-    /// output which makes its own groups: the offsets of those, as `u32`.
+    /// One per output, in the order of the outputs, then one per output
+    /// which makes its own groups: the offsets of those, as `u32`, and then
+    /// one per output of instances: their total, a single `u32` which has
+    /// to be known on the CPU, see [`Inputs::total`].
     pub outputs: &'static [GpuOutput],
     pub requires: Caps,
     /// The inputs `len` and `accepts` read the values of, by their index
@@ -382,7 +411,8 @@ impl NodeDef {
     }
 
     /// The inputs of instances, whose shapes are handed over behind the
-    /// offsets of the grouped ones: the shape and its offsets each.
+    /// offsets of the grouped ones: the shape, its offsets and the total of
+    /// the instances each.
     pub fn prototype_inputs(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.inputs.len()).filter(|index| self.inputs[*index].ty.prototype.is_some())
     }
@@ -390,13 +420,27 @@ impl NodeDef {
     /// How many inputs a call of the node gets: the declared ones and
     /// everything which comes along with them.
     pub fn all_inputs(&self) -> usize {
-        self.inputs.len() + self.hidden_inputs().count() + 2 * self.prototype_inputs().count()
+        self.inputs.len() + self.hidden_inputs().count() + 3 * self.prototype_inputs().count()
     }
 
     /// The offsets which are made behind the declared outputs: one for
     /// every output which makes its own groups, by its index.
     pub fn hidden_outputs(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.outputs.len()).filter(|index| hidden_output(self.outputs, *index).is_some())
+    }
+
+    /// The outputs of instances, whose totals are made behind the offsets
+    /// of the outputs with groups of their own.
+    pub fn total_outputs(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.outputs.len()).filter(|index| self.outputs[*index].ty.prototype.is_some())
+    }
+
+    /// How many outputs a call of the node makes: the declared ones, the
+    /// offsets of those with groups of their own, and the totals of
+    /// instances. All of them but the declared ones are single `u32`s or
+    /// lists of them.
+    pub fn all_outputs(&self) -> usize {
+        self.outputs.len() + self.hidden_outputs().count() + self.total_outputs().count()
     }
 }
 

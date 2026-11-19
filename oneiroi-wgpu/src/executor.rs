@@ -73,7 +73,8 @@ fn passes(node: &NodeDef, kernel: &GpuKernel) -> Vec<Pass> {
         .outputs
         .iter()
         .map(|port| port.ty.words as usize)
-        .chain(node.hidden_outputs().map(|_| 1));
+        .chain(node.hidden_outputs().map(|_| 1))
+        .chain(node.total_outputs().map(|_| 1));
     let outputs = kernel.outputs.iter().zip(words).map(|(output, words)| Pass {
         words,
         len: output.len,

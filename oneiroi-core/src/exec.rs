@@ -553,7 +553,8 @@ impl<E: Executor> Engine<E> {
                 // What comes along with it is needed by whoever reads it.
                 let slot = program.slot(output.slot);
                 let along = slot.prototype.map(|p| [p.elements, p.groups]);
-                for slot in slot.groups.into_iter().chain(along.into_iter().flatten()) {
+                let along = along.into_iter().flatten().chain(slot.total);
+                for slot in slot.groups.into_iter().chain(along) {
                     planner.ensure(&scope, slot);
                 }
             }
@@ -1420,6 +1421,7 @@ mod tests {
                     })
                     .collect();
                 outputs.alloc::<InstanceRow>(0, rows.len()).copy_from_slice(&rows);
+                outputs.set_total(0, inputs.get::<f32>(1).len() as u32 * len);
             },
             gpu: &[],
         };
@@ -1444,6 +1446,7 @@ mod tests {
                     })
                     .collect();
                 outputs.alloc::<InstanceRow>(0, rows.len()).copy_from_slice(&rows);
+                outputs.set_total(0, inputs.total(0));
             },
             gpu: &[],
         };
@@ -1466,6 +1469,7 @@ mod tests {
                             .map(move |value| value + row.transform.offset[0])
                     })
                     .collect();
+                assert_eq!(values.len(), inputs.total(0) as usize, "the total is what the copies have");
                 outputs.set(0, &values);
             },
             gpu: &[],
@@ -1605,7 +1609,7 @@ fn realize(index: u32) -> f32 {
     let row = in_instances(0u);
     let start = in_instances_prototype_start(row.group);
     let end = in_instances_prototype_end(row.group);
-    let count = in_instances_prototype_groups() + in_instances_prototype_len();
+    let count = in_instances_prototype_groups() + in_instances_prototype_len() + in_instances_total();
     return in_instances_prototype(start + index % max(end - start, 1u)) + row.transform.offset.x + f32(count);
 }",
                     outputs: &[crate::node::GpuOutput {
@@ -1628,8 +1632,8 @@ fn realize(index: u32) -> f32 {
             crate::shader::compute(&GPU_REALIZE, &GPU_REALIZE.gpu[0]).unwrap_or_else(|e| panic!("{e}"));
             // And so does the culling of instances before they are drawn.
             crate::shader::cull().unwrap_or_else(|e| panic!("{e}"));
-            // The values, the rows, and the shape with its offsets.
-            assert_eq!(GPU_REALIZE.all_inputs(), 3);
+            // The rows, and the shape with its offsets and the total.
+            assert_eq!(GPU_REALIZE.all_inputs(), 4);
         }
     }
 

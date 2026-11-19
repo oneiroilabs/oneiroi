@@ -42,6 +42,9 @@ pub struct SlotDecl {
     pub groups: Option<SlotId>,
     /// For instances: the shape they refer to.
     pub prototype: Option<Prototype>,
+    /// For instances: how many elements all of their copies have together,
+    /// a single `u32`.
+    pub total: Option<SlotId>,
 }
 
 /// The shape instances refer to: a value of the type of their prototype
@@ -78,6 +81,12 @@ pub fn groups_param(param: &str) -> String {
 /// parameter of instances. Its offsets are in [`groups_param`] of it.
 pub fn prototype_param(param: &str) -> String {
     format!("{param}#prototype")
+}
+
+/// The name of the hidden parameter which holds the total of `param`, a
+/// parameter of instances.
+pub fn total_param(param: &str) -> String {
+    format!("{param}#total")
 }
 
 #[derive(Debug)]
@@ -155,9 +164,10 @@ impl Program {
             .iter()
             .map(|output| output.slot)
             .chain(slots.clone().filter_map(|slot| slot.groups))
-            .chain(
-                slots.flat_map(|slot| slot.prototype.map(|p| [p.elements, p.groups]).into_iter().flatten()),
-            )
+            .chain(slots.flat_map(|slot| {
+                let along = slot.prototype.zip(slot.total);
+                along.map(|(p, total)| [p.elements, p.groups, total]).into_iter().flatten()
+            }))
     }
 
     /// The hidden parameters which hold the shape of `param` and its
@@ -165,6 +175,12 @@ impl Program {
     pub fn prototype_of_param(&self, param: usize) -> Option<(usize, usize)> {
         let name = prototype_param(&self.params[param].name);
         Some((self.param_index(&name)?, self.param_index(&groups_param(&name))?))
+    }
+
+    /// The hidden parameter which holds the total of `param`, if it is a
+    /// parameter of instances.
+    pub fn total_of_param(&self, param: usize) -> Option<usize> {
+        self.param_index(&total_param(&self.params[param].name))
     }
 
     /// The hidden parameter which holds the groups of `param`, if any.
@@ -375,6 +391,7 @@ impl ProgramBuilder {
             card,
             groups: None,
             prototype: None,
+            total: None,
         });
         SlotId(self.slots.len() as u32 - 1)
     }
@@ -418,7 +435,11 @@ impl ProgramBuilder {
             self.params.last_mut().unwrap().hidden = true;
             let groups = self.param_words(groups_param(&shape), u32::INFO, &[]);
             self.params.last_mut().unwrap().hidden = true;
-            self.slot_mut(slot).prototype = Some(Prototype { elements, groups });
+            let total = self.param_words(total_param(&name), u32::INFO, &[0]);
+            self.params.last_mut().unwrap().hidden = true;
+            let decl = self.slot_mut(slot);
+            decl.prototype = Some(Prototype { elements, groups });
+            decl.total = Some(total);
         }
         slot
     }
@@ -509,7 +530,8 @@ impl ProgramBuilder {
         }
         for index in node.prototype_inputs() {
             let prototype = self.prototype_of(inputs[index]);
-            all.extend([prototype.elements, prototype.groups]);
+            let total = self.total_of(inputs[index]);
+            all.extend([prototype.elements, prototype.groups, total]);
         }
 
         ("node", node.id, node.version, &all).hash(&mut self.hasher);
@@ -518,11 +540,13 @@ impl ProgramBuilder {
             .iter()
             .map(|port| port.ty)
             .chain(node.hidden_outputs().map(|_| u32::INFO))
+            .chain(node.total_outputs().map(|_| u32::INFO))
             .collect();
         let slots = self.push_op(OpKind::Node(node), all.clone(), types);
 
         let visible = node.outputs.len();
         let mut own = slots[visible..].iter();
+        let mut totals = slots[visible + node.hidden_outputs().count()..].iter();
         for (port, slot) in node.outputs.iter().zip(&slots) {
             let groups = match (port.card, port.groups) {
                 (Card::Grouped, Groups::Own) => own.next().copied(),
@@ -530,6 +554,7 @@ impl ProgramBuilder {
                 _ => None,
             };
             let prototype = port.prototype.map(|input| self.shape_of(inputs[input]));
+            let total = port.ty.prototype.and_then(|_| totals.next().copied());
             let decl = self.slot_mut(*slot);
             decl.card = match (port.card, groups) {
                 (Card::Grouped, None) => Card::Many,
@@ -537,6 +562,7 @@ impl ProgramBuilder {
             };
             decl.groups = groups;
             decl.prototype = prototype;
+            decl.total = total;
         }
         Ok(slots[..visible].to_vec())
     }
@@ -551,6 +577,14 @@ impl ProgramBuilder {
         let elements = self.constant_words(*ty, &[]);
         let groups = self.no_groups();
         Prototype { elements, groups }
+    }
+
+    /// The total of instances in `slot`, or none at all if nothing says.
+    fn total_of(&mut self, slot: SlotId) -> SlotId {
+        match self.slot(slot).total {
+            Some(total) => total,
+            None => self.constant::<u32>(&[0]),
+        }
     }
 
     /// The shape `slot` is or refers to: its own if it is instances, else
@@ -680,6 +714,9 @@ impl ProgramBuilder {
                 inputs[elements] = Some(prototype.elements);
                 inputs[groups] = Some(prototype.groups);
             }
+            if let Some(total) = program.total_of_param(index) {
+                inputs[total] = Some(self.total_of(slot));
+            }
         }
         let inputs = inputs
             .into_iter()
@@ -699,7 +736,7 @@ impl ProgramBuilder {
             )
             .chain(program.outputs.iter().flat_map(|output| {
                 let prototype = program.slot(output.slot).ty.prototype;
-                prototype.map(|ty| [*ty, u32::INFO]).into_iter().flatten()
+                prototype.map(|ty| [*ty, u32::INFO, u32::INFO]).into_iter().flatten()
             }))
             .collect();
         Ok((inputs, types))
@@ -727,7 +764,10 @@ impl ProgramBuilder {
             if program.slot(output.slot).ty.prototype.is_some() {
                 let elements = *hidden.next().unwrap();
                 let groups = *hidden.next().unwrap();
-                self.slot_mut(*slot).prototype = Some(Prototype { elements, groups });
+                let total = *hidden.next().unwrap();
+                let decl = self.slot_mut(*slot);
+                decl.prototype = Some(Prototype { elements, groups });
+                decl.total = Some(total);
             }
         }
         slots[..visible].to_vec()
