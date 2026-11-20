@@ -55,26 +55,42 @@ pub trait Profile: DataType + Sync {
 /// spine.
 pub(crate) fn sweep_example<P: Profile>(points: &[usize], profile: &[P], ends: u32) -> Vec<Vec<u32>> {
     let (segments, offsets) = super::nodes::example_curves(points);
-    sweep_example_along(&segments, &offsets, profile, ends)
+    sweep_example_along(&segments, &offsets, profile, ends, &[])
 }
 
-/// [`sweep_example`] along `spine` with the offsets `offsets`.
+/// [`sweep_example`] along `spine` with the offsets `offsets`, scaled by
+/// `scale`: polylines through its points, a curve of the scale for each.
 pub(crate) fn sweep_example_along<P: Profile>(
     spine: &[CubicNurbsSegmentCache],
     offsets: &[u32],
     profile: &[P],
     ends: u32,
+    scale: &[&[(f32, f32)]],
 ) -> Vec<Vec<u32>> {
+    let mut scales = Vec::new();
+    let mut scale_offsets = vec![0];
+    for curve in scale {
+        let points: Vec<_> = curve.iter().map(|(x, y)| glam::Vec3::new(*x, *y, 0.0)).collect();
+        scales.extend(super::polyline(&points, false));
+        scale_offsets.push(scales.len() as u32);
+    }
+    if scale.is_empty() {
+        scale_offsets.clear();
+    }
     vec![
         bytemuck::cast_slice(spine).to_vec(),
         bytemuck::cast_slice(profile).to_vec(),
         vec![ends],
-        // No scale, which only the CPU takes.
-        Vec::new(),
+        bytemuck::cast_slice(&scales).to_vec(),
         offsets.to_vec(),
-        Vec::new(),
+        scale_offsets,
     ]
 }
+
+/// Scales for examples: down to a point, and a taper which only starts
+/// late, so a segment is cut where it starts but not every segment is.
+pub(crate) const SPIKE: &[(f32, f32)] = &[(0.0, 1.0), (1.0, 0.0)];
+pub(crate) const LATE: &[(f32, f32)] = &[(0.0, 1.0), (0.3, 1.2), (0.85, 1.0), (1.0, 0.3)];
 
 /// Curves with corners and one which is closed, to sweep: a polyline which
 /// turns twice, and a rectangle.
@@ -143,7 +159,11 @@ fn sweep_piece(
         || sweep_example::<CubicNurbsSegmentCache>(&[6], &[], 0),
         || {
             let (spine, offsets) = cornered_spine();
-            sweep_example_along(&spine, &offsets, &square_profile(), 0)
+            sweep_example_along(&spine, &offsets, &square_profile(), 0, &[])
+        },
+        || {
+            let (spine, offsets) = super::nodes::example_curves(&[7, 5]);
+            sweep_example_along(&spine, &offsets, &square_profile(), 0, &[LATE, SPIKE])
         },
     ];
 }

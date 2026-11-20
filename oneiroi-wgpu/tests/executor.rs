@@ -541,3 +541,38 @@ mod long_curves {
         assert_eq!(a, b);
     }
 }
+
+#[test]
+fn a_scaled_sweep_runs_on_the_gpu() {
+    use glam::Vec3;
+    use oneiroi_nodes::{
+        curve::{SWEEP, TubePatch, polyline},
+        primitive::CIRCLE,
+    };
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let mut registry = oneiroi_core::node::NodeRegistry::new();
+    oneiroi_nodes::register(&mut registry);
+    let mut b = ProgramBuilder::new("spike");
+    let spine = b.constant(&polyline(&[Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 0.0)], false));
+    let radius = b.constant::<f32>(&[0.2]);
+    let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+    let ends = b.constant::<u32>(&[0]);
+    let scale = b.constant(&polyline(&[Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.7, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)], false));
+    let surface = b.generic(&registry, &SWEEP, &[spine, circle, ends, scale]).unwrap()[0];
+    b.output("surface", surface);
+    let id = gpu.add_program(b.finish());
+    let mut instance = gpu.instantiate(id);
+    gpu.evaluate([&mut instance]);
+
+    // The circle and the sweep, both on the GPU.
+    assert_eq!(gpu.executor().stats().cpu, 0);
+    let patches = gpu.fetch::<TubePatch>(&instance, "surface").unwrap().to_vec();
+    // Two segments, each in up to two pieces, and two caps: the first
+    // segment is not cut, so it has a piece which is not there, and the tip
+    // has no cap.
+    assert_eq!(patches.len(), 2 * 2 + 2);
+    let kinds: Vec<_> = patches.iter().map(TubePatch::kind).collect();
+    assert_eq!(kinds, [0, 3, 0, 0, 1, 3]);
+}

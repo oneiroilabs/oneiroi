@@ -115,7 +115,16 @@ fn sweep_piece(
         || sweep_example(&[], &[Circle::new(1.0)], 0),
         || {
             let (spine, offsets) = crate::curve::cornered_spine();
-            crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.1)], 0)
+            crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.1)], 0, &[])
+        },
+        || {
+            let (spine, offsets) = crate::curve::example_curves(&[9, 6, 5]);
+            let scales: &[&[(f32, f32)]] = &[crate::curve::SPIKE, crate::curve::LATE];
+            crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.3)], 0, scales)
+        },
+        || {
+            let (spine, offsets) = crate::curve::cornered_spine();
+            crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.1)], 1, &[crate::curve::LATE])
         },
     ];
 }

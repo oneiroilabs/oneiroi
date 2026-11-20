@@ -12,7 +12,7 @@ mod sweep;
 
 pub use nodes::{EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
 pub(crate) use nodes::example_curves;
-pub(crate) use profile::{cornered_spine, fractions, sweep_example, sweep_example_along};
+pub(crate) use profile::{LATE, SPIKE, cornered_spine, fractions, sweep_example, sweep_example_along};
 pub use profile::{PROFILE, Profile};
 pub use shapes::{LINE, OUTLINE, Outline, POLYLINE, TO_CURVE, polyline, register_outline};
 pub(crate) use sweep::sweep_curve;

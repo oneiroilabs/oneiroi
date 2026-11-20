@@ -410,16 +410,24 @@ impl Scaling<'_> {
             true => self.0.iter().rev().find(|segment| x(segment, 0.0) <= along).unwrap_or(first),
             false => self.0.iter().find(|segment| along <= x(segment, 1.0)).unwrap_or(last),
         };
-        // `x` grows along a segment, so halving finds where it is `along`.
-        let (mut low, mut high) = (0.0f32, 1.0f32);
-        for _ in 0..32 {
-            let middle = (low + high) * 0.5;
-            match x(segment, middle) < along {
-                true => low = middle,
-                false => high = middle,
+        // Right at an end of the segment, or else `x` grows along it, so
+        // halving finds where it is `along`.
+        let u = if along == x(segment, 0.0) {
+            0.0
+        } else if along == x(segment, 1.0) {
+            1.0
+        } else {
+            let (mut low, mut high) = (0.0f32, 1.0f32);
+            for _ in 0..32 {
+                let middle = (low + high) * 0.5;
+                match x(segment, middle) < along {
+                    true => low = middle,
+                    false => high = middle,
+                }
             }
-        }
-        let (point, velocity, _) = segment.evaluate((low + high) * 0.5);
+            (low + high) * 0.5
+        };
+        let (point, velocity, _) = segment.evaluate(u);
         let slope = match velocity.x.abs() > 1e-12 {
             true => velocity.y / velocity.x,
             false => 0.0,
@@ -451,12 +459,18 @@ impl Scaling<'_> {
 /// every segment, then the caps at its start and at its end if it is
 /// `capped`. A closed curve has caps which are not there, so that every
 /// curve has as many, and so does an end the profile is scaled to nothing
-/// at. A segment is cut where the scale has a joint, so it can turn there.
+/// at.
+///
+/// A segment is cut where the scale has a joint, so it can turn there, into
+/// `slots` pieces at most: every segment gets as many, and those it does not
+/// need are not there. So where a patch is follows from its index alone,
+/// which is what the GPU needs.
 pub(crate) fn sweep_curve<P: Profile>(
     spine: &[CubicNurbsSegmentCache],
     profile: &[P],
     capped: bool,
     scale: &[CubicNurbsSegmentCache],
+    slots: usize,
 ) -> Vec<P::Patch> {
     let scaling = Scaling(scale);
     let pieces = P::pieces(profile.len());
@@ -465,19 +479,23 @@ pub(crate) fn sweep_curve<P: Profile>(
     let mut patches = Vec::with_capacity(spine.len() * pieces + 2 * pieces);
     for ((segment, along), cuts) in spine.iter().zip(fractions(spine)).zip(&cuts) {
         let before = segment.cumulative_length() - segment.length();
-        let at = |u: f32| (before + segment.length_until(u)) / total;
-        let mut cuts_at = vec![0.0];
+        // Where it is cut, as `u` and as how far along the spine: right at
+        // the joint of the scale, which the scale turns at.
+        let mut cuts_at = vec![(0.0, along[0])];
         cuts_at.extend(
             scaling
                 .joints()
                 .filter(|joint| *joint > along[0] + 1e-6 && *joint < along[1] - 1e-6)
-                .map(|joint| segment.u_at_distance(joint * total - before)),
+                .map(|joint| (segment.u_at_distance(joint * total - before), joint)),
         );
-        cuts_at.push(1.0);
+        cuts_at.push((1.0, along[1]));
         let last = cuts_at.len() - 2;
-        for (index, span) in cuts_at.windows(2).enumerate() {
-            let span = [span[0], span[1]];
-            let along = [if index == 0 { along[0] } else { at(span[0]) }, if index == last { along[1] } else { at(span[1]) }];
+        let empty = Piece {
+            scale: [0.0; 4],
+            ..Piece::whole(*segment, [along[1]; 2], kind::NONE, [[0.0; 4]; 2])
+        };
+        let spans: Vec<_> = cuts_at.windows(2).map(|cut| ([cut[0].0, cut[1].0], [cut[0].1, cut[1].1])).collect();
+        for (index, (span, along)) in spans.iter().copied().enumerate() {
             let piece = Piece {
                 segment: *segment,
                 span,
@@ -489,6 +507,11 @@ pub(crate) fn sweep_curve<P: Profile>(
             };
             for at in 0..pieces {
                 patches.push(P::patch(&piece, profile, at));
+            }
+        }
+        for _ in spans.len()..slots {
+            for at in 0..pieces {
+                patches.push(P::patch(&empty, profile, at));
             }
         }
     }
@@ -583,7 +606,7 @@ impl<P: Profile> Ports<P> {
                 entry: "sweep_patch",
                 len: |inputs| {
                     let pieces = P::pieces(inputs.len(1));
-                    inputs.len(0) * pieces + inputs.group_count(0) * 2 * caps::<P>(inputs)
+                    inputs.len(0) * slots(inputs) * pieces + inputs.group_count(0) * 2 * caps::<P>(inputs)
                 },
                 words: None,
             },
@@ -593,7 +616,7 @@ impl<P: Profile> Ports<P> {
                 // From where the curves of the spine start, which the CPU
                 // has unless the spine came of a kernel which did not say.
                 words: Some(|inputs| {
-                    let (pieces, caps) = (P::pieces(inputs.len(1)), caps::<P>(inputs));
+                    let (pieces, caps) = (P::pieces(inputs.len(1)) * slots(inputs), caps::<P>(inputs));
                     let mut offsets = vec![0];
                     for curve in inputs.groups(0) {
                         let patches = (curve.len() * pieces + 2 * caps) as u32;
@@ -604,14 +627,22 @@ impl<P: Profile> Ports<P> {
             },
         ],
         requires: Caps::NONE,
-        // Whether there are caps, and where the curves of the spine start.
-        reads: &[2, 4],
-        // A scale cuts the segments where it turns, so how many patches
-        // there are depends on where the spine is. The CPU does that.
-        accepts: Some(|inputs| inputs.len(3) == 0),
+        // Whether there are caps, where the curves of the spine start, and
+        // how long the curves of the scale are.
+        reads: &[2, 4, 5],
+        accepts: None,
         examples: P::SWEEP_EXAMPLES,
         stages: &[],
     }];
+}
+
+/// Into how many pieces a segment of the spine can be cut at most: as many
+/// as the longest curve of the scale has segments.
+fn slots(inputs: &Inputs<'_>) -> usize {
+    match inputs.len(3) {
+        0 => 1,
+        _ => inputs.groups(3).iter().map(|group| group.len()).max().unwrap_or(1).max(1),
+    }
 }
 
 /// How many patches each cap of a curve has.
@@ -645,12 +676,13 @@ fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let capped = inputs.choice(2) == 0;
     let scale = inputs.get::<CubicNurbsSegmentCache>(3);
     let scales = inputs.groups(3);
+    let slots = slots(inputs);
     let (patches, offsets) = crate::parallel::per_group(inputs.groups(0), |group, curve| {
         let scale = match scale.is_empty() {
             true => &[][..],
             false => &scale[scales[group.min(scales.len() - 1)].clone()],
         };
-        sweep_curve(&spine[curve], P::select(profile, group), capped, scale)
+        sweep_curve(&spine[curve], P::select(profile, group), capped, scale, slots)
     });
     outputs.set(0, &patches);
     outputs.set_groups(0, &offsets);
@@ -1008,12 +1040,12 @@ mod tests {
 
         // A tube and a bar around two corners: each side of a corner reaches
         // the plane between both, so they meet all around.
-        let tubes = sweep_curve(&open, &[Circle::new(0.2)], false, &[]);
+        let tubes = sweep_curve(&open, &[Circle::new(0.2)], false, &[], 1);
         assert_eq!(tubes.len(), 3);
         for pair in tubes.windows(2) {
             assert_meets(&pair[0], &pair[1]);
         }
-        let bars = sweep_curve(&open, &square, false, &[]);
+        let bars = sweep_curve(&open, &square, false, &[], 1);
         assert_eq!(bars.len(), 3 * 4);
         for (segment, edge) in (0..2).flat_map(|segment| (0..4).map(move |edge| (segment, edge))) {
             assert_meets(&bars[segment * 4 + edge], &bars[(segment + 1) * 4 + edge]);
@@ -1022,7 +1054,7 @@ mod tests {
         // A closed curve is cut where it ends as well, and its caps are not
         // there.
         let ring = polyline(&[Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y], true);
-        let tubes = sweep_curve(&ring, &[Circle::new(0.1)], true, &[]);
+        let tubes = sweep_curve(&ring, &[Circle::new(0.1)], true, &[], 1);
         assert_eq!(tubes.len(), 4 + 2);
         assert_meets(&tubes[3], &tubes[0]);
         assert!(tubes[4..].iter().all(|cap| cap.kind() == kind::NONE));
@@ -1034,7 +1066,7 @@ mod tests {
     fn caps_close_the_ends() {
         use crate::{curve::polyline, primitive::Circle};
         let line = polyline(&[Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0)], false);
-        let patches = sweep_curve(&line, &[Circle::new(0.5)], true, &[]);
+        let patches = sweep_curve(&line, &[Circle::new(0.5)], true, &[], 1);
         let [side, start, end] = [patches[0], patches[1], patches[2]];
         assert_eq!((start.kind(), end.kind()), (kind::START, kind::END));
         for step in 0..=12 {
@@ -1048,7 +1080,7 @@ mod tests {
             assert!(start.point(0.5, v).1.distance(-Vec3::X) < 1e-5);
             assert!(end.point(0.5, v).1.distance(Vec3::X) < 1e-5);
         }
-        assert_eq!(sweep_curve(&line, &[Circle::new(0.5)], false, &[]).len(), 1);
+        assert_eq!(sweep_curve(&line, &[Circle::new(0.5)], false, &[], 1).len(), 1);
     }
 
     /// A line along `x`, `length` long, swept by a circle of `radius`
@@ -1056,7 +1088,8 @@ mod tests {
     fn scaled_tube(length: f32, radius: f32, scale: &[Vec3]) -> Vec<TubePatch> {
         use crate::{curve::polyline, primitive::Circle};
         let line = polyline(&[Vec3::ZERO, Vec3::new(length, 0.0, 0.0)], false);
-        sweep_curve(&line, &[Circle::new(radius)], true, &polyline(scale, false))
+        let scale = polyline(scale, false);
+        sweep_curve(&line, &[Circle::new(radius)], true, &scale, scale.len())
     }
 
     #[test]
