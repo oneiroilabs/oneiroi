@@ -47,6 +47,8 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
     for node in [
         &value::F32_META,
         &value::VEC3_META,
+        &value::MATH_META,
+        &value::COMBINE_XYZ_META,
         &curve::NURBS_META,
         &curve::SAMPLE_CURVE_META,
         &curve::TRANSLATE_META,

@@ -1882,6 +1882,8 @@ mod tests {
                 "Instance / Instance on Points",
                 "Instance / Realize Instances",
                 "Instance / Transform",
+                "Value / Combine XYZ",
+                "Value / Math",
                 "Value / Numbers",
                 "Value / Vectors",
                 "Graph / Input",
