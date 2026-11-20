@@ -196,7 +196,7 @@ pub(crate) fn swept_example<P: Profile>(points: &[usize], profile: &[P]) -> (Vec
     let mut patches = Vec::new();
     let mut patch_offsets = vec![0];
     for curve in offsets.windows(2) {
-        patches.extend(crate::curve::sweep_curve(&segments[curve[0] as usize..curve[1] as usize], profile, true));
+        patches.extend(crate::curve::sweep_curve(&segments[curve[0] as usize..curve[1] as usize], profile, true, &[]));
         patch_offsets.push(patches.len() as u32);
     }
     (patches, patch_offsets)

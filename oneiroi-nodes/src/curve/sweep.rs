@@ -61,6 +61,61 @@ fn cap(segment: &CubicNurbsSegmentCache, kind: u32, u: f32) -> (MovingFrame, f32
     (frame, scale, facing)
 }
 
+/// Where a patch is along a curve and how it is cut and scaled: what a
+/// [`Profile`] makes a patch of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Piece {
+    pub segment: CubicNurbsSegmentCache,
+    /// The part of the segment it covers, from `0` to `1`.
+    pub span: [f32; 2],
+    /// Where along the whole curve it starts and ends.
+    pub along: [f32; 2],
+    /// See [`kind`].
+    pub kind: u32,
+    /// See [`TubePatch`].
+    pub miters: [[f32; 4]; 2],
+    /// The scale of the profile along it, `a + b u + c u² + d u³`.
+    pub scale: [f32; 4],
+}
+
+impl Piece {
+    /// All of `segment`, at its own size.
+    pub fn whole(segment: CubicNurbsSegmentCache, along: [f32; 2], kind: u32, miters: [[f32; 4]; 2]) -> Self {
+        Self {
+            segment,
+            span: [0.0, 1.0],
+            along,
+            kind,
+            miters,
+            scale: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// The scale `a + b u + c u² + d u³` at `u`, and how fast it changes.
+fn scale_at(scale: [f32; 4], u: f32) -> (f32, f32) {
+    let [a, b, c, d] = scale;
+    (a + u * (b + u * (c + u * d)), b + u * (2.0 * c + u * 3.0 * d))
+}
+
+/// The frame of the spine at `u` of a patch which covers `span` of
+/// `segment`, and how fast the spine runs there per `u`.
+fn spine_at(segment: &CubicNurbsSegmentCache, span: [f32; 2], u: f32) -> (MovingFrame, f32) {
+    let t = lerp(span[0], span[1], u);
+    let frame = segment.frame(t);
+    (frame, segment.evaluate(t).1.length() * (span[1] - span[0]))
+}
+
+/// The normal of a swept surface where the profile, at `offset` from the
+/// spine with the normal `outwards` there, grows by `growth` per `u` while
+/// the spine runs `speed` per `u` along `tangent`: it leans back where the
+/// surface widens, like on a cone.
+fn leaning(outwards: Vec3, offset: Vec3, tangent: Vec3, speed: f32, growth: f32) -> Vec3 {
+    (outwards * speed - tangent * outwards.dot(offset) * growth)
+        .try_normalize()
+        .unwrap_or(outwards)
+}
+
 /// A circle swept along one segment of a curve, or a cap of the tube.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -75,20 +130,25 @@ pub struct TubePatch {
     /// its end, as their normals: where it meets the tube of the segment
     /// next to it at an angle. A normal of `0` cuts straight across.
     miters: [[f32; 4]; 2],
+    /// See [`Piece`].
+    span: [f32; 2],
+    scale: [f32; 4],
 }
 
 impl TubePatch {
     pub fn new(segment: CubicNurbsSegmentCache, radius: f32, along: [f32; 2]) -> Self {
-        Self::cut(segment, radius, along, kind::SIDE, [[0.0; 4]; 2])
+        Self::of(&Piece::whole(segment, along, kind::SIDE, [[0.0; 4]; 2]), radius)
     }
 
-    pub fn cut(segment: CubicNurbsSegmentCache, radius: f32, along: [f32; 2], kind: u32, miters: [[f32; 4]; 2]) -> Self {
+    pub fn of(piece: &Piece, radius: f32) -> Self {
         Self {
-            segment,
+            segment: piece.segment,
             radius,
-            along,
-            kind,
-            miters,
+            along: piece.along,
+            kind: piece.kind,
+            miters: piece.miters,
+            span: piece.span,
+            scale: piece.scale,
         }
     }
 
@@ -121,6 +181,8 @@ impl DataType for TubePatch {
         Field::new("kind", FieldType::U32),
         Field::new("miter_start", FieldType::Vec4),
         Field::new("miter_end", FieldType::Vec4),
+        Field::new("span", FieldType::Vec2),
+        Field::new("scale", FieldType::Vec4),
     ]);
 }
 
@@ -136,12 +198,14 @@ impl Surface for TubePatch {
         if self.kind != kind::SIDE {
             let (frame, scale, facing) = cap(&self.segment, self.kind, u);
             let out = frame.normal * around.x + frame.binormal * around.y;
-            return (frame.position + out * self.radius * scale, facing);
+            return (frame.position + out * self.radius * scale * self.scale[0], facing);
         }
-        let frame = self.segment.frame(u);
-        let normal = frame.normal * around.x + frame.binormal * around.y;
-        let offset = normal * self.radius;
+        let (frame, speed) = spine_at(&self.segment, self.span, u);
+        let (scale, growth) = scale_at(self.scale, u);
+        let outwards = frame.normal * around.x + frame.binormal * around.y;
+        let offset = outwards * self.radius * scale;
         let along = lerp(cut(offset, frame.tangent, self.miters[0]), cut(offset, frame.tangent, self.miters[1]), u);
+        let normal = leaning(outwards, outwards * self.radius, frame.tangent, speed, growth);
         (frame.position + offset + frame.tangent * along, normal)
     }
 
@@ -174,6 +238,9 @@ pub struct SweptPatch {
     miters: [[f32; 4]; 2],
     /// See [`kind`].
     kind: u32,
+    /// See [`Piece`].
+    span: [f32; 2],
+    scale: [f32; 4],
 }
 
 impl SweptPatch {
@@ -196,24 +263,19 @@ impl SweptPatch {
         along: [f32; 2],
         around: [f32; 2],
     ) -> Self {
-        Self::cut(spine, profile, along, around, kind::SIDE, [[0.0; 4]; 2])
+        Self::of(&Piece::whole(spine, along, kind::SIDE, [[0.0; 4]; 2]), profile, around)
     }
 
-    pub fn cut(
-        spine: CubicNurbsSegmentCache,
-        profile: CubicNurbsSegmentCache,
-        along: [f32; 2],
-        around: [f32; 2],
-        kind: u32,
-        miters: [[f32; 4]; 2],
-    ) -> Self {
+    pub fn of(piece: &Piece, profile: CubicNurbsSegmentCache, around: [f32; 2]) -> Self {
         Self {
-            spine,
+            spine: piece.segment,
             profile,
-            along,
+            along: piece.along,
             around,
-            miters,
-            kind,
+            miters: piece.miters,
+            kind: piece.kind,
+            span: piece.span,
+            scale: piece.scale,
         }
     }
 
@@ -236,6 +298,8 @@ impl DataType for SweptPatch {
         Field::new("miter_start", FieldType::Vec4),
         Field::new("miter_end", FieldType::Vec4),
         Field::new("kind", FieldType::U32),
+        Field::new("span", FieldType::Vec2),
+        Field::new("scale", FieldType::Vec4),
     ]);
 }
 
@@ -251,17 +315,20 @@ impl Surface for SweptPatch {
         if self.kind != kind::SIDE {
             let (frame, scale, facing) = cap(&self.spine, self.kind, u);
             let across = frame.normal * outline.x + frame.binormal * outline.y;
-            return (frame.position + across * scale, facing);
+            return (frame.position + across * scale * self.scale[0], facing);
         }
-        let frame = self.spine.frame(u);
+        let (frame, speed) = spine_at(&self.spine, self.span, u);
+        let (scale, growth) = scale_at(self.scale, u);
         let tangent = tangent.xy().normalize_or_zero();
         // To the right of the direction the profile runs in.
         let outwards = Vec2::new(tangent.y, -tangent.x);
-        let offset = frame.normal * outline.x + frame.binormal * outline.y;
+        let outwards = frame.normal * outwards.x + frame.binormal * outwards.y;
+        let across = frame.normal * outline.x + frame.binormal * outline.y;
+        let offset = across * scale;
         let along = lerp(cut(offset, frame.tangent, self.miters[0]), cut(offset, frame.tangent, self.miters[1]), u);
         (
             frame.position + offset + frame.tangent * along,
-            frame.normal * outwards.x + frame.binormal * outwards.y,
+            leaning(outwards, across, frame.tangent, speed, growth),
         )
     }
 
@@ -318,17 +385,111 @@ pub(crate) fn miters(spine: &[CubicNurbsSegmentCache]) -> (bool, Vec<[[f32; 4]; 
     (closed, cuts)
 }
 
+/// How much a profile is scaled along the spine: a curve whose `x` is how
+/// far along the spine, as a fraction of its length, and whose `y` is the
+/// scale there. Before it starts and after it ends its ends hold. Without
+/// one the profile keeps its size.
+pub(crate) struct Scaling<'a>(&'a [CubicNurbsSegmentCache]);
+
+impl Scaling<'_> {
+    /// The scale `along` the spine, and how fast it changes there: where
+    /// two segments of it meet, as it goes on `after` it or as it came.
+    fn at(&self, along: f32, after: bool) -> (f32, f32) {
+        let (Some(first), Some(last)) = (self.0.first(), self.0.last()) else {
+            return (1.0, 0.0);
+        };
+        let x = |segment: &CubicNurbsSegmentCache, u: f32| segment.evaluate(u).0.x;
+        // Only before it starts and after it ends does it not change.
+        if along < x(first, 0.0) {
+            return (first.evaluate(0.0).0.y, 0.0);
+        }
+        if along > x(last, 1.0) {
+            return (last.evaluate(1.0).0.y, 0.0);
+        }
+        let segment = match after {
+            true => self.0.iter().rev().find(|segment| x(segment, 0.0) <= along).unwrap_or(first),
+            false => self.0.iter().find(|segment| along <= x(segment, 1.0)).unwrap_or(last),
+        };
+        // `x` grows along a segment, so halving finds where it is `along`.
+        let (mut low, mut high) = (0.0f32, 1.0f32);
+        for _ in 0..32 {
+            let middle = (low + high) * 0.5;
+            match x(segment, middle) < along {
+                true => low = middle,
+                false => high = middle,
+            }
+        }
+        let (point, velocity, _) = segment.evaluate((low + high) * 0.5);
+        let slope = match velocity.x.abs() > 1e-12 {
+            true => velocity.y / velocity.x,
+            false => 0.0,
+        };
+        (point.y, slope)
+    }
+
+    /// Where along the spine its segments meet, where the scale can turn.
+    fn joints(&self) -> impl Iterator<Item = f32> + '_ {
+        self.0.iter().skip(1).map(|segment| segment.evaluate(0.0).0.x)
+    }
+
+    /// The scale along `span` of `segment`, which lies `along` of a spine
+    /// `total` long, as `a + b u + c u² + d u³` in `u` of the piece: right
+    /// at both ends, and turning as it does there.
+    fn cubic(&self, segment: &CubicNurbsSegmentCache, span: [f32; 2], along: [f32; 2], total: f32) -> [f32; 4] {
+        if self.0.is_empty() {
+            return [1.0, 0.0, 0.0, 0.0];
+        }
+        // How fast the spine runs through the fractions per `u` of the piece.
+        let rate = |t: f32| segment.evaluate(t).1.length() * (span[1] - span[0]) / total;
+        let ((s0, slope0), (s1, slope1)) = (self.at(along[0], true), self.at(along[1], false));
+        let (m0, m1) = (slope0 * rate(span[0]), slope1 * rate(span[1]));
+        [s0, m0, 3.0 * (s1 - s0) - 2.0 * m0 - m1, 2.0 * (s0 - s1) + m0 + m1]
+    }
+}
+
 /// The patches of one curve of the spine: every piece of the profile along
 /// every segment, then the caps at its start and at its end if it is
 /// `capped`. A closed curve has caps which are not there, so that every
-/// curve has as many.
-pub(crate) fn sweep_curve<P: Profile>(spine: &[CubicNurbsSegmentCache], profile: &[P], capped: bool) -> Vec<P::Patch> {
+/// curve has as many, and so does an end the profile is scaled to nothing
+/// at. A segment is cut where the scale has a joint, so it can turn there.
+pub(crate) fn sweep_curve<P: Profile>(
+    spine: &[CubicNurbsSegmentCache],
+    profile: &[P],
+    capped: bool,
+    scale: &[CubicNurbsSegmentCache],
+) -> Vec<P::Patch> {
+    let scaling = Scaling(scale);
     let pieces = P::pieces(profile.len());
     let (closed, cuts) = miters(spine);
+    let total = spine.last().map_or(0.0, |last| last.cumulative_length()).max(f32::MIN_POSITIVE);
     let mut patches = Vec::with_capacity(spine.len() * pieces + 2 * pieces);
     for ((segment, along), cuts) in spine.iter().zip(fractions(spine)).zip(&cuts) {
-        for piece in 0..pieces {
-            patches.push(P::patch(*segment, profile, piece, along, kind::SIDE, *cuts));
+        let before = segment.cumulative_length() - segment.length();
+        let at = |u: f32| (before + segment.length_until(u)) / total;
+        let mut cuts_at = vec![0.0];
+        cuts_at.extend(
+            scaling
+                .joints()
+                .filter(|joint| *joint > along[0] + 1e-6 && *joint < along[1] - 1e-6)
+                .map(|joint| segment.u_at_distance(joint * total - before)),
+        );
+        cuts_at.push(1.0);
+        let last = cuts_at.len() - 2;
+        for (index, span) in cuts_at.windows(2).enumerate() {
+            let span = [span[0], span[1]];
+            let along = [if index == 0 { along[0] } else { at(span[0]) }, if index == last { along[1] } else { at(span[1]) }];
+            let piece = Piece {
+                segment: *segment,
+                span,
+                along,
+                kind: kind::SIDE,
+                // Only where the segment itself ends can it be at a corner.
+                miters: [if index == 0 { cuts[0] } else { [0.0; 4] }, if index == last { cuts[1] } else { [0.0; 4] }],
+                scale: scaling.cubic(segment, span, along, total),
+            };
+            for at in 0..pieces {
+                patches.push(P::patch(&piece, profile, at));
+            }
         }
     }
     if capped {
@@ -337,8 +498,13 @@ pub(crate) fn sweep_curve<P: Profile>(spine: &[CubicNurbsSegmentCache], profile:
                 patches.push(match end {
                     Some(segment) => {
                         let along = if kind == kind::END { [1.0; 2] } else { [0.0; 2] };
-                        let kind = if closed { kind::NONE } else { kind };
-                        P::patch(*segment, profile, piece, along, kind, [[0.0; 4]; 2])
+                        let size = scaling.at(along[0], kind == kind::START).0;
+                        let kind = if closed || size == 0.0 { kind::NONE } else { kind };
+                        let cap = Piece {
+                            scale: [size, 0.0, 0.0, 0.0],
+                            ..Piece::whole(*segment, along, kind, [[0.0; 4]; 2])
+                        };
+                        P::patch(&cap, profile, piece)
                     }
                     None => P::Patch::zeroed(),
                 });
@@ -368,6 +534,12 @@ generic_node! {
             /// curve which ends where it starts has no ends. A cap is flat across
             /// from the middle of the profile, which has to see all of it.
             port GenericPort::exact::<u32>("ends").choices(&["capped", "open"]);
+            /// How big the profile is along the curve: a curve whose `x` is how far
+            /// along, from `0` at its start to `1` at its end, and whose `y` is the
+            /// scale there. From `(0, 1)` to `(1, 0)` it ends in a point. A curve
+            /// of the spine takes the scale with its index, or the last one. None
+            /// keeps the profile as it is.
+            port GenericPort::exact::<CubicNurbsSegmentCache>("scale").grouped();
         }
         outputs {
             /// The swept surfaces, one per curve of the spine.
@@ -401,6 +573,7 @@ impl<P: Profile> Ports<P> {
         PortDecl::new::<CubicNurbsSegmentCache>("spine").grouped(),
         PortDecl::new::<P>("profile"),
         PortDecl::new::<u32>("ends").choices(&["capped", "open"]),
+        PortDecl::new::<CubicNurbsSegmentCache>("scale").grouped(),
     ];
     const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<P::Patch>("surface").grouped()];
     const GPU: &'static [GpuKernel] = &[GpuKernel {
@@ -432,8 +605,10 @@ impl<P: Profile> Ports<P> {
         ],
         requires: Caps::NONE,
         // Whether there are caps, and where the curves of the spine start.
-        reads: &[2, 3],
-        accepts: None,
+        reads: &[2, 4],
+        // A scale cuts the segments where it turns, so how many patches
+        // there are depends on where the spine is. The CPU does that.
+        accepts: Some(|inputs| inputs.len(3) == 0),
         examples: P::SWEEP_EXAMPLES,
         stages: &[],
     }];
@@ -468,8 +643,14 @@ fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let spine = inputs.get::<CubicNurbsSegmentCache>(0);
     let profile = inputs.get::<P>(1);
     let capped = inputs.choice(2) == 0;
+    let scale = inputs.get::<CubicNurbsSegmentCache>(3);
+    let scales = inputs.groups(3);
     let (patches, offsets) = crate::parallel::per_group(inputs.groups(0), |group, curve| {
-        sweep_curve(&spine[curve], P::select(profile, group), capped)
+        let scale = match scale.is_empty() {
+            true => &[][..],
+            false => &scale[scales[group.min(scales.len() - 1)].clone()],
+        };
+        sweep_curve(&spine[curve], P::select(profile, group), capped, scale)
     });
     outputs.set(0, &patches);
     outputs.set_groups(0, &offsets);
@@ -708,7 +889,7 @@ mod tests {
         // is drawn with.
         let patches = engine.read::<TubePatch>(&instance, "surface").unwrap();
         assert_eq!(patches.len(), 4);
-        assert_eq!(size_of::<TubePatch>(), 36 * 4);
+        assert_eq!(size_of::<TubePatch>(), 42 * 4);
         let (position, normal) = patches[0].point(0.0, 0.25);
         assert!(position.distance(Vec3::ZERO) - 0.25 < 1e-4);
         assert!((normal.length() - 1.0).abs() < 1e-4);
@@ -827,12 +1008,12 @@ mod tests {
 
         // A tube and a bar around two corners: each side of a corner reaches
         // the plane between both, so they meet all around.
-        let tubes = sweep_curve(&open, &[Circle::new(0.2)], false);
+        let tubes = sweep_curve(&open, &[Circle::new(0.2)], false, &[]);
         assert_eq!(tubes.len(), 3);
         for pair in tubes.windows(2) {
             assert_meets(&pair[0], &pair[1]);
         }
-        let bars = sweep_curve(&open, &square, false);
+        let bars = sweep_curve(&open, &square, false, &[]);
         assert_eq!(bars.len(), 3 * 4);
         for (segment, edge) in (0..2).flat_map(|segment| (0..4).map(move |edge| (segment, edge))) {
             assert_meets(&bars[segment * 4 + edge], &bars[(segment + 1) * 4 + edge]);
@@ -841,7 +1022,7 @@ mod tests {
         // A closed curve is cut where it ends as well, and its caps are not
         // there.
         let ring = polyline(&[Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y], true);
-        let tubes = sweep_curve(&ring, &[Circle::new(0.1)], true);
+        let tubes = sweep_curve(&ring, &[Circle::new(0.1)], true, &[]);
         assert_eq!(tubes.len(), 4 + 2);
         assert_meets(&tubes[3], &tubes[0]);
         assert!(tubes[4..].iter().all(|cap| cap.kind() == kind::NONE));
@@ -853,7 +1034,7 @@ mod tests {
     fn caps_close_the_ends() {
         use crate::{curve::polyline, primitive::Circle};
         let line = polyline(&[Vec3::ZERO, Vec3::new(3.0, 0.0, 0.0)], false);
-        let patches = sweep_curve(&line, &[Circle::new(0.5)], true);
+        let patches = sweep_curve(&line, &[Circle::new(0.5)], true, &[]);
         let [side, start, end] = [patches[0], patches[1], patches[2]];
         assert_eq!((start.kind(), end.kind()), (kind::START, kind::END));
         for step in 0..=12 {
@@ -867,7 +1048,59 @@ mod tests {
             assert!(start.point(0.5, v).1.distance(-Vec3::X) < 1e-5);
             assert!(end.point(0.5, v).1.distance(Vec3::X) < 1e-5);
         }
-        assert_eq!(sweep_curve(&line, &[Circle::new(0.5)], false).len(), 1);
+        assert_eq!(sweep_curve(&line, &[Circle::new(0.5)], false, &[]).len(), 1);
+    }
+
+    /// A line along `x`, `length` long, swept by a circle of `radius`
+    /// scaled along it through `scale` as a polyline.
+    fn scaled_tube(length: f32, radius: f32, scale: &[Vec3]) -> Vec<TubePatch> {
+        use crate::{curve::polyline, primitive::Circle};
+        let line = polyline(&[Vec3::ZERO, Vec3::new(length, 0.0, 0.0)], false);
+        sweep_curve(&line, &[Circle::new(radius)], true, &polyline(scale, false))
+    }
+
+    #[test]
+    fn a_scale_down_to_nothing_makes_a_spike() {
+        let patches = scaled_tube(3.0, 0.5, &[Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)]);
+        let [side, start, end] = [patches[0], patches[1], patches[2]];
+        assert_eq!((start.kind(), end.kind()), (kind::START, kind::NONE), "nothing to cap at the tip");
+        // The normal of a cone leans towards its tip.
+        let slope = (0.5f32 / 3.0).atan();
+        for (u, v) in [(0.0, 0.0), (0.3, 0.25), (0.7, 0.6), (0.95, 0.9)] {
+            let (point, normal) = side.point(u, v);
+            let radius = Vec2::new(point.y, point.z).length();
+            assert!((radius - 0.5 * (1.0 - point.x / 3.0)).abs() < 1e-3, "{point} at {u}");
+            assert!((normal.x - slope.sin()).abs() < 1e-3, "{normal}");
+            assert!((normal.length() - 1.0).abs() < 1e-4);
+        }
+        assert!(side.point(1.0, 0.3).0.distance(Vec3::new(3.0, 0.0, 0.0)) < 1e-4);
+    }
+
+    #[test]
+    fn a_scale_turns_where_its_curve_has_a_corner() {
+        // Full size until 80 % of the way, then down to a fifth.
+        let scale = [Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.8, 1.0, 0.0), Vec3::new(1.0, 0.2, 0.0)];
+        let patches = scaled_tube(10.0, 1.0, &scale);
+        // The segment is cut there, into two patches.
+        let kinds: Vec<_> = patches.iter().map(TubePatch::kind).collect();
+        assert_eq!(kinds, [kind::SIDE, kind::SIDE, kind::START, kind::END]);
+        let radius = |patch: &TubePatch, u: f32| {
+            let point = patch.point(u, 0.0).0;
+            (point.x, Vec2::new(point.y, point.z).length())
+        };
+        for u in [0.0, 0.5, 1.0] {
+            let (x, r) = radius(&patches[0], u);
+            assert!((r - 1.0).abs() < 1e-3 && x <= 8.0 + 1e-3, "{x} {r}");
+        }
+        for u in [0.0, 0.5, 1.0] {
+            let (x, r) = radius(&patches[1], u);
+            let expected = 1.0 - 0.8 * (x - 8.0) / 2.0;
+            assert!((r - expected).abs() < 1e-3, "{x} {r} {expected}");
+        }
+        // Both pieces meet, and the cap at the end has the size there.
+        assert_meets(&patches[0], &patches[1]);
+        assert!((radius(&patches[3], 0.0).1 - 0.2).abs() < 1e-3);
+        assert_eq!(patches[0].uv(1.0, 0.0).y, patches[1].uv(0.0, 0.0).y);
     }
 
     #[test]

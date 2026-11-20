@@ -16,7 +16,7 @@ pub(crate) use profile::{cornered_spine, fractions, sweep_example, sweep_example
 pub use profile::{PROFILE, Profile};
 pub use shapes::{LINE, OUTLINE, Outline, POLYLINE, TO_CURVE, polyline, register_outline};
 pub(crate) use sweep::sweep_curve;
-pub use sweep::{SWEEP, SweptPatch, TubePatch, kind, register_profile, swept, tube};
+pub use sweep::{Piece, SWEEP, SweptPatch, TubePatch, kind, register_profile, swept, tube};
 #[cfg(feature = "meta")]
 pub use {
     nodes::{NURBS_META, SAMPLE_CURVE_META, TRANSLATE_META},

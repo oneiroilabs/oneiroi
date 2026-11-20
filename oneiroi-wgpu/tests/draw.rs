@@ -116,6 +116,17 @@ fn program_along(
     circle: bool,
     spine: &[[f32; 4]],
 ) -> oneiroi_core::program::Program {
+    program_scaled(registry, circle, spine, &[])
+}
+
+/// [`program_along`] with the profile scaled along the spine through the
+/// polyline `scale`.
+fn program_scaled(
+    registry: &NodeRegistry,
+    circle: bool,
+    spine: &[[f32; 4]],
+    scale: &[Vec3],
+) -> oneiroi_core::program::Program {
     let mut b = ProgramBuilder::new("surface");
     let points = b.constant::<[f32; 4]>(spine);
     let knots = b.constant(&clamped_uniform_knots(spine.len()));
@@ -126,7 +137,14 @@ fn program_along(
     } else {
         square(&mut b)
     };
-    let surface = swept(&mut b, registry, spine, profile).unwrap();
+    let surface = match scale.is_empty() {
+        true => swept(&mut b, registry, spine, profile).unwrap(),
+        false => {
+            let ends = b.constant::<u32>(&[0]);
+            let scale = b.constant(&oneiroi_nodes::curve::polyline(scale, false));
+            b.generic(registry, &oneiroi_nodes::curve::SWEEP, &[spine, profile, ends, scale]).unwrap()[0]
+        }
+    };
     let tolerance = b.constant::<f32>(&[TOLERANCE]);
     let mesh = surface::mesh(&mut b, registry, surface, tolerance).unwrap();
     b.output("surface", surface);
@@ -241,10 +259,14 @@ fn scene(circle: bool) -> Option<Scene> {
 }
 
 fn scene_along(circle: bool, spine: &[[f32; 4]]) -> Option<Scene> {
+    scene_scaled(circle, spine, &[])
+}
+
+fn scene_scaled(circle: bool, spine: &[[f32; 4]], scale: &[Vec3]) -> Option<Scene> {
     let (device, queue) = device()?;
     let registry = registry();
     let mut engine = Engine::new(GpuExecutor::new(device.clone(), queue.clone()));
-    let id = engine.add_program(program_along(&registry, circle, spine));
+    let id = engine.add_program(program_scaled(&registry, circle, spine, scale));
     let mut instance = engine.instantiate(id);
     engine.evaluate([&mut instance]);
 
@@ -371,6 +393,26 @@ fn a_surface_drawn_from_its_patches_looks_like_its_mesh() {
 }
 
 #[test]
+fn a_scaled_surface_drawn_from_its_patches_looks_like_its_mesh() {
+    // Wide at the start, narrow in the middle, and from there to a point.
+    let scale = [Vec3::new(0.0, 1.5, 0.0), Vec3::new(0.5, 0.5, 0.0), Vec3::new(1.0, 0.0, 0.0)];
+    for circle in [true, false] {
+        let Some(mut scene) = scene_scaled(circle, &BENT, &scale) else {
+            return;
+        };
+        let mut stage = DrawStage::new(&scene.device, FORMAT);
+        let (rings, sides) = scene.detail(circle);
+        let drawn = scene.drawn(&mut stage, scene.view(rings, sides));
+        let meshed = scene.meshed();
+        assert!(stage.errors().is_empty(), "{:?}", stage.errors());
+        let lit = covered(&meshed);
+        assert!(lit > 300, "{lit}");
+        let off = different(&drawn, &meshed);
+        assert!(off * 50 < lit, "{off} of {lit} pixels differ");
+    }
+}
+
+#[test]
 fn detail_is_decided_when_drawing() {
     let Some(mut scene) = scene(true) else {
         return;
@@ -472,7 +514,7 @@ fn a_device_can_turn_up_later() {
     gpu.sync(store);
     let handle = store.get(key).unwrap();
     // 2 segments and 2 caps.
-    assert!(gpu.page(handle.page).is_some() && handle.len == 4 * 36);
+    assert!(gpu.page(handle.page).is_some() && handle.len == 4 * 42);
 }
 
 /// Both ways of drawing a surface as fine as it appears: with vertex

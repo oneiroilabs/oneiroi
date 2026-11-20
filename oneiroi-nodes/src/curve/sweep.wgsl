@@ -76,7 +76,7 @@ fn sweep_patch(index: u32) -> Patch {
             miters[1] = sweep_between(sweep_tangent(at, 1.0), sweep_tangent(first, 0.0));
         }
         let along = curve_fractions(in_spine(at), last);
-        return sweep_piece(in_spine(at), curve, local % pieces, along, 0u, miters[0], miters[1]);
+        return sweep_piece(in_spine(at), curve, local % pieces, along, 0u, miters[0], miters[1], vec2<f32>(0.0, 1.0), vec4<f32>(1.0, 0.0, 0.0, 0.0));
     }
     // A cap: at the start, then at the end.
     let cap = local - sides;
@@ -90,5 +90,5 @@ fn sweep_patch(index: u32) -> Patch {
         segment = last;
         along = vec2<f32>(1.0);
     }
-    return sweep_piece(segment, curve, cap % pieces, along, kind, vec4<f32>(0.0), vec4<f32>(0.0));
+    return sweep_piece(segment, curve, cap % pieces, along, kind, vec4<f32>(0.0), vec4<f32>(0.0), vec2<f32>(0.0, 1.0), vec4<f32>(1.0, 0.0, 0.0, 0.0));
 }

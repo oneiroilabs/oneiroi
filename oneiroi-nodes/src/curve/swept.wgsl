@@ -3,18 +3,23 @@ fn surface_point(piece: SweptPatch, uv: vec2<f32>) -> SurfacePoint {
     if (piece.kind != 0u) {
         let cap = sweep_cap(piece.spine, piece.kind, uv.x);
         let across = cap.frame.normal * outline.x + cap.frame.binormal * outline.y;
-        return SurfacePoint(cap.frame.position + across * cap.scale, cap.facing);
+        return SurfacePoint(cap.frame.position + across * cap.scale * piece.scale.x, cap.facing);
     }
-    let frame = curve_frame(piece.spine, uv.x);
+    let t = mix(piece.span.x, piece.span.y, uv.x);
+    let frame = curve_frame(piece.spine, t);
+    let speed = curve_speed(piece.spine, t) * (piece.span.y - piece.span.x);
+    let scale = sweep_scale(piece.scale, uv.x);
     let tangent = curve_tangent(piece.profile, uv.y).xy;
 
     // To the right of the direction the profile runs in.
-    var outwards = vec2<f32>(0.0);
+    var flat_out = vec2<f32>(0.0);
     let len = length(tangent);
     if (len > 1e-30) {
-        outwards = vec2<f32>(tangent.y, -tangent.x) / len;
+        flat_out = vec2<f32>(tangent.y, -tangent.x) / len;
     }
-    let offset = frame.normal * outline.x + frame.binormal * outline.y;
+    let outwards = frame.normal * flat_out.x + frame.binormal * flat_out.y;
+    let across = frame.normal * outline.x + frame.binormal * outline.y;
+    let offset = across * scale.x;
     let along = mix(
         sweep_cut(offset, frame.tangent, piece.miter_start),
         sweep_cut(offset, frame.tangent, piece.miter_end),
@@ -22,6 +27,6 @@ fn surface_point(piece: SweptPatch, uv: vec2<f32>) -> SurfacePoint {
     );
     return SurfacePoint(
         frame.position + offset + frame.tangent * along,
-        frame.normal * outwards.x + frame.binormal * outwards.y,
+        sweep_leaning(outwards, across, frame.tangent, speed, scale.y),
     );
 }

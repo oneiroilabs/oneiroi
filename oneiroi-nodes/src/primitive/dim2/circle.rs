@@ -7,7 +7,7 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use crate::curve::{Curve, Profile, TubePatch, nurbs::CubicNurbsSegmentCache, sweep_example};
+use crate::curve::{Curve, Piece, Profile, TubePatch, sweep_example};
 
 /// A circle around the origin. It is its radius and nothing else, every
 /// point on it is computed when it is asked for.
@@ -81,15 +81,8 @@ impl Profile for Circle {
         profile.min(1)
     }
 
-    fn patch(
-        segment: CubicNurbsSegmentCache,
-        profile: &[Self],
-        _piece: usize,
-        along: [f32; 2],
-        kind: u32,
-        miters: [[f32; 4]; 2],
-    ) -> TubePatch {
-        TubePatch::cut(segment, profile[0].radius, along, kind, miters)
+    fn patch(piece: &Piece, profile: &[Self], _index: usize) -> TubePatch {
+        TubePatch::of(piece, profile[0].radius)
     }
 
     const SWEEP_WGSL: &'static str = concat!(include_str!("../../curve/curve.wgsl"), include_str!("../../curve/fractions.wgsl"), include_str!("../../curve/sweep.wgsl"), "
@@ -107,9 +100,11 @@ fn sweep_piece(
     kind: u32,
     miter_start: vec4<f32>,
     miter_end: vec4<f32>,
+    span: vec2<f32>,
+    scale: vec4<f32>,
 ) -> TubePatch {
     let circle = in_profile(min(curve, in_profile_len() - 1u));
-    return TubePatch(segment, circle.radius, along, kind, miter_start, miter_end);
+    return TubePatch(segment, circle.radius, along, kind, miter_start, miter_end, span, scale);
 }
 ");
 

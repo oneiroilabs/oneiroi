@@ -1,6 +1,6 @@
 use oneiroi_core::types::DataType;
 
-use super::{nurbs::CubicNurbsSegmentCache, sweep::SweptPatch};
+use super::{nurbs::CubicNurbsSegmentCache, sweep::{Piece, SweptPatch}};
 use crate::surface::Surface;
 
 describe_trait! {
@@ -30,26 +30,18 @@ pub trait Profile: DataType + Sync {
     /// `profile` elements. Each cap at an end of it has as many.
     fn pieces(profile: usize) -> usize;
 
-    /// Piece `piece` of `profile` swept along `segment`, or of a cap of the
-    /// curve: a patch of [`kind`](super::sweep::kind), cut at its ends by
-    /// `miters`, which lies `along` of the whole curve. Nothing gets sampled
-    /// here: every patch is still the exact surface, only cut into pieces
-    /// which are easy to evaluate.
-    fn patch(
-        segment: CubicNurbsSegmentCache,
-        profile: &[Self],
-        piece: usize,
-        along: [f32; 2],
-        kind: u32,
-        miters: [[f32; 4]; 2],
-    ) -> Self::Patch;
+    /// Element `index` of `profile` swept along `piece` of a curve: a patch
+    /// of a side or of a cap, see [`Piece`]. Nothing gets sampled here:
+    /// every patch is still the exact surface, only cut into pieces which
+    /// are easy to evaluate.
+    fn patch(piece: &Piece, profile: &[Self], index: usize) -> Self::Patch;
 
     /// The same for the GPU: `alias Patch`, `fn sweep_pieces() -> u32` and
     /// `fn sweep_piece(segment: CubicNurbsSegmentCache, curve: u32, piece:
     /// u32, along: vec2<f32>, kind: u32, miter_start: vec4<f32>,
-    /// miter_end: vec4<f32>) -> Patch`, behind `fractions.wgsl` and
-    /// `sweep.wgsl`, which make every patch of them. The profile is the
-    /// input `profile`.
+    /// miter_end: vec4<f32>, span: vec2<f32>, scale: vec4<f32>) -> Patch`,
+    /// behind `curve.wgsl`, `fractions.wgsl` and `sweep.wgsl`, which make
+    /// every patch of them. The profile is the input `profile`.
     const SWEEP_WGSL: &'static str;
 
     /// Inputs to compare both with, see [`GpuKernel::examples`].
@@ -77,7 +69,10 @@ pub(crate) fn sweep_example_along<P: Profile>(
         bytemuck::cast_slice(spine).to_vec(),
         bytemuck::cast_slice(profile).to_vec(),
         vec![ends],
+        // No scale, which only the CPU takes.
+        Vec::new(),
         offsets.to_vec(),
+        Vec::new(),
     ]
 }
 
@@ -114,16 +109,9 @@ impl Profile for CubicNurbsSegmentCache {
         profile
     }
 
-    fn patch(
-        segment: CubicNurbsSegmentCache,
-        profile: &[Self],
-        piece: usize,
-        along: [f32; 2],
-        kind: u32,
-        miters: [[f32; 4]; 2],
-    ) -> SweptPatch {
-        let around = fractions(profile).nth(piece).unwrap_or([0.0, 1.0]);
-        SweptPatch::cut(segment, profile[piece], along, around, kind, miters)
+    fn patch(piece: &Piece, profile: &[Self], index: usize) -> SweptPatch {
+        let around = fractions(profile).nth(index).unwrap_or([0.0, 1.0]);
+        SweptPatch::of(piece, profile[index], around)
     }
 
     const SWEEP_WGSL: &'static str = concat!(include_str!("curve.wgsl"), include_str!("fractions.wgsl"), include_str!("sweep.wgsl"), "
@@ -141,9 +129,11 @@ fn sweep_piece(
     kind: u32,
     miter_start: vec4<f32>,
     miter_end: vec4<f32>,
+    span: vec2<f32>,
+    scale: vec4<f32>,
 ) -> SweptPatch {
     let around = curve_fractions(in_profile(piece), in_profile(in_profile_len() - 1u));
-    return SweptPatch(segment, in_profile(piece), along, around, miter_start, miter_end, kind);
+    return SweptPatch(segment, in_profile(piece), along, around, miter_start, miter_end, kind, span, scale);
 }
 ");
 

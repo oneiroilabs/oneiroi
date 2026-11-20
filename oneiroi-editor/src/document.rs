@@ -1720,7 +1720,7 @@ mod tests {
         let mut session = session.lock().unwrap();
         assert_eq!(session.run(), 0);
         // One patch for each of the 5 segments of the curve.
-        let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 36;
+        let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 42;
         // One for each of its 5 segments, and its 2 caps.
         assert_eq!(patches, 5 + 2);
         let (center, radius) = session.bounds().unwrap();
@@ -1859,7 +1859,8 @@ mod tests {
             [
                 ("spine".to_string(), "cubic_nurbs_segment"),
                 ("profile".to_string(), "profile"),
-                ("ends".to_string(), "u32")
+                ("ends".to_string(), "u32"),
+                ("scale".to_string(), "cubic_nurbs_segment")
             ]
         );
         assert_eq!(ports(&view.outputs), [("surface".to_string(), "surface")]);
@@ -2102,7 +2103,7 @@ mod tests {
         // The numbers, the curve once, and a circle and a sweep for each.
         assert_eq!(document.status(), "`tube_patch` drawn as it is, 8 nodes ran");
         let session = document.session();
-        let patches = session.lock().unwrap().engine_mut().fetch_key::<u32>(key).unwrap().len() / 36;
+        let patches = session.lock().unwrap().engine_mut().fetch_key::<u32>(key).unwrap().len() / 42;
         // Three tubes, each of the five segments of the curve and two caps.
         assert_eq!(patches, 3 * (5 + 2));
         drop(session);
