@@ -16,7 +16,7 @@ use oneiroi_wgpu::{
     AutoDetail, DetailBudget, DrawStage, DrawView, Instanced, MeshData, MeshPreview, orbit::OrbitCamera,
 };
 
-use crate::document::{Session, Shown};
+use crate::document::{Drawn, Session, Shown};
 
 /// How finely surfaces are drawn.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -292,55 +292,66 @@ impl Primitive for Shot {
         pipeline.drawing = Drawing::Nothing;
         match session.shown() {
             Shown::Nothing => {}
-            Shown::Drawn { key, drawable, shape } => {
-                // What is known of the shape of instances, which the GPU
-                // culls them with.
-                let summary = shape
-                    .and_then(|(elements, groups)| session.shape_summary(&drawable, elements, groups))
-                    .cloned();
-                let (store, executor) = session.engine_mut().parts_mut();
-                let Some(gpu) = executor.gpu_mut() else {
-                    return;
-                };
-                gpu.sync(store);
-                if drawable.topology == Topology::Line {
-                    view.color = Vec3::new(1.0, 0.75, 0.3);
-                }
-                match shape {
-                    None => {
-                        if let Some(handle) = store.get(key)
-                            && let Some(page) = gpu.page(handle.page)
-                        {
-                            pipeline
-                                .stage
-                                .prepare(device, queue, size, &drawable, page, handle, &view);
-                            pipeline.drawing = Drawing::Value;
+            Shown::Drawn(drawn) => {
+                // Every value into a view of its own, all seen the same way.
+                pipeline.stage.clear();
+                let mut counted = Some(0);
+                for (index, Drawn { key, drawable, shape }) in drawn.iter().copied().enumerate() {
+                    // What is known of the shape of instances, which the GPU
+                    // culls them with.
+                    let summary = shape
+                        .and_then(|(elements, groups)| session.shape_summary(&drawable, elements, groups))
+                        .cloned();
+                    let (store, executor) = session.engine_mut().parts_mut();
+                    let Some(gpu) = executor.gpu_mut() else {
+                        return;
+                    };
+                    gpu.sync(store);
+                    let mut view = view;
+                    if drawable.topology == Topology::Line {
+                        view.color = Vec3::new(1.0, 0.75, 0.3);
+                    }
+                    match shape {
+                        None => {
+                            if let Some(handle) = store.get(key)
+                                && let Some(page) = gpu.page(handle.page)
+                            {
+                                pipeline
+                                    .stage
+                                    .prepare_view(index, device, queue, size, &drawable, page, handle, &view);
+                                pipeline.drawing = Drawing::Value;
+                            }
+                        }
+                        Some((elements, groups)) => {
+                            let handles = (store.get(key), store.get(elements), store.get(groups));
+                            if let (Some(rows), Some(elements), Some(groups), Some(summary)) =
+                                (handles.0, handles.1, handles.2, &summary)
+                                && let (Some(rows_page), Some(page)) = (gpu.page(rows.page), gpu.page(elements.page))
+                            {
+                                // Offsets which are empty may live in no page,
+                                // nothing reads them then.
+                                let groups_page = gpu.page(groups.page).unwrap_or(rows_page);
+                                let instanced = Instanced {
+                                    rows: (rows_page, rows),
+                                    groups: (groups_page, groups),
+                                    spheres: &summary.spheres,
+                                    elements: summary.elements,
+                                    slots: summary.slots,
+                                    // Smaller than a pixel across is too small
+                                    // to see.
+                                    min_pixels: 1.0,
+                                };
+                                pipeline.stage.prepare_instances_view(
+                                    index, device, queue, size, &drawable, page, elements, instanced, &view,
+                                );
+                                pipeline.drawing = Drawing::Value;
+                            }
                         }
                     }
-                    Some((elements, groups)) => {
-                        let handles = (store.get(key), store.get(elements), store.get(groups));
-                        if let (Some(rows), Some(elements), Some(groups), Some(summary)) =
-                            (handles.0, handles.1, handles.2, &summary)
-                            && let (Some(rows_page), Some(page)) = (gpu.page(rows.page), gpu.page(elements.page))
-                        {
-                            // Offsets which are empty may live in no page,
-                            // nothing reads them then.
-                            let groups_page = gpu.page(groups.page).unwrap_or(rows_page);
-                            let instanced = Instanced {
-                                rows: (rows_page, rows),
-                                groups: (groups_page, groups),
-                                spheres: &summary.spheres,
-                                elements: summary.elements,
-                                slots: summary.slots,
-                                // Smaller than a pixel across is too small
-                                // to see.
-                                min_pixels: 1.0,
-                            };
-                            pipeline.stage.prepare_instances_view(
-                                0, device, queue, size, &drawable, page, elements, instanced, &view,
-                            );
-                            pipeline.drawing = Drawing::Value;
-                        }
+                    // What was counted arrives a few frames later, for every
+                    // surface which is drawn.
+                    if drawable.topology == Topology::Surface {
+                        counted = counted.zip(pipeline.stage.triangles(device, index)).map(|(a, b)| a + b);
                     }
                 }
 
@@ -349,12 +360,10 @@ impl Primitive for Shot {
                     false => "vertex shaders",
                 });
 
-                // What was counted arrives a few frames later, and the
-                // budget adjusts the detail a little every time.
-                session.triangles = pipeline.stage.triangles(device, 0);
-                if let (Detail::Triangles(_), Some(triangles)) = (self.detail, session.triangles)
-                    && drawable.topology == Topology::Surface
-                {
+                // The budget adjusts the detail a little every time.
+                let surfaces = drawn.iter().any(|drawn| drawn.drawable.topology == Topology::Surface);
+                session.triangles = counted.filter(|_| surfaces);
+                if let (Detail::Triangles(_), Some(triangles)) = (self.detail, session.triangles) {
                     pipeline.budget.update(triangles);
                     if !pipeline.budget.settled(triangles) {
                         session.settling = session.settling.max(SETTLE_FRAMES / 3);
@@ -389,7 +398,7 @@ impl Primitive for Shot {
     ) {
         match pipeline.drawing {
             Drawing::Nothing => {}
-            Drawing::Value => pipeline.stage.render(encoder, target, Some(pipeline.bounds)),
+            Drawing::Value => pipeline.stage.render_all(encoder, target, Some(pipeline.bounds)),
             Drawing::Mesh => pipeline.mesh.render(encoder, target, Some(pipeline.bounds)),
         }
     }

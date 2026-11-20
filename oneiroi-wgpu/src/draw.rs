@@ -1083,13 +1083,66 @@ impl DrawStage {
             return;
         }
 
-        pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &prepared.bind_group, &[]);
-        match &prepared.draw {
-            Draw::Vertices { vertices, instances } => pass.draw(0..*vertices, 0..*instances),
-            Draw::Tasks { groups } => pass.draw_mesh_tasks(groups.0, groups.1, 1),
-            Draw::Indirect { buffer, tasks: true } => pass.draw_mesh_tasks_indirect(buffer, CULL_TASKS * 4),
-            Draw::Indirect { buffer, tasks: false } => pass.draw_indirect(buffer, CULL_DRAW * 4),
+        draw(&mut pass, pipeline, prepared);
+    }
+
+    /// Draws what was prepared for every view into `bounds` of `target`,
+    /// in one pass with the depth of the first view: values seen from the
+    /// same camera, which hide each other where they should.
+    pub fn render_all(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bounds: Option<(f32, f32, f32, f32)>,
+    ) {
+        let Some(first) = self.views.first() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Oneiroi Draw All Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &first.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if !restrict(&mut pass, &first.depth, bounds) {
+            return;
         }
+        for view in &self.views {
+            let Some(prepared) = &view.prepared else {
+                continue;
+            };
+            if let Some(Some(pipeline)) = self.pipelines.get(&prepared.key) {
+                draw(&mut pass, pipeline, prepared);
+            }
+        }
+    }
+}
+
+/// Draws what was prepared for a view into a pass which is begun already.
+fn draw(pass: &mut wgpu::RenderPass<'_>, pipeline: &Pipeline, prepared: &Prepared) {
+    pass.set_pipeline(&pipeline.pipeline);
+    pass.set_bind_group(0, &prepared.bind_group, &[]);
+    match &prepared.draw {
+        Draw::Vertices { vertices, instances } => pass.draw(0..*vertices, 0..*instances),
+        Draw::Tasks { groups } => pass.draw_mesh_tasks(groups.0, groups.1, 1),
+        Draw::Indirect { buffer, tasks: true } => pass.draw_mesh_tasks_indirect(buffer, CULL_TASKS * 4),
+        Draw::Indirect { buffer, tasks: false } => pass.draw_indirect(buffer, CULL_DRAW * 4),
     }
 }

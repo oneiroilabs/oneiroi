@@ -74,6 +74,34 @@ pub struct PortView {
     pub choices: Vec<String>,
 }
 
+/// The pin of an input or output node which makes a new parameter or
+/// output of what is linked to it.
+pub const NEW_PORT: &str = "+";
+
+/// A port called like `name`, with a number behind it if `taken` says that
+/// one is taken already.
+fn unique(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    (1..)
+        .map(|number| match number {
+            1 => name.to_string(),
+            _ => format!("{name} {number}"),
+        })
+        .find(|name| !taken(name))
+        .unwrap()
+}
+
+fn new_port() -> PortView {
+    PortView {
+        name: NEW_PORT.into(),
+        label: String::new(),
+        doc: String::new(),
+        ty: PinType::Unknown,
+        card: Card::Many,
+        default: Vec::new(),
+        choices: Vec::new(),
+    }
+}
+
 /// Which side of a node a port is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -93,18 +121,29 @@ pub struct NodeView {
     pub known: bool,
 }
 
-/// What the preview shows of the displayed node.
+/// A value the GPU draws as it is, without a mesh in between. For
+/// instances, `key` is their rows and `shape` the elements and offsets of
+/// the shape they refer to.
 #[derive(Debug, Clone, Copy)]
+pub struct Drawn {
+    pub key: ContentKey,
+    pub drawable: Drawable,
+    pub shape: Option<(ContentKey, ContentKey)>,
+}
+
+impl PartialEq for Drawn {
+    fn eq(&self, other: &Self) -> bool {
+        (self.key, self.drawable.ty, self.shape) == (other.key, other.drawable.ty, other.shape)
+    }
+}
+
+/// What the preview shows of the displayed node.
+#[derive(Debug, Clone)]
 pub enum Shown {
     Nothing,
-    /// A value the GPU draws as it is, without a mesh in between. For
-    /// instances, `key` is their rows and `shape` the elements and offsets
-    /// of the shape they refer to.
-    Drawn {
-        key: ContentKey,
-        drawable: Drawable,
-        shape: Option<(ContentKey, ContentKey)>,
-    },
+    /// Values drawn as they are, all together: every output of the node
+    /// which can be.
+    Drawn(Vec<Drawn>),
     /// A triangle mesh somebody made on purpose.
     Mesh {
         positions: ContentKey,
@@ -117,10 +156,7 @@ impl PartialEq for Shown {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Nothing, Self::Nothing) => true,
-            (
-                Self::Drawn { key: a, drawable: x, shape: c },
-                Self::Drawn { key: b, drawable: y, shape: z },
-            ) => a == b && x.ty == y.ty && c == z,
+            (Self::Drawn(a), Self::Drawn(b)) => a == b,
             (
                 Self::Mesh { positions: a, indices: b, normals: c },
                 Self::Mesh { positions: x, indices: y, normals: z },
@@ -165,8 +201,8 @@ pub struct Session {
     pub settling: u32,
     /// The graphs which ran for fewer elements than they were given.
     overflows: Vec<Overflow>,
-    /// The shape of the instances which are shown.
-    summary: Option<ShapeSummary>,
+    /// The shapes of the instances which are shown.
+    summaries: Vec<ShapeSummary>,
 }
 
 /// What drawing instances needs to know of the shape they refer to, see
@@ -197,7 +233,7 @@ impl Session {
             triangles: None,
             settling: 0,
             overflows: Vec::new(),
-            summary: None,
+            summaries: Vec::new(),
         }
     }
 
@@ -206,7 +242,7 @@ impl Session {
     }
 
     pub fn shown(&self) -> Shown {
-        self.shown
+        self.shown.clone()
     }
 
     /// Different whenever something else is shown.
@@ -216,6 +252,10 @@ impl Session {
 
     fn show(&mut self, shown: Shown) {
         if self.shown != shown {
+            // What is known of shapes which are not shown anymore is of no use.
+            if let Shown::Drawn(drawn) = &shown {
+                self.summaries.retain(|summary| drawn.iter().any(|drawn| drawn.shape == Some(summary.key)));
+            }
             self.shown = shown;
             self.generation += 1;
         }
@@ -243,7 +283,7 @@ impl Session {
 
     /// The mesh which is shown, brought over from the GPU if need be.
     pub fn mesh(&mut self) -> Option<PreviewMesh> {
-        let Shown::Mesh { positions, indices, normals } = self.shown else {
+        let Shown::Mesh { positions, indices, normals } = self.shown.clone() else {
             return None;
         };
         self.run();
@@ -265,7 +305,7 @@ impl Session {
     /// summary kept while it stays the same.
     pub fn shape_summary(&mut self, drawable: &Drawable, elements: ContentKey, groups: ContentKey) -> Option<&ShapeSummary> {
         let key = (elements, groups);
-        if self.summary.as_ref().is_none_or(|summary| summary.key != key) {
+        if !self.summaries.iter().any(|summary| summary.key == key) {
             let shape = drawable.ty.prototype?;
             let words = self.engine.fetch_key::<u32>(elements)?.to_vec();
             let offsets = self.engine.fetch_key::<u32>(groups)?.to_vec();
@@ -285,14 +325,14 @@ impl Session {
                     None => [0.0, 0.0, 0.0, -1.0],
                 })
                 .collect();
-            self.summary = Some(ShapeSummary {
+            self.summaries.push(ShapeSummary {
                 key,
                 spheres,
                 elements: len as u32,
                 slots: ranges.iter().map(|range| range.len() as u32).max().unwrap_or(0),
             });
         }
-        self.summary.as_ref()
+        self.summaries.iter().find(|summary| summary.key == key)
     }
 
     /// A sphere around all instances: the one around each group of the
@@ -325,14 +365,24 @@ impl Session {
     /// Center and radius of a sphere around what is shown.
     pub fn bounds(&mut self) -> Option<(Vec3, f32)> {
         self.run();
-        match self.shown {
+        match self.shown.clone() {
             Shown::Nothing => None,
-            Shown::Drawn { key, drawable, shape: None } => {
-                let (center, radius) = (drawable.bounds)(self.engine.fetch_key::<u32>(key)?)?;
-                Some((center.into(), radius))
-            }
-            Shown::Drawn { key, drawable, shape: Some((elements, groups)) } => {
-                self.instances_bounds(key, &drawable, elements, groups)
+            Shown::Drawn(drawn) => {
+                // A sphere around the spheres around each of them.
+                let spheres: Vec<_> = drawn
+                    .iter()
+                    .filter_map(|drawn| match drawn.shape {
+                        None => {
+                            let (center, radius) = (drawn.drawable.bounds)(self.engine.fetch_key::<u32>(drawn.key)?)?;
+                            Some((Vec3::from(center), radius))
+                        }
+                        Some((elements, groups)) => self.instances_bounds(drawn.key, &drawn.drawable, elements, groups),
+                    })
+                    .collect();
+                let (min, max) = spheres.iter().fold((Vec3::MAX, Vec3::MIN), |(min, max), (center, radius)| {
+                    (min.min(center - radius), max.max(center + radius))
+                });
+                (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
             }
             Shown::Mesh { positions, .. } => {
                 let positions = self.engine.fetch_key::<Vec3>(positions)?;
@@ -493,9 +543,15 @@ impl Document {
             graph.connect(circle, "circle", sweep, "profile"),
         ];
         debug_assert!(edits.iter().all(Result::is_ok));
-        Self::place(&mut graph, &[(curve, [40., 40.]), (circle, [40., 220.]), (sweep, [300., 110.])]);
-        // The surface is drawn as it is, it never has to become a mesh.
-        graph.display = Some(sweep);
+        let output = graph.add_node(NodeKind::Output);
+        let shown = graph.connect(sweep, "surface", output, "surface");
+        debug_assert!(shown.is_ok());
+        Self::place(
+            &mut graph,
+            &[(curve, [40., 40.]), (circle, [40., 220.]), (sweep, [300., 110.]), (output, [560., 110.])],
+        );
+        // The surface is drawn as it is, it never has to become a mesh. The
+        // output node shows it.
         graph
     }
 
@@ -526,6 +582,9 @@ impl Document {
             graph.connect(torus, "surface", instances, "shape"),
         ];
         debug_assert!(edits.iter().all(Result::is_ok));
+        let output = graph.add_node(NodeKind::Output);
+        let shown = graph.connect(instances, "instances", output, "rings");
+        debug_assert!(shown.is_ok());
         Self::place(
             &mut graph,
             &[
@@ -535,9 +594,9 @@ impl Document {
                 (thin, [40., 400.]),
                 (torus, [300., 260.]),
                 (instances, [560., 140.]),
+                (output, [820., 140.]),
             ],
         );
-        graph.display = Some(instances);
         graph
     }
 
@@ -581,7 +640,12 @@ impl Document {
             })
             .find(|name| self.library.get(name).is_none())
             .unwrap();
-        self.library.insert(Graph::new(name.clone()));
+        // What it takes and what it gives, to link to.
+        let mut graph = Graph::new(name.clone());
+        let input = graph.add_node(NodeKind::Input);
+        let output = graph.add_node(NodeKind::Output);
+        Self::place(&mut graph, &[(input, [40., 120.]), (output, [600., 120.])]);
+        self.library.insert(graph);
         self.open(&name);
         name
     }
@@ -605,6 +669,11 @@ impl Document {
             })
             .collect();
         nodes.sort_by(|a, b| (&a.category, &a.label).cmp(&(&b.category, &b.label)));
+        let ends = [("Input", NodeKind::Input), ("Output", NodeKind::Output)].map(|(label, kind)| PaletteEntry {
+            label: label.into(),
+            category: "Graph".into(),
+            kind,
+        });
         let graphs = self
             .library
             .iter()
@@ -614,7 +683,7 @@ impl Document {
                 category: "Graph".into(),
                 kind: NodeKind::Graph(graph.name.clone()),
             });
-        nodes.into_iter().chain(graphs).collect()
+        nodes.into_iter().chain(ends).chain(graphs).collect()
     }
 
     /// The hue of what a pin carries: of its type, or of the types which
@@ -683,6 +752,13 @@ impl Document {
         let Some(node) = graph.node(id) else {
             return (label_of(port), String::new());
         };
+        if port == NEW_PORT && matches!(node.kind, NodeKind::Input | NodeKind::Output) {
+            let doc = match node.kind {
+                NodeKind::Input => "Link to an input to make it a new parameter of the graph.",
+                _ => "Link an output to it to make it a new output of the graph.",
+            };
+            return (NEW_PORT.into(), doc.into());
+        }
         let notes = match side {
             Side::Input => &node.meta.inputs,
             Side::Output => &node.meta.outputs,
@@ -802,7 +878,13 @@ impl Document {
         // its outputs the inputs of the output node.
         match node.kind {
             NodeKind::Input => {
-                let outputs = self.graph().params().iter().map(|param| self.param_view(param)).collect();
+                let outputs = self
+                    .graph()
+                    .params()
+                    .iter()
+                    .map(|param| self.param_view(param))
+                    .chain([new_port()])
+                    .collect();
                 return Some(NodeView {
                     title: custom.unwrap_or_else(|| name.into()),
                     doc: String::new(),
@@ -826,6 +908,7 @@ impl Document {
                         default: Vec::new(),
                         choices: Vec::new(),
                     })
+                    .chain([new_port()])
                     .collect();
                 return Some(NodeView {
                     title: custom.unwrap_or_else(|| name.into()),
@@ -988,7 +1071,8 @@ impl Document {
         let graph = self.graph_mut();
         let node = graph.add_node(kind);
         graph.node_mut(node).unwrap().meta.position = position;
-        if graph.display.is_none() {
+        // Without an output node, a graph shows what was added first.
+        if graph.display.is_none() && graph.output_node().is_none() {
             graph.display = Some(node);
         }
         self.refresh();
@@ -1047,10 +1131,47 @@ impl Document {
         self.graph_mut().about = about;
     }
 
-    /// Returns whether the link was made.
+    /// Returns whether the link was made. A link to the [new port](NEW_PORT)
+    /// of the output node makes a new output of the graph, named after what
+    /// is linked. One from that of an input node makes a new parameter, of
+    /// the type of the input it goes to, which starts at what that input had.
     pub fn connect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
-        let connected = self.accepts(from, output, to, input)
-            && self.graph_mut().connect(from, output, to, input).is_ok();
+        if !self.accepts(from, output, to, input) {
+            return false;
+        }
+        let kind = |node: NodeId| self.graph().node(node).map(|node| node.kind.clone());
+        let (from_kind, to_kind) = (kind(from), kind(to));
+        let (output, input) = (output.to_string(), input.to_string());
+        let (output, input) = match (from_kind, to_kind) {
+            (_, Some(NodeKind::Output)) if input == NEW_PORT => {
+                let graph = self.graph();
+                let name = unique(&output, |name| graph.outputs().iter().any(|o| o.name == name));
+                (output, name)
+            }
+            (Some(NodeKind::Input), _) if output == NEW_PORT => {
+                let Some(port) = self.view(to).and_then(|view| view.inputs.into_iter().find(|p| p.name == input))
+                else {
+                    return false;
+                };
+                let graph = self.graph_mut();
+                let name = unique(&input, |name| graph.param(name).is_some());
+                let (ty, card) = match port.ty {
+                    PinType::Exact(ty) => (Some(ty.name.to_string()), Some(port.card)),
+                    _ => (None, None),
+                };
+                let default = match graph.input_of(to, &input) {
+                    Some(Input::Value(value)) => Some(value.clone()),
+                    _ => None,
+                };
+                let param = GraphParam { ty, card, default, ..GraphParam::new(name.clone()) };
+                if graph.add_param(param).is_err() {
+                    return false;
+                }
+                (name, input)
+            }
+            _ => (output, input),
+        };
+        let connected = self.graph_mut().connect(from, &output, to, &input).is_ok();
         if connected {
             self.refresh();
         }
@@ -1059,10 +1180,70 @@ impl Document {
 
     /// Removes the link into `input` of `to` if it comes from `from`.
     pub fn disconnect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) {
+        if self.graph().output_node() == Some(to) {
+            let linked = self.graph().outputs().iter().any(|o| o.name == input && o.node == from && o.output == output);
+            if linked {
+                self.reset(to, input);
+            }
+            return;
+        }
         let linked = self.graph().node(to).and_then(|node| node.inputs.get(input));
         if matches!(linked, Some(Input::Link { node, output: o, .. }) if *node == from && o == output) {
             self.reset(to, input);
         }
+    }
+
+    /// The node the preview shows: the one picked, or else the output node.
+    pub fn displayed(&self) -> Option<NodeId> {
+        self.graph().display.or(self.graph().output_node())
+    }
+
+    /// Gives a parameter of the open graph another name. Returns whether
+    /// it could have it.
+    pub fn rename_param(&mut self, name: &str, to: &str) -> bool {
+        let renamed = !to.trim().is_empty() && self.graph_mut().rename_param(name, to.trim()).is_ok();
+        if renamed {
+            self.refresh();
+        }
+        renamed
+    }
+
+    /// Moves a parameter up (`-1`) or down (`1`) among them.
+    pub fn move_param(&mut self, name: &str, by: isize) {
+        let Some(at) = self.graph().params().iter().position(|param| param.name == name) else {
+            return;
+        };
+        let _ = self.graph_mut().move_param(name, at.saturating_add_signed(by));
+        self.refresh();
+    }
+
+    pub fn remove_param(&mut self, name: &str) {
+        self.graph_mut().remove_param(name);
+        self.refresh();
+    }
+
+    /// Gives an output of the open graph another name. Returns whether it
+    /// could have it.
+    pub fn rename_output(&mut self, name: &str, to: &str) -> bool {
+        let renamed = !to.trim().is_empty() && self.graph_mut().rename_output(name, to.trim()).is_ok();
+        if renamed {
+            self.refresh();
+        }
+        renamed
+    }
+
+    /// Moves an output up (`-1`) or down (`1`) among them.
+    pub fn move_output(&mut self, name: &str, by: isize) {
+        let Some(at) = self.graph().outputs().iter().position(|output| output.name == name) else {
+            return;
+        };
+        self.graph_mut().move_output(name, at.saturating_add_signed(by));
+        self.refresh();
+    }
+
+    pub fn remove_output(&mut self, name: &str) {
+        self.graph_mut().remove_output(name);
+        self.refresh();
     }
 
     /// Puts an input back to its default.
@@ -1222,7 +1403,7 @@ impl Document {
         // What the preview can not draw goes through a conversion into
         // something it can, if there is one.
         let drawable = |ty: &TypeInfo| self.registry.drawable(ty).is_some();
-        let lowered = graph.display.map(|display| {
+        let lowered = graph.display.or(graph.output_node()).map(|display| {
             graph.lower_preview(
                 Context {
                     registry: &self.registry,
@@ -1270,12 +1451,17 @@ impl Document {
                 .then(|| session.engine.output_key(&instance, name))
                 .flatten()
         };
-        let drawn = program.outputs.iter().find_map(|output| {
-            let drawable = *self.registry.drawable(&program.slot(output.slot).ty)?;
-            let key = session.engine.output_key(&instance, &output.name)?;
-            let shape = session.engine.prototype_keys(&instance, &output.name);
-            Some(Shown::Drawn { key, drawable, shape })
-        });
+        let drawn: Vec<_> = program
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let drawable = *self.registry.drawable(&program.slot(output.slot).ty)?;
+                let key = session.engine.output_key(&instance, &output.name)?;
+                let shape = session.engine.prototype_keys(&instance, &output.name);
+                Some(Drawn { key, drawable, shape })
+            })
+            .collect();
+        let drawn = (!drawn.is_empty()).then_some(Shown::Drawn(drawn));
         let mesh = || {
             Some(Shown::Mesh {
                 positions: output("positions", Vec3::INFO)?,
@@ -1346,13 +1532,17 @@ impl Document {
             }
             return error.to_string();
         }
-        match (self.shown(), self.graph().display) {
-            (Shown::Drawn { drawable, .. }, _) => {
-                let with = match (drawable.topology, drawn_with) {
-                    (Topology::Surface, Some(with)) => format!(" with {with}"),
+        match (self.shown(), self.displayed()) {
+            (Shown::Drawn(drawn), _) => {
+                let surfaces = drawn.iter().any(|drawn| drawn.drawable.topology == Topology::Surface);
+                let with = match (surfaces, drawn_with) {
+                    (true, Some(with)) => format!(" with {with}"),
                     _ => String::new(),
                 };
-                format!("`{}` drawn as it is{with}, {ran} nodes ran", drawable.ty.name)
+                match drawn.as_slice() {
+                    [one] => format!("`{}` drawn as it is{with}, {ran} nodes ran", one.drawable.ty.name),
+                    all => format!("{} values drawn as they are{with}, {ran} nodes ran", all.len()),
+                }
             }
             (Shown::Mesh { .. }, _) => format!("a mesh, {ran} nodes ran"),
             (Shown::Nothing, Some(_)) => "the displayed node has nothing to show".into(),
@@ -1449,6 +1639,13 @@ impl Document {
                     .find(|name| graph.outputs().iter().all(|declared| declared.name != *name))
                     .unwrap();
                 let _ = graph.add_output(&name, node, output);
+                // The outputs are what is linked to the output node.
+                if graph.output_node().is_none() {
+                    let right = graph.nodes().map(|(_, node)| node.meta.position[0]).fold(0.0, f32::max);
+                    let top = graph.node(node).map_or(0.0, |node| node.meta.position[1]);
+                    let added = graph.add_node(NodeKind::Output);
+                    graph.node_mut(added).unwrap().meta.position = [right + 260.0, top];
+                }
             }
         }
         self.refresh();
@@ -1504,14 +1701,16 @@ mod tests {
     #[test]
     fn the_example_shows_its_surface() {
         let document = Document::example();
-        let [_, _, sweep] = nodes(&document);
-        assert_eq!(document.graph().display, Some(sweep));
+        // Nothing is picked, so the output node shows the surface.
+        assert_eq!(document.graph().display, None);
+        assert_eq!(document.displayed(), document.graph().output_node());
 
         // The sweep is drawn as it is: only the curve, the circle and the
         // sweep run, and nobody makes a mesh.
-        let Shown::Drawn { key, drawable, .. } = document.shown() else {
+        let Shown::Drawn(drawn) = document.shown() else {
             panic!("a surface can be drawn");
         };
+        let Drawn { key, drawable, .. } = drawn[0];
         assert_eq!(drawable.ty.name, "tube_patch");
         assert_eq!(document.status(), "`tube_patch` drawn as it is, 3 nodes ran");
         assert!(document.mesh().is_none() && document.error().is_none());
@@ -1577,9 +1776,9 @@ mod tests {
         for step in 1..20 {
             assert!(document.set_input(mesh, "tolerance", &(step as f32 * 0.01).to_string()));
         }
-        // The one of the graph itself and the one of its preview.
+        // The one of each of the two graphs and the one of the preview.
         let session = document.session();
-        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 2);
+        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 3);
     }
 
     #[test]
@@ -1604,7 +1803,7 @@ mod tests {
         assert_eq!(document.error().unwrap().node, Some(sweep));
 
         assert!(document.connect(circle, "circle", sweep, "profile"));
-        assert!(matches!(document.shown(), Shown::Drawn { .. }) && document.error().is_none());
+        assert!(matches!(document.shown(), Shown::Drawn(_)) && document.error().is_none());
     }
 
     #[test]
@@ -1621,7 +1820,7 @@ mod tests {
             "`cubic_nurbs_segment` drawn as it is, 1 nodes ran"
         );
         document.set_display(Some(circle));
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
         assert!(document.session().lock().unwrap().bounds().unwrap().1 > 0.2);
 
         // Frames are neither a line nor a surface nor a mesh.
@@ -1634,11 +1833,13 @@ mod tests {
         document.set_display(Some(mesh));
         assert!(matches!(document.shown(), Shown::Mesh { .. }));
         document.set_display(Some(sweep));
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
 
+        // Without it the output node is shown again, which has nothing.
         document.remove_nodes(&[sweep]);
         assert_eq!(document.graph().display, None);
-        assert_eq!(document.status(), "no node is displayed");
+        assert_eq!(document.displayed(), document.graph().output_node());
+        assert_eq!(document.status(), "the displayed node has nothing to show");
     }
 
     #[test]
@@ -1680,6 +1881,8 @@ mod tests {
                 "Instance / Transform",
                 "Value / Numbers",
                 "Value / Vectors",
+                "Graph / Input",
+                "Graph / Output",
                 "Graph / instances"
             ]
         );
@@ -1823,7 +2026,7 @@ mod tests {
 
         // Its circle is a profile, and a thicker one than before.
         assert!(document.connect(used, "circle", sweep, "profile"));
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
         let thick = radius(&document);
         assert!(thick > thin + 0.2, "{thick} {thin}");
         assert!(document.set_input(used, "radius", "0.25"));
@@ -1889,9 +2092,10 @@ mod tests {
         assert_eq!(document.input_text(tubes, "radius").unwrap().0, "each element");
 
         document.set_display(Some(tubes));
-        let Shown::Drawn { key, drawable, .. } = document.shown() else {
+        let Shown::Drawn(drawn) = document.shown() else {
             panic!("the tubes are a surface");
         };
+        let Drawn { key, drawable, .. } = drawn[0];
         assert_eq!(drawable.ty.name, "tube_patch");
         // The numbers, the curve once, and a circle and a sweep for each.
         assert_eq!(document.status(), "`tube_patch` drawn as it is, 8 nodes ran");
@@ -1925,7 +2129,7 @@ mod tests {
 
         // Everything else keeps working.
         document.set_display(Some(sweep));
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
     }
 
     #[test]
@@ -1933,7 +2137,7 @@ mod tests {
         let mut document = Document::example();
         let [_, circle, sweep] = nodes(&document);
 
-        document.toggle_output(sweep, "surface");
+        // The surface is an output of the example already.
         document.toggle_output(circle, "circle");
         let names: Vec<_> = document.graph().outputs().iter().map(|o| o.name.clone()).collect();
         assert_eq!(names, ["surface", "circle"]);
@@ -1959,10 +2163,10 @@ mod tests {
     fn the_examples_run() {
         let mut document = Document::example();
         assert_eq!(document.graphs(), ["instances", "tube"]);
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
         assert!(document.open("instances"));
         assert!(document.error().is_none(), "{:?}", document.error());
-        assert!(matches!(document.shown(), Shown::Drawn { .. }));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
     }
 
     #[test]
@@ -2040,9 +2244,10 @@ mod tests {
         document.registry.register_instance(&AS_CIRCLES, &F32_AS_CIRCLES);
         document.registry.add_conversion(&AS_CIRCLES);
         document.set_display(Some(value));
-        let Shown::Drawn { drawable, .. } = document.shown() else {
+        let Shown::Drawn(drawn) = document.shown() else {
             panic!("the numbers are not drawn as circles");
         };
+        let Drawn { drawable, .. } = drawn[0];
         assert_eq!(drawable.ty, Circle::INFO);
         // A link into a port which takes circles goes through it as well.
         let [_, circle, sweep] = nodes(&document);
@@ -2055,11 +2260,69 @@ mod tests {
         let mut document = Document::example();
         let rectangle = document.add_node("curve.rectangle", [0.0, 0.0]);
         document.set_display(Some(rectangle));
-        let Shown::Drawn { drawable, .. } = document.shown() else {
+        let Shown::Drawn(drawn) = document.shown() else {
             panic!("the rectangle is not drawn");
         };
+        let Drawn { drawable, .. } = drawn[0];
         assert_eq!(drawable.ty.name, "cubic_nurbs_segment");
         assert!(document.error().is_none());
+    }
+
+    #[test]
+    fn the_new_ports_make_parameters_and_outputs() {
+        let mut document = Document::example();
+        let [_, circle, sweep] = nodes(&document);
+        let output = document.graph().output_node().unwrap();
+        let input = document.add(NodeKind::Input, [0.0, 0.0]);
+        assert!(document.view(input).unwrap().outputs.iter().any(|port| port.name == NEW_PORT));
+
+        // The circle becomes a second output, next to the surface: the output
+        // node shows both, each drawn as it is.
+        assert!(document.connect(circle, "circle", output, NEW_PORT));
+        let names: Vec<_> = document.graph().outputs().iter().map(|o| o.name.clone()).collect();
+        assert_eq!(names, ["surface", "circle"]);
+        let Shown::Drawn(drawn) = document.shown() else {
+            panic!("the outputs are not drawn");
+        };
+        let types: Vec<_> = drawn.iter().map(|drawn| drawn.drawable.ty.name).collect();
+        assert_eq!(types, ["tube_patch", "circle"]);
+        assert!(document.status().starts_with("2 values drawn as they are"));
+        // Named after the output, with a number when that is taken.
+        assert!(document.connect(sweep, "surface", output, NEW_PORT));
+        assert_eq!(document.graph().outputs()[2].name, "surface 2");
+
+        // The radius becomes a parameter of its type, which starts at the
+        // radius the circle had.
+        assert!(document.connect(input, NEW_PORT, circle, "radius"));
+        let param = document.graph().param("radius").unwrap();
+        assert_eq!((param.ty.as_deref(), param.card), (Some("f32"), Some(Card::Many)));
+        assert_eq!(document.param_text("radius").as_deref(), Some("0.25"));
+        assert!(document.is_exposed(circle, "radius"));
+        assert!(document.set_param("radius", "0.5"));
+        assert!(!document.set_param("radius", "nope"));
+
+        assert!(document.rename_param("radius", "size"));
+        assert!(!document.rename_param("size", " "));
+        assert_eq!(document.graph().exposed_as(circle, "radius"), Some("size"));
+        assert!(document.rename_output("surface 2", "again"));
+        document.move_output("again", -1);
+        let names: Vec<_> = document.graph().outputs().iter().map(|o| o.name.clone()).collect();
+        assert_eq!(names, ["surface", "again", "circle"]);
+        document.remove_output("again");
+        document.remove_param("size");
+        assert!(!document.is_exposed(circle, "radius"));
+        // Taking an output back is cutting its link.
+        document.disconnect(circle, "circle", output, "circle");
+        assert_eq!(document.graph().outputs().len(), 1);
+    }
+
+    #[test]
+    fn a_new_graph_has_an_input_and_an_output() {
+        let mut document = Document::example();
+        document.new_graph();
+        assert!(document.graph().input_node().is_some() && document.graph().output_node().is_some());
+        assert_eq!(document.displayed(), document.graph().output_node());
+        assert_eq!(document.shown(), Shown::Nothing);
     }
 
     #[test]

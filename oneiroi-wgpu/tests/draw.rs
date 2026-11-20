@@ -906,3 +906,43 @@ fn instances_out_of_view_are_left_out() {
         assert_eq!(covered(&tiny), 0, "{name}");
     }
 }
+
+#[test]
+fn values_drawn_together_hide_each_other() {
+    let Some(mut scene) = scene(true) else {
+        return;
+    };
+    for (name, mut stage) in stages(&scene) {
+        let view = scene.view(8, 8);
+        let surface = scene.drawn(&mut stage, view);
+        let spine = scene.output(&mut stage, "spine", DrawView { color: Vec3::new(1.0, 0.0, 0.0), ..view });
+        assert!(different(&spine, &surface) > 100, "{name}: the curve alone is to be seen");
+
+        // The curve runs inside the tube, so the tube hides it: both in one
+        // pass, with one depth.
+        let program = scene.engine.programs().get(scene.instance.program());
+        let drawables: Vec<_> = ["surface", "spine"]
+            .iter()
+            .map(|output| {
+                let output = &program.outputs[program.output_index(output).unwrap()];
+                *scene.registry.drawable(&program.slot(output.slot).ty).unwrap()
+            })
+            .collect();
+        let keys = ["surface", "spine"].map(|output| scene.engine.output_key(&scene.instance, output).unwrap());
+        let (store, executor) = scene.engine.parts_mut();
+        executor.sync(store);
+        stage.clear();
+        for (index, (key, drawable)) in keys.iter().zip(&drawables).enumerate() {
+            let handle = store.get(*key).unwrap();
+            let page = executor.page(handle.page).unwrap();
+            let view = match index {
+                0 => view,
+                _ => DrawView { color: Vec3::new(1.0, 0.0, 0.0), ..view },
+            };
+            stage.prepare_view(index, &scene.device, &scene.queue, (SIZE, SIZE), drawable, page, handle, &view);
+        }
+        let together = picture(&scene.device, &scene.queue, |encoder, target| stage.render_all(encoder, target, None));
+        // Only where the tube is open at its ends can the curve be seen.
+        assert!(different(&together, &surface) < covered(&surface) / 50, "{name}");
+    }
+}

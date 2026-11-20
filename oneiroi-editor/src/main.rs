@@ -14,7 +14,7 @@ use oneiroi_editor::document::{Document, PaletteEntry, Side};
 use oneiroi_editor::look::{self, PinLook};
 use oneiroi_graph::Note;
 use oneiroi_editor::preview::{Detail, Preview};
-use oneiroi_graph::{Input, NodeId};
+use oneiroi_graph::{Input, NodeId, NodeKind};
 
 /// How finely the preview draws surfaces, from fine to coarse, and last
 /// as fine as a budget of triangles allows.
@@ -73,6 +73,17 @@ enum Message {
     NoteDoc(u32, Side, String, String),
     /// What the open graph says about itself.
     GraphDoc(String),
+    /// A new name typed for a parameter or an output of the graph, by the
+    /// input or output node it is a port of.
+    PortName(u32, String, String),
+    /// The new name is done.
+    PortRenamed(u32, String),
+    /// A parameter or an output moves up or down among them.
+    PortMoved(u32, String, isize),
+    PortRemoved(u32, String),
+    /// What a parameter starts at, typed in.
+    ParamDefault(u32, String, String),
+    ParamDefaultCommitted(u32, String),
     /// A link in documentation was clicked, which leads nowhere yet.
     Link,
 }
@@ -318,8 +329,45 @@ impl Editor {
                 about.doc = Some(doc).filter(|doc| !doc.trim().is_empty());
                 self.document.set_about(about);
             }
+            Message::PortName(node, port, name) => {
+                self.edits.insert((node.into(), format!("name:{port}")), name);
+            }
+            Message::PortRenamed(node, port) => {
+                let node = NodeId::from(node);
+                if let Some(name) = self.edits.remove(&(node, format!("name:{port}"))) {
+                    let renamed = match self.kind(node) {
+                        Some(NodeKind::Input) => self.document.rename_param(&port, &name),
+                        _ => self.document.rename_output(&port, &name),
+                    };
+                    if !renamed {
+                        self.note = Some(format!("`{name}` is taken or no name"));
+                    }
+                }
+            }
+            Message::PortMoved(node, port, by) => match self.kind(node.into()) {
+                Some(NodeKind::Input) => self.document.move_param(&port, by),
+                _ => self.document.move_output(&port, by),
+            },
+            Message::PortRemoved(node, port) => match self.kind(node.into()) {
+                Some(NodeKind::Input) => self.document.remove_param(&port),
+                _ => self.document.remove_output(&port),
+            },
+            Message::ParamDefault(node, param, text) => {
+                self.edits.insert((node.into(), format!("default:{param}")), text);
+            }
+            Message::ParamDefaultCommitted(node, param) => {
+                if let Some(text) = self.edits.remove(&(node.into(), format!("default:{param}")))
+                    && !self.document.set_param(&param, &text)
+                {
+                    self.note = Some(format!("`{text}` is not a value for `{param}`"));
+                }
+            }
             Message::Link => {}
         }
+    }
+
+    fn kind(&self, node: NodeId) -> Option<NodeKind> {
+        self.document.graph().node(node).map(|node| node.kind.clone())
     }
 
     /// Another graph is on the screen: nothing of the old one applies.
@@ -427,7 +475,7 @@ impl Editor {
             let Some(view) = document.view(id) else {
                 continue;
             };
-            let displayed = document.graph().display == Some(id);
+            let displayed = document.displayed() == Some(id);
             let broken = !view.known || document.error().is_some_and(|e| e.node == Some(id));
 
             let header = node_header(
@@ -531,6 +579,16 @@ impl Editor {
                 }
             }
         }
+        // The outputs of the graph are what is linked to its output node.
+        if let Some(output_node) = document.graph().output_node() {
+            for output in document.graph().outputs() {
+                graph.push_edge(edge!(
+                    PinRef::new(output.node.raw(), output_pin(&output.output)),
+                    PinRef::new(output_node.raw(), input_pin(&output.name)),
+                    format!("{}:{}", output_node.raw(), output.name),
+                ));
+            }
+        }
 
         container(graph).width(Fill).height(Fill).into()
     }
@@ -565,6 +623,9 @@ impl Editor {
             tooltip::Position::Bottom,
         );
         let mut rows = column![row![title, space::horizontal(), notes].align_y(Center)].spacing(6);
+        if let Some(kind @ (NodeKind::Input | NodeKind::Output)) = self.kind(node) {
+            return container(scrollable(self.ports_of_graph(node, &kind, rows))).height(260).into();
+        }
         for port in &view.inputs {
             let key = (node, port.name.clone());
             let (stored, editable) = self
@@ -640,6 +701,62 @@ impl Editor {
             }
         }
         container(scrollable(rows)).height(260).into()
+    }
+
+    /// The parameters or the outputs of the graph, as the input or output
+    /// node shows them: to rename, move, take away, and for a parameter
+    /// what it starts at.
+    fn ports_of_graph<'a>(
+        &'a self,
+        node: NodeId,
+        kind: &NodeKind,
+        mut rows: iced::widget::Column<'a, Message>,
+    ) -> iced::widget::Column<'a, Message> {
+        let small = |label: &'static str, message| button(text(label).size(11)).padding([1, 6]).on_press(message);
+        let names: Vec<String> = match kind {
+            NodeKind::Input => self.document.graph().params().iter().map(|param| param.name.clone()).collect(),
+            _ => self.document.graph().outputs().iter().map(|output| output.name.clone()).collect(),
+        };
+        let hint = match kind {
+            NodeKind::Input => "Link the + pin to an input to make a parameter of it.",
+            _ => "Link an output to the + pin to make an output of the graph.",
+        };
+        if names.is_empty() {
+            rows = rows.push(text(hint).size(12));
+        }
+        for name in names {
+            let edited = self.edits.get(&(node, format!("name:{name}"))).cloned();
+            let (raw, port) = (node.raw(), name.clone());
+            let field = text_input("name", edited.unwrap_or_else(|| name.clone()))
+                .size(12)
+                .width(150)
+                .on_input(move |text| Message::PortName(raw, port.clone(), text))
+                .on_submit(Message::PortRenamed(raw, name.clone()));
+            let mut row = row![field].spacing(6).align_y(Center);
+            if *kind == NodeKind::Input {
+                let default = self
+                    .edits
+                    .get(&(node, format!("default:{name}")))
+                    .cloned()
+                    .or_else(|| self.document.param_text(&name))
+                    .unwrap_or_default();
+                let param = name.clone();
+                row = row.push(
+                    text_input("default", default)
+                        .size(12)
+                        .on_input(move |text| Message::ParamDefault(raw, param.clone(), text))
+                        .on_submit(Message::ParamDefaultCommitted(raw, name.clone())),
+                );
+            } else {
+                row = row.push(space::horizontal());
+            }
+            row = row
+                .push(small("up", Message::PortMoved(raw, name.clone(), -1)))
+                .push(small("down", Message::PortMoved(raw, name.clone(), 1)))
+                .push(small("remove", Message::PortRemoved(raw, name.clone())));
+            rows = rows.push(row);
+        }
+        rows
     }
 
     /// Fields for another name of `port` and how this node uses it. Left
