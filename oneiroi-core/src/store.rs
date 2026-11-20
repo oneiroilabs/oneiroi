@@ -27,8 +27,24 @@ pub const PAGE_WORDS: u32 = 1 << 18;
 ///
 /// Two values with the same key are interchangeable, which is what lets
 /// instances with equal parameters share their results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContentKey(u128);
+
+/// A key is a hash already, evenly spread over all its bits, so a map
+/// takes some of them as they are instead of hashing it again.
+impl Hash for ContentKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.0 as u64);
+    }
+}
+
+impl nohash_hasher::IsEnabled for ContentKey {}
+
+/// A map by [`ContentKey`], which does not hash the keys again.
+pub type KeyMap<V> = HashMap<ContentKey, V, nohash_hasher::BuildNoHashHasher<ContentKey>>;
+
+/// A set of [`ContentKey`]s, which does not hash them again.
+pub type KeySet = std::collections::HashSet<ContentKey, nohash_hasher::BuildNoHashHasher<ContentKey>>;
 
 impl ContentKey {
     /// Stands in for a key which is not derived yet.
@@ -49,7 +65,7 @@ impl ContentKey {
         hasher.write(node);
         hasher.write(version);
         hasher.write(output);
-        hasher.write(inputs);
+        hasher.write_keys(inputs);
         hasher.finish()
     }
 
@@ -58,7 +74,7 @@ impl ContentKey {
         let mut hasher = KeyHasher::new(1);
         hasher.write(node);
         hasher.write(output);
-        hasher.write(inputs);
+        hasher.write_keys(inputs);
         hasher.finish()
     }
 }
@@ -77,6 +93,14 @@ impl KeyHasher {
 
     fn write(&mut self, value: impl Hash) {
         value.hash(&mut self.0);
+    }
+
+    /// Every bit of `keys`: as map keys they are hashed by only some.
+    fn write_keys(&mut self, keys: &[ContentKey]) {
+        self.write(keys.len());
+        for key in keys {
+            self.write(key.0);
+        }
     }
 
     fn finish(self) -> ContentKey {
@@ -261,7 +285,7 @@ struct Entry {
 
 pub struct Store {
     pages: Vec<Page>,
-    entries: HashMap<ContentKey, Entry>,
+    entries: KeyMap<Entry>,
     page_words: u32,
     used_words: u64,
     frame: u64,
@@ -282,7 +306,7 @@ impl Store {
     pub fn with_page_words(page_words: u32) -> Self {
         Self {
             pages: Vec::new(),
-            entries: HashMap::new(),
+            entries: KeyMap::default(),
             page_words,
             used_words: 0,
             frame: 0,
@@ -687,6 +711,13 @@ mod tests {
             ContentKey::derive("a", 0, &[key(1)]),
             ContentKey::derive("b", 0, &[key(1)])
         );
+    }
+
+    #[test]
+    fn derived_keys_depend_on_every_bit_of_their_inputs() {
+        let low = ContentKey(1);
+        let high = ContentKey(1 | 1 << 100);
+        assert_ne!(ContentKey::derive("a", 0, &[low]), ContentKey::derive("a", 0, &[high]));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use oneiroi_core::{
     exec::{CpuExecutor, Executor, Phases, Work},
     node::{Caps, GpuKernel, Inputs, NodeDef},
     shader::{self, CALL_WINDOW, GATHER, GATHER_CALL_WORDS, ShaderError, WORKGROUP_SIZE},
-    store::{ContentKey, Handle, Store},
+    store::{ContentKey, Handle, KeyMap, Store},
 };
 
 /// How many nodes ran where since the executor was made.
@@ -892,7 +892,7 @@ impl Executor for GpuExecutor {
         // Work which reads nothing of this batch is level 0, work which
         // reads from level 0 is level 1 and so on. Whatever shares a level
         // can run in any order, and therefore together.
-        let mut produced: HashMap<ContentKey, usize> = HashMap::new();
+        let mut produced: KeyMap<usize> = KeyMap::default();
         let mut levels: Vec<Vec<&Work>> = Vec::new();
         for item in work {
             let level = item

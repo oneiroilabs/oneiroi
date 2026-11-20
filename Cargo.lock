@@ -5332,6 +5332,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5911,6 +5917,7 @@ dependencies = [
  "glam 0.32.1",
  "mlua",
  "naga",
+ "nohash-hasher",
  "serde",
  "xxhash-rust",
 ]

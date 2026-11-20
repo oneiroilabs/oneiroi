@@ -6,7 +6,6 @@
 //! the [`Executor`], which is the part that can run on the CPU or the GPU.
 
 use std::{
-    collections::HashSet,
     fmt,
     time::{Duration, Instant},
 };
@@ -14,7 +13,7 @@ use std::{
 use crate::{
     node::{Inputs, NodeDef, Outputs},
     program::{OpKind, Program, ProgramId, ProgramSet, SlotId, SlotSource},
-    store::{ContentKey, Handle, Store},
+    store::{ContentKey, Handle, KeySet, Store},
     types::DataType,
 };
 
@@ -238,7 +237,7 @@ struct Planner<'a> {
     /// parameter is in the store already.
     defaults: bool,
     work: &'a mut Vec<Step>,
-    scheduled: &'a mut HashSet<ContentKey>,
+    scheduled: &'a mut KeySet,
 }
 
 impl Planner<'_> {
@@ -384,7 +383,7 @@ pub struct Engine<E: Executor = CpuExecutor> {
     store: Store,
     executor: E,
     work: Vec<Step>,
-    scheduled: HashSet<ContentKey>,
+    scheduled: KeySet,
     overflows: Vec<Overflow>,
 }
 
@@ -405,7 +404,7 @@ impl<E: Executor> Engine<E> {
             store,
             executor,
             work: Vec::new(),
-            scheduled: HashSet::new(),
+            scheduled: KeySet::default(),
             overflows: Vec::new(),
         }
     }
@@ -639,7 +638,7 @@ impl<E: Executor> Engine<E> {
         let hidden = program.groups_of_param(element as usize);
 
         let mut steps = Vec::new();
-        let mut scheduled = HashSet::new();
+        let mut scheduled = KeySet::default();
         let mut parts = vec![Vec::new(); program.outputs.len()];
         let mut params = inputs[..inputs.len() - 1].to_vec();
         let resident = self.store.is_resident(source);
