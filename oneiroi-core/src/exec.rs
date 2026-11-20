@@ -43,13 +43,20 @@ pub trait Executor {
     /// do it without bringing them over.
     fn gather(&mut self, store: &mut Store, parts: &[ContentKey], output: ContentKey) {
         self.download(store, parts);
-        let mut words = Vec::new();
+        let parts: Vec<Handle> = parts.iter().filter_map(|part| store.get(*part)).collect();
+        let len = parts.iter().map(|part| part.len).sum();
+        // Each part is copied once, right where the whole is kept.
+        let whole = store.reserve_output(output, len);
+        // SAFETY: the room of the whole is new, so no part is in it, and
+        // nothing is evicted or written while the parts are copied.
+        let whole = unsafe { store.output_words(whole) };
+        let mut at = 0;
         for part in parts {
-            if let Some(handle) = store.get(*part) {
-                words.extend_from_slice(store.words(handle));
-            }
+            let part = unsafe { store.words_unbound(part) };
+            whole[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
         }
-        store.insert(output, &words);
+        store.commit(output);
     }
 }
 
