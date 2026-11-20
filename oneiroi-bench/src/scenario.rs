@@ -5,7 +5,7 @@ use bytemuck::Pod;
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
     node::NodeRegistry,
-    program::{Program, ProgramBuilder, SlotId},
+    program::{Program, ProgramBuilder, ProgramSet, SlotId},
     types::DataType,
 };
 use oneiroi_nodes::{
@@ -44,7 +44,8 @@ pub struct Scenario {
     pub sizes: &'static [Size],
     /// A few of the sizes, for a quick look.
     pub quick: &'static [Size],
-    pub build: fn(&NodeRegistry) -> Program,
+    /// The program, and any it calls, which go into `programs`.
+    pub build: fn(&NodeRegistry, &mut ProgramSet) -> Program,
     /// The parameters before the first edit.
     pub setup: fn(Size) -> Params,
     /// What edit `n` sets, starting at 1. Every edit sets values which
@@ -65,6 +66,8 @@ const CURVES: &[Size] = &[
 const CURVES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(256, 32), Size::new(16, 128)];
 const INSTANCES: &[Size] = &[Size::new(1, 32), Size::new(16, 32), Size::new(256, 32), Size::new(1024, 32)];
 const INSTANCES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(256, 32)];
+const ELEMENTS: &[Size] = &[Size::new(16, 8), Size::new(256, 8), Size::new(4096, 8), Size::new(16384, 8)];
+const ELEMENTS_QUICK: &[Size] = &[Size::new(256, 8), Size::new(4096, 8)];
 const MESHES: &[Size] = &[Size::new(1, 32), Size::new(16, 32), Size::new(64, 32)];
 const MESHES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(16, 32)];
 
@@ -77,7 +80,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "NURBS Curve, the control points move",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_| {
+        build: |_, _| {
             let mut b = ProgramBuilder::new("nurbs");
             let segments = curves(&mut b);
             b.output("segments", segments);
@@ -91,7 +94,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "Translate Curve of the curves, the offset changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_| {
+        build: |_, _| {
             let mut b = ProgramBuilder::new("translate");
             let segments = curves(&mut b);
             let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
@@ -107,7 +110,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "Sweep of a circle along the curves, the radius changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("sweep circle");
             let spine = curves(&mut b);
             let radius = b.param::<f32>("radius", &[0.1]);
@@ -124,7 +127,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "Sweep of a square curve along the curves, the square changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("sweep square");
             let spine = curves(&mut b);
             let square = b.param_grouped("square", <[f32; 4]>::INFO, &[]);
@@ -146,7 +149,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "Sample Curve, 64 frames per curve at places which change",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_| {
+        build: |_, _| {
             let mut b = ProgramBuilder::new("sample");
             let segments = curves(&mut b);
             let count = b.constant::<u32>(&[SAMPLES as u32]);
@@ -168,7 +171,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "NURBS, Translate, a Sweep of a circle and Sample Curve, the control points move",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("chain");
             let segments = curves(&mut b);
             let offset = b.constant(&[Vec3::new(0.0, 1.0, 0.0)]);
@@ -192,7 +195,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "A ring of 10 patches put onto 64 frames along every curve by reference, the control points move",
         sizes: INSTANCES,
         quick: INSTANCES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("instances");
             let placed = rings_on_curves(&mut b, registry);
             b.output("instances", placed);
@@ -206,7 +209,7 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "The rings of `instances`, copied to where each one is",
         sizes: INSTANCES,
         quick: INSTANCES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("instances realized");
             let placed = rings_on_curves(&mut b, registry);
             let copies = b.generic(registry, &REALIZE, &[placed]).unwrap()[0];
@@ -217,11 +220,39 @@ pub const SCENARIOS: &[Scenario] = &[
         edit: moved_points,
     },
     Scenario {
+        name: "for each",
+        about: "NURBS and Translate for every curve on its own, the control points of one curve move",
+        sizes: ELEMENTS,
+        quick: ELEMENTS_QUICK,
+        build: |_, programs| {
+            let mut b = ProgramBuilder::new("for each");
+            let moved = each_curve(&mut b, programs);
+            b.output("segments", moved);
+            b.finish()
+        },
+        setup: points,
+        edit: moved_points,
+    },
+    Scenario {
+        name: "for each, all",
+        about: "NURBS and Translate for every curve on its own, the offset of all of them changes",
+        sizes: ELEMENTS,
+        quick: ELEMENTS_QUICK,
+        build: |_, programs| {
+            let mut b = ProgramBuilder::new("for each, all");
+            let moved = each_curve(&mut b, programs);
+            b.output("segments", moved);
+            b.finish()
+        },
+        setup: points,
+        edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
+    },
+    Scenario {
         name: "mesh",
         about: "Mesh of a swept circle, the tolerance changes",
         sizes: MESHES,
         quick: MESHES_QUICK,
-        build: |registry| {
+        build: |registry, _| {
             let mut b = ProgramBuilder::new("mesh");
             let spine = curves(&mut b);
             let radius = b.constant::<f32>(&[0.1]);
@@ -247,6 +278,23 @@ fn curves(b: &mut ProgramBuilder) -> SlotId {
     let points = b.param_grouped("points", <[f32; 4]>::INFO, &[]);
     let knots = b.constant::<f32>(&[]);
     b.node(&NURBS, &[points, knots]).unwrap()[0]
+}
+
+/// A call of NURBS and Translate for every curve of the parameter
+/// `points`, all by the parameter `offset`: many small runs, so what each
+/// costs besides its kernels shows.
+fn each_curve(b: &mut ProgramBuilder, programs: &mut ProgramSet) -> SlotId {
+    let mut inner = ProgramBuilder::new("one curve");
+    let segments = curves(&mut inner);
+    let offset = inner.param_one_of::<Vec3>("offset", Vec3::ZERO);
+    let moved = inner.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
+    inner.output("segments", moved);
+    let inner = programs.add(inner.finish());
+
+    let points = b.param_grouped("points", <[f32; 4]>::INFO, &[]);
+    let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
+    b.for_each(programs, inner, &[Some(points), Some(offset)], 0, 1 << 16)
+        .unwrap()[0]
 }
 
 /// A thin tube around a circle of 13 points, 10 patches, put onto 64
