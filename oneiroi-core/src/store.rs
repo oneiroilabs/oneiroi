@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{Xxh3, xxh3_128};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -52,31 +52,82 @@ impl ContentKey {
 
     /// The key of a leaf value: it is identified by its type and its bytes.
     pub fn of_data(ty: &TypeInfo, words: &[u32]) -> Self {
-        let mut hasher = KeyHasher::new(0);
-        hasher.write(ty.name);
-        hasher.write(words);
-        hasher.finish()
+        // What the streaming hasher would be given, see `KeyHasher`. XXH3
+        // comes to the same over the same bytes either way, and small
+        // values, like the elements of most groups, are hashed at once.
+        const ON_STACK: usize = 1024;
+        let len = 1 + ty.name.len() + 1 + size_of::<usize>() + 4 * words.len();
+        if len > ON_STACK {
+            let mut hasher = KeyHasher::new(0);
+            hasher.write(ty.name);
+            hasher.write(words);
+            return hasher.finish();
+        }
+        let mut bytes = [0u8; ON_STACK];
+        let mut at = 0;
+        let mut put = |part: &[u8]| {
+            bytes[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        };
+        put(&[0]);
+        put(ty.name.as_bytes());
+        put(&[0xff]);
+        put(&words.len().to_ne_bytes());
+        put(bytemuck::cast_slice(words));
+        ContentKey(xxh3_128(&bytes[..len]))
     }
 
     /// [`ContentKey::derive`] for a node: its results change when its
     /// version does.
     pub fn derive_node(node: &str, version: u32, output: u32, inputs: &[ContentKey]) -> Self {
-        let mut hasher = KeyHasher::new(2);
-        hasher.write(node);
-        hasher.write(version);
-        hasher.write(output);
-        hasher.write_keys(inputs);
-        hasher.finish()
+        derived(2, node, &[version as u64, output as u64], inputs)
     }
 
     /// The key of the `output`-th result of running `node` on `inputs`.
     pub fn derive(node: &str, output: u32, inputs: &[ContentKey]) -> Self {
-        let mut hasher = KeyHasher::new(1);
-        hasher.write(node);
-        hasher.write(output);
-        hasher.write_keys(inputs);
-        hasher.finish()
+        derived(1, node, &[output as u64], inputs)
     }
+
+    /// The key of the `output`-th result of running the program with the
+    /// hash `program` for each element `element` of `inputs`, at most `max`
+    /// times.
+    pub fn derive_for_each(program: u64, element: u32, max: u32, output: u32, inputs: &[ContentKey]) -> Self {
+        derived(3, "for each", &[program, element as u64, max as u64, output as u64], inputs)
+    }
+}
+
+/// The key of whatever comes out of `inputs` by what `name` and `numbers`
+/// say. The few bytes this takes are put together on the stack and hashed
+/// at once, which costs a fraction of setting up a streaming hasher: keys
+/// are derived for every node of every element.
+fn derived(domain: u8, name: &str, numbers: &[u64], inputs: &[ContentKey]) -> ContentKey {
+    const ON_STACK: usize = 512;
+    let len = 1 + 8 + name.len() + 8 * numbers.len() + 8 + 16 * inputs.len();
+    let mut stack = [0u8; ON_STACK];
+    let mut heap = Vec::new();
+    let bytes = match len <= ON_STACK {
+        true => &mut stack[..len],
+        false => {
+            heap.resize(len, 0);
+            &mut heap[..]
+        }
+    };
+    let mut at = 0;
+    let mut put = |part: &[u8]| {
+        bytes[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    };
+    put(&[domain]);
+    put(&(name.len() as u64).to_le_bytes());
+    put(name.as_bytes());
+    for number in numbers {
+        put(&number.to_le_bytes());
+    }
+    put(&(inputs.len() as u64).to_le_bytes());
+    for input in inputs {
+        put(&input.0.to_le_bytes());
+    }
+    ContentKey(xxh3_128(bytes))
 }
 
 /// XXH3 with 128 bits: fast over the megabytes a parameter can have, and
@@ -93,14 +144,6 @@ impl KeyHasher {
 
     fn write(&mut self, value: impl Hash) {
         value.hash(&mut self.0);
-    }
-
-    /// Every bit of `keys`: as map keys they are hashed by only some.
-    fn write_keys(&mut self, keys: &[ContentKey]) {
-        self.write(keys.len());
-        for key in keys {
-            self.write(key.0);
-        }
     }
 
     fn finish(self) -> ContentKey {
@@ -718,6 +761,11 @@ mod tests {
         let low = ContentKey(1);
         let high = ContentKey(1 | 1 << 100);
         assert_ne!(ContentKey::derive("a", 0, &[low]), ContentKey::derive("a", 0, &[high]));
+        // However long the inputs are.
+        let many = |last| [vec![ContentKey(7); 40], vec![last]].concat();
+        assert_ne!(ContentKey::derive("a", 0, &many(low)), ContentKey::derive("a", 0, &many(high)));
+        // Names and numbers do not run into each other.
+        assert_ne!(ContentKey::derive("a", 0, &[]), ContentKey::derive("a\0", 0, &[]));
     }
 
     #[test]
@@ -762,9 +810,10 @@ mod tests {
     #[test]
     fn data_is_keyed_while_it_is_copied() {
         let mut store = Store::with_page_words(8);
-        // More than one chunk of hashing, and nothing at all.
+        // More than one chunk of hashing, few enough to be hashed at once,
+        // and nothing at all.
         let words: Vec<u32> = (0..10_000).collect();
-        for words in [&words[..], &[]] {
+        for words in [&words[..], &words[..5], &words[..250], &words[..260], &[]] {
             let (key, handle) = store.insert_data(&u32::INFO, words);
             assert_eq!(key, ContentKey::of_data(&u32::INFO, words));
             assert_eq!(store.words(handle), words);

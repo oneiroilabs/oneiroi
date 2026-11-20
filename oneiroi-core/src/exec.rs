@@ -155,6 +155,7 @@ impl Executor for CpuExecutor {
 }
 
 /// The keys of every slot of one program for one set of parameter values.
+#[derive(Default)]
 struct Keys {
     slots: Vec<ContentKey>,
     /// The keys inside each program this one calls, by operation index.
@@ -163,38 +164,55 @@ struct Keys {
 
 impl Keys {
     fn derive(programs: &ProgramSet, program: &Program, params: &[ContentKey]) -> Self {
-        let mut slots: Vec<_> = program
-            .slots
-            .iter()
-            .map(|slot| match &slot.source {
-                SlotSource::Param(index) => params[*index as usize],
-                SlotSource::Const { key, .. } => *key,
-                // Filled in below, operations only read earlier slots.
-                SlotSource::Op { .. } => ContentKey::UNSET,
-            })
-            .collect();
-        let mut calls = Vec::new();
+        let mut keys = Self::default();
+        keys.rederive(programs, program, params);
+        keys
+    }
 
-        let mut inputs = Vec::new();
+    /// Derives the keys anew in the room these had, for one call after
+    /// another of the same program.
+    fn rederive(&mut self, programs: &ProgramSet, program: &Program, params: &[ContentKey]) {
+        let slots = &mut self.slots;
+        slots.clear();
+        slots.extend(program.slots.iter().map(|slot| match &slot.source {
+            SlotSource::Param(index) => params[*index as usize],
+            SlotSource::Const { key, .. } => *key,
+            // Filled in below, operations only read earlier slots.
+            SlotSource::Op { .. } => ContentKey::UNSET,
+        }));
+        self.calls.clear();
+
+        const ON_STACK: usize = 16;
+        let mut stack = [ContentKey::UNSET; ON_STACK];
+        let mut heap = Vec::new();
         for (index, op) in program.ops.iter().enumerate() {
-            inputs.clear();
-            inputs.extend(op.inputs.iter().map(|slot| slots[slot.0 as usize]));
+            let inputs = match op.inputs.len() <= ON_STACK {
+                true => &mut stack[..op.inputs.len()],
+                false => {
+                    heap.resize(op.inputs.len(), ContentKey::UNSET);
+                    &mut heap[..]
+                }
+            };
+            for (input, slot) in inputs.iter_mut().zip(&op.inputs) {
+                *input = slots[slot.0 as usize];
+            }
+            let inputs = &*inputs;
 
             match op.kind {
                 OpKind::Node(node) => {
                     for (output, slot) in op.outputs.iter().enumerate() {
                         slots[slot.0 as usize] =
-                            ContentKey::derive_node(node.id, node.version, output as u32, &inputs);
+                            ContentKey::derive_node(node.id, node.version, output as u32, inputs);
                     }
                 }
                 OpKind::Call(callee) => {
                     let callee = programs.get(callee);
-                    let keys = Keys::derive(programs, callee, &inputs);
+                    let keys = Keys::derive(programs, callee, inputs);
                     for (index, slot) in op.outputs.iter().enumerate() {
                         let inner = callee.call_output_slot(index);
                         slots[slot.0 as usize] = keys.slots[inner.0 as usize];
                     }
-                    calls.push((index as u32, keys));
+                    self.calls.push((index as u32, keys));
                 }
                 OpKind::ForEach {
                     callee,
@@ -204,15 +222,13 @@ impl Keys {
                     // What comes out depends on what goes in and on what
                     // is done for each element, not on how many there are.
                     let callee = programs.get(callee).hash;
-                    let id = format!("for_each/{callee:x}/{element}/{max}");
                     for (output, slot) in op.outputs.iter().enumerate() {
-                        slots[slot.0 as usize] = ContentKey::derive(&id, output as u32, &inputs);
+                        slots[slot.0 as usize] =
+                            ContentKey::derive_for_each(callee, element as u32, max, output as u32, inputs);
                     }
                 }
             }
         }
-
-        Self { slots, calls }
     }
 
     fn call(&self, op: u32) -> &Keys {
@@ -642,6 +658,7 @@ impl<E: Executor> Engine<E> {
         let mut parts = vec![Vec::new(); program.outputs.len()];
         let mut params = inputs[..inputs.len() - 1].to_vec();
         let resident = self.store.is_resident(source);
+        let mut keys = Keys::default();
         for (index, (start, end)) in runs.iter().take(max as usize).enumerate() {
             // Where the values are at hand an element is known by what it
             // is: elements which did not change, or which are the same as
@@ -663,7 +680,7 @@ impl<E: Executor> Engine<E> {
                 params[hidden] = no_groups;
             }
 
-            let keys = Keys::derive(&self.programs, program, &params);
+            keys.rederive(&self.programs, program, &params);
             let scope = Scope {
                 program,
                 keys: &keys,
