@@ -173,7 +173,8 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
          edits. Below each table, where it goes: setting the new value (which \
          hashes it) and planning are the same for every backend, `flush` is the \
          executor, then waiting for the device. The device column is the time \
-         the GPU spends on compute passes, by its timestamps."
+         the GPU spends on compute passes, by its timestamps. Ending the frame \
+         afterwards frees what is not used anymore, it is not in the total."
     )
     .unwrap();
 
@@ -222,8 +223,8 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
             .unwrap();
         }
 
-        writeln!(out, "\n| size | backend | set | plan | flush | of which | wait | device |").unwrap();
-        writeln!(out, "|---|---|---:|---:|---:|---|---:|---:|").unwrap();
+        writeln!(out, "\n| size | backend | set | plan | flush | of which | wait | device | end frame |").unwrap();
+        writeln!(out, "|---|---|---:|---:|---:|---|---:|---:|---:|").unwrap();
         for &size in &sizes {
             for backend in Backend::ALL {
                 let Some(entry) = results.find(scenario.name, size, backend) else {
@@ -238,7 +239,7 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
                     .collect();
                 writeln!(
                     out,
-                    "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                     size.label(),
                     backend.name(),
                     time(m.set.median),
@@ -247,6 +248,7 @@ pub fn table(results: &Results, baseline: Option<&Results>) -> String {
                     if parts.is_empty() { "–".into() } else { parts.join(", ") },
                     time(m.wait.median),
                     m.device.map_or("–".into(), |device| time(device.median)),
+                    time(m.end_frame.median),
                 )
                 .unwrap();
             }

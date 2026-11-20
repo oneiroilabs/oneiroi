@@ -163,6 +163,10 @@ pub struct Measurement {
     pub wait: Stats,
     /// How long the GPU worked on compute passes, by its timestamps.
     pub device: Option<Stats>,
+    /// Ending the frame afterwards, which frees what is not used anymore.
+    /// It is not part of `total`, the result is there before it.
+    #[serde(default = "Stats::zero")]
+    pub end_frame: Stats,
     pub runs: u32,
     /// What the GPU executor did for the first measured edit.
     pub counters: Option<Counters>,
@@ -249,6 +253,7 @@ struct Run {
     plan: Duration,
     execute: Duration,
     wait: Duration,
+    end_frame: Duration,
     /// Of `execute`, by the names of [`PHASES`].
     phases: [Duration; PHASES.len()],
 }
@@ -268,6 +273,7 @@ fn edit<E: Measured>(engine: &mut Engine<E>, instance: &mut Instance, params: &P
     let done = Instant::now();
     // What the edit made before is of no use anymore, what it reused stays.
     engine.end_frame(0);
+    let ended = Instant::now();
 
     let execute = executed - planned;
     let mut phases = [Duration::ZERO; PHASES.len()];
@@ -283,6 +289,7 @@ fn edit<E: Measured>(engine: &mut Engine<E>, instance: &mut Instance, params: &P
         plan: planned - set_done,
         execute,
         wait: done - executed,
+        end_frame: ended - done,
         phases,
     }
 }
@@ -356,6 +363,7 @@ pub fn measure<E: Measured>(
         phases,
         wait: stats(&|run| run.wait),
         device: (!device.is_empty()).then(|| Stats::of(device)),
+        end_frame: stats(&|run| run.end_frame),
         runs: runs.len() as u32,
         counters,
     }
