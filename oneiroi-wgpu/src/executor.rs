@@ -574,7 +574,9 @@ impl GpuExecutor {
                 .read
                 .get_mapped_range(..bytes)
                 .expect("the buffer was mapped right above");
-            let ticks: &[u64] = bytemuck::cast_slice(&mapped);
+            // Mapped memory is only as aligned as the driver placed the
+            // buffer, which can be less than a tick needs.
+            let ticks: Vec<u64> = bytemuck::pod_collect_to_vec(&mapped);
             for pass in ticks.chunks_exact(2) {
                 profiler.nanoseconds += pass[1].saturating_sub(pass[0]) as f64 * profiler.period;
             }
@@ -865,7 +867,16 @@ impl GpuExecutor {
             let bytes = readback
                 .get_mapped_range(..size)
                 .expect("the buffer was mapped right above");
-            let words: &[u32] = bytemuck::cast_slice(&bytes);
+            // Mapped memory is only as aligned as the driver placed the
+            // buffer: copied where that is less than a word needs.
+            let copied: Vec<u32>;
+            let words: &[u32] = match bytemuck::try_cast_slice(&bytes) {
+                Ok(words) => words,
+                Err(_) => {
+                    copied = bytemuck::pod_collect_to_vec(&bytes);
+                    &copied
+                }
+            };
 
             let mut offset = 0;
             for (key, handle) in &remote {
