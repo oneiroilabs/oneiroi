@@ -901,3 +901,43 @@ fn the_output_node_holds_the_outputs() {
     graph.remove_node(output);
     assert!(graph.outputs().is_empty());
 }
+
+#[test]
+fn the_fence_stands() {
+    use oneiroi_core::types::InstanceRow;
+    use oneiroi_nodes::curve::SweptPatch;
+
+    let fence = oneiroi_graph::examples::fence();
+    assert_eq!(Graph::from_json(&fence.to_json()).unwrap(), fence);
+    let mut engine = Engine::default();
+    let id = lower(&fence, &mut engine);
+    let names: Vec<_> = engine.programs().get(id).visible_params().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["length", "height", "spacing"]);
+
+    let mut instance = engine.instantiate(id);
+    engine.evaluate([&mut instance]);
+    // 3 rails of 4 sides and 2 caps of 4 each; 2 posts the same, and
+    // their pointed caps, the tips of which are not there.
+    let patches = |name| engine.read::<SweptPatch>(&instance, name).unwrap().to_vec();
+    assert_eq!(patches("rails").len(), 3 * (4 + 8));
+    assert_eq!(patches("posts").len(), 2 * (4 + 8));
+    let tips: Vec<_> = patches("caps").iter().map(SweptPatch::kind).collect();
+    assert_eq!(tips.len(), 2 * (4 + 8));
+    assert_eq!(tips.iter().filter(|kind| **kind == oneiroi_nodes::curve::kind::NONE).count(), 2 * 4);
+    fn rows(engine: &Engine, instance: &oneiroi_core::exec::Instance, name: &str) -> usize {
+        engine.read::<InstanceRow>(instance, name).map_or(0, <[_]>::len)
+    }
+    // From one spacing in to one before the end: 0.4, 0.8 up to 3.6.
+    let pickets = rows(&engine, &instance, "frames");
+    assert_eq!(pickets, 9);
+    assert_eq!(rows(&engine, &instance, "rings"), pickets);
+    assert_eq!(rows(&engine, &instance, "rods"), pickets);
+    assert_eq!(rows(&engine, &instance, "spears"), pickets);
+    // A ring between every two rods.
+    assert_eq!(rows(&engine, &instance, "band"), pickets - 1);
+
+    // Longer, it has more pickets of the same shape.
+    engine.set_param(&mut instance, "length", &[8.0f32]).unwrap();
+    engine.evaluate([&mut instance]);
+    assert_eq!(rows(&engine, &instance, "frames"), 19);
+}

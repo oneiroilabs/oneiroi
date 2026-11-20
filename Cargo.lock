@@ -5890,6 +5890,7 @@ dependencies = [
  "glam 0.32.1",
  "insta",
  "oneiroi-core",
+ "oneiroi-graph",
  "oneiroi-nodes",
  "oneiroi-wgpu",
  "pollster",

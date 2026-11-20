@@ -69,6 +69,11 @@ const INSTANCES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(256, 32)];
 const ELEMENTS: &[Size] = &[Size::new(16, 8), Size::new(256, 8), Size::new(4096, 8), Size::new(16384, 8)];
 const ELEMENTS_QUICK: &[Size] = &[Size::new(256, 8), Size::new(4096, 8)];
 const MESHES: &[Size] = &[Size::new(1, 32), Size::new(16, 32), Size::new(64, 32)];
+/// For the fence, as many pickets.
+const FENCES: &[Size] = &[Size::new(10, 1), Size::new(100, 1), Size::new(1000, 1), Size::new(10000, 1)];
+const FENCES_QUICK: &[Size] = &[Size::new(10, 1), Size::new(1000, 1)];
+/// How far apart the pickets of the fence are.
+const PICKETS: f32 = 0.4;
 const MESHES_QUICK: &[Size] = &[Size::new(1, 32), Size::new(16, 32)];
 
 /// How many frames Sample Curve makes of each curve.
@@ -267,7 +272,29 @@ pub const SCENARIOS: &[Scenario] = &[
         setup: points,
         edit: |_, n| vec![("tolerance", words(&[0.01 * (1.0 + n as f32 * 1e-6)]))],
     },
+    Scenario {
+        name: "fence",
+        about: "The picket fence of the editor, with as many pickets, gets a little longer",
+        sizes: FENCES,
+        quick: FENCES_QUICK,
+        build: |registry, programs| {
+            let context = oneiroi_graph::Context {
+                registry,
+                programs,
+                graphs: &std::collections::HashMap::new(),
+            };
+            oneiroi_graph::examples::fence().lower(context).expect("the fence is a whole graph")
+        },
+        setup: |size| vec![("length", words(&[fence_length(size)])), ("spacing", words(&[PICKETS]))],
+        edit: |size, n| vec![("length", words(&[fence_length(size) + n as f32 * 1e-4]))],
+    },
 ];
+
+/// As long as the fence is with `size.curves` pickets, which start one
+/// apart from either end.
+fn fence_length(size: Size) -> f32 {
+    (size.curves + 1) as f32 * PICKETS
+}
 
 fn words<T: Pod>(values: &[T]) -> Vec<u32> {
     bytemuck::cast_slice(values).to_vec()

@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 oneiroi-core.workspace = true
+oneiroi-graph.workspace = true
 oneiroi-nodes.workspace = true
 oneiroi-wgpu.workspace = true
 wgpu.workspace = true

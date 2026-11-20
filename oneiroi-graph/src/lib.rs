@@ -22,6 +22,7 @@ use std::{
 use oneiroi_core::node::Card;
 use serde::{Deserialize, Serialize};
 
+pub mod examples;
 mod library;
 mod lower;
 

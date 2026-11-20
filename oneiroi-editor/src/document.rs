@@ -505,6 +505,7 @@ impl Document {
         let mut library = Library::new();
         library.insert(Self::tube_example());
         library.insert(Self::instances_example());
+        library.insert(oneiroi_graph::examples::fence());
         Self::with_library(library, "tube")
     }
 
@@ -1777,9 +1778,9 @@ mod tests {
         for step in 1..20 {
             assert!(document.set_input(mesh, "tolerance", &(step as f32 * 0.01).to_string()));
         }
-        // The one of each of the two graphs and the one of the preview.
+        // The one of each of the three graphs and the one of the preview.
         let session = document.session();
-        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 3);
+        assert_eq!(session.lock().unwrap().engine_mut().programs().len(), 4);
     }
 
     #[test]
@@ -1888,6 +1889,7 @@ mod tests {
                 "Value / Vectors",
                 "Graph / Input",
                 "Graph / Output",
+                "Graph / fence",
                 "Graph / instances"
             ]
         );
@@ -2052,13 +2054,14 @@ mod tests {
 
         // One program per graph and the one of the preview, however many
         // edits there were.
+        let graphs = document.graphs().len();
         let session = document.session();
-        assert!(session.lock().unwrap().engine_mut().programs().len() <= 3);
+        assert!(session.lock().unwrap().engine_mut().programs().len() <= graphs + 1);
         drop(session);
 
         // All of it survives its file.
         let loaded = Document::from_json(&document.to_json()).unwrap();
-        assert_eq!(loaded.graphs(), ["graph", "instances", "tube"]);
+        assert_eq!(loaded.graphs(), ["fence", "graph", "instances", "tube"]);
         let mut loaded = loaded;
         loaded.open("tube");
         assert!(radius(&loaded) > thick);
@@ -2167,7 +2170,7 @@ mod tests {
     #[test]
     fn the_examples_run() {
         let mut document = Document::example();
-        assert_eq!(document.graphs(), ["instances", "tube"]);
+        assert_eq!(document.graphs(), ["fence", "instances", "tube"]);
         assert!(matches!(document.shown(), Shown::Drawn(_)));
         assert!(document.open("instances"));
         assert!(document.error().is_none(), "{:?}", document.error());
@@ -2178,7 +2181,7 @@ mod tests {
     fn a_document_survives_its_file() {
         let document = Document::example();
         let mut loaded = Document::from_json(&document.to_json()).unwrap();
-        assert_eq!(loaded.graphs(), ["instances", "tube"]);
+        assert_eq!(loaded.graphs(), ["fence", "instances", "tube"]);
         assert!(loaded.open("tube"));
         assert_eq!(loaded.graph(), document.graph());
         // The same graph is the same work, so it shows the very same value.
@@ -2328,6 +2331,22 @@ mod tests {
         assert!(document.graph().input_node().is_some() && document.graph().output_node().is_some());
         assert_eq!(document.displayed(), document.graph().output_node());
         assert_eq!(document.shown(), Shown::Nothing);
+    }
+
+    #[test]
+    fn the_fence_is_shown_as_a_whole() {
+        let mut document = Document::example();
+        assert!(document.open("fence"));
+        assert!(document.error().is_none(), "{:?}", document.error());
+        // Its output node shows every part of it at once: the rails, the
+        // posts and their caps, and the pickets as instances.
+        let Shown::Drawn(drawn) = document.shown() else {
+            panic!("the fence is not drawn");
+        };
+        assert_eq!(drawn.len(), 8);
+        assert_eq!(drawn.iter().filter(|drawn| drawn.shape.is_some()).count(), 5);
+        assert!(document.set_param("length", "6"));
+        assert!(matches!(document.shown(), Shown::Drawn(_)));
     }
 
     #[test]
