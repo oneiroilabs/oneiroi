@@ -148,10 +148,10 @@ fn a_graph_survives_its_file() {
     // Nothing reads the unknown node, so the graph still works.
     lower(&Graph::from_json(&json).unwrap(), &mut Engine::default());
 
-    let newer = json.replacen("\"version\": 1", "\"version\": 2", 1);
+    let newer = json.replacen("\"version\": 2", "\"version\": 3", 1);
     assert!(matches!(
         Graph::from_json(&newer),
-        Err(FormatError::Version(2))
+        Err(FormatError::Version(3))
     ));
     assert!(matches!(
         Graph::from_json("{"),
@@ -538,12 +538,19 @@ fn broken_graphs_say_where_they_are_broken() {
     let mut broken = graph.clone();
     let frames = broken.add("curve.sample");
     broken.connect(nodes.curve, "segments", frames, "segments").unwrap();
+    // The parameter has the type of the radius it was linked to first.
     broken.expose(frames, "count", "radius", None).unwrap();
     broken.add_output("frames", frames, "frames").unwrap();
-    assert_eq!(
-        error(&broken).2,
-        LowerErrorKind::ExposedTwice("radius".into())
-    );
+    let (node, port, kind) = error(&broken);
+    assert_eq!((node, port.as_deref()), (Some(frames), Some("count")));
+    assert!(matches!(kind, LowerErrorKind::Build(BuildError::Type { .. })), "{kind:?}");
+
+    // A parameter nothing tells the type of can not be taken.
+    let mut broken = graph.clone();
+    broken.add_param(oneiroi_graph::GraphParam::new("anything")).unwrap();
+    let input = broken.input_node().unwrap();
+    broken.connect(input, "anything", nodes.sweep, "profile").unwrap();
+    assert_eq!(error(&broken).2, LowerErrorKind::ParamType("anything".into()));
 
     let mut broken = graph.clone();
     let unknown = broken.add("someone_elses.node");
@@ -568,13 +575,14 @@ fn broken_graphs_say_where_they_are_broken() {
     // A file can hold what editing would not allow.
     let json = graph.to_json();
     let mut broken: serde_json::Value = serde_json::from_str(&json).unwrap();
-    broken["nodes"]["0"]["inputs"]["points"] =
-        serde_json::json!({ "link": { "node": 2, "output": "positions" } });
+    let id = |node: NodeId| node.raw().to_string();
+    broken["nodes"][id(nodes.curve)]["inputs"]["points"] =
+        serde_json::json!({ "link": { "node": nodes.mesh.raw(), "output": "positions" } });
     let broken = Graph::from_json(&broken.to_string()).unwrap();
     assert_eq!(error(&broken).2, LowerErrorKind::Cycle);
 
     let mut broken: serde_json::Value = serde_json::from_str(&json).unwrap();
-    broken["nodes"]["2"]["inputs"]["spine"] =
+    broken["nodes"][id(nodes.sweep)]["inputs"]["spine"] =
         serde_json::json!({ "link": { "node": 99, "output": "segments" } });
     let broken = Graph::from_json(&broken.to_string()).unwrap();
     assert!(matches!(error(&broken).2, LowerErrorKind::MissingNode(_)));
@@ -601,10 +609,8 @@ fn inputs_exposed_under_one_name_are_one_parameter() {
         engine.output_key(&instance, "a"),
         engine.output_key(&instance, "b")
     );
-    assert!(matches!(
-        graph.node(a).unwrap().inputs["radius"],
-        Input::Exposed { .. }
-    ));
+    assert_eq!(graph.exposed_as(a, "radius"), Some("size"));
+    assert_eq!(graph.params().len(), 1);
 }
 
 #[test]
@@ -619,7 +625,8 @@ fn exposed_inputs_keep_what_they_carry() {
     // The points of several curves keep their groups in a parameter which
     // is not shown, and the tolerance is a single number.
     let names: Vec<_> = program.visible_params().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["points", "radius", "tolerance"]);
+    // In the order they were made.
+    assert_eq!(names, ["radius", "points", "tolerance"]);
     assert_eq!(program.params.len(), 4);
     let card = |name: &str| {
         let param = program.params.iter().find(|p| p.name == name).unwrap();
@@ -773,4 +780,121 @@ fn circles_and_rectangles_are_curves_where_curves_are_needed() {
     let line = engine.read::<CubicNurbsSegmentCache>(&instance, "line").unwrap();
     assert_eq!(line.len(), 1);
     assert!((line[0].length() - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn a_file_of_before_gets_input_and_output_nodes() {
+    // Format 1: the radius of two circles is exposed as one parameter.
+    let json = r#"{
+        "version": 1,
+        "name": "old",
+        "nodes": {
+            "0": { "kind": { "node": "curve.circle" }, "inputs": { "radius": { "exposed": { "name": "size" } } },
+                   "meta": { "position": [100.0, 50.0] } },
+            "1": { "kind": { "node": "curve.circle" }, "inputs": { "radius": { "exposed": { "name": "size", "value": { "f32": [2.0] } } } } },
+            "2": { "kind": { "node": "curve.line" }, "inputs": { "end": { "exposed": { "name": "end" } } } }
+        },
+        "next_id": 3,
+        "outputs": [{ "name": "circles", "node": 0, "output": "circle" }]
+    }"#;
+    let graph = Graph::from_json(json).unwrap();
+    let input = graph.input_node().unwrap();
+    let output = graph.output_node().unwrap();
+    assert_eq!((input.raw(), output.raw()), (3, 4));
+    let names: Vec<_> = graph.params().iter().map(|param| param.name.as_str()).collect();
+    assert_eq!(names, ["size", "end"]);
+    assert_eq!(graph.param("size").unwrap().default, Some(Value::F32(vec![2.0])));
+    assert_eq!(graph.exposed_as(NodeId::from(0), "radius"), Some("size"));
+    assert_eq!(graph.exposed_as(NodeId::from(1), "radius"), Some("size"));
+    // Left of everything and right of it.
+    assert!(graph.node(input).unwrap().meta.position[0] < 0.0);
+    assert!(graph.node(output).unwrap().meta.position[0] > 100.0);
+    assert_eq!(Graph::from_json(&graph.to_json()).unwrap(), graph);
+
+    let mut engine = Engine::default();
+    let id = lower(&graph, &mut engine);
+    let names: Vec<_> = engine.programs().get(id).visible_params().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["size", "end"]);
+}
+
+#[test]
+fn parameters_have_a_type_and_an_order_of_their_own() {
+    use oneiroi_core::node::Card;
+    use oneiroi_graph::{GraphParam, NodeKind};
+
+    let mut graph = Graph::new("params");
+    let input = graph.add_node(NodeKind::Input);
+    let circle = graph.add("curve.circle");
+    // Linked to nothing, but with a type it is a parameter all the same.
+    graph
+        .add_param(GraphParam {
+            ty: Some("u32".into()),
+            card: Some(Card::One),
+            default: Some(Value::U32(vec![7])),
+            ..GraphParam::new("count")
+        })
+        .unwrap();
+    graph.add_param(GraphParam::new("radius")).unwrap();
+    assert!(graph.add_param(GraphParam::new("radius")).is_err());
+    graph.connect(input, "radius", circle, "radius").unwrap();
+    graph.add_output("circle", circle, "circle").unwrap();
+
+    let mut engine = Engine::default();
+    let id = lower(&graph, &mut engine);
+    let program = engine.programs().get(id);
+    let names: Vec<_> = program.visible_params().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["count", "radius"]);
+    assert_eq!(program.params[0].default.as_ref(), &[7]);
+
+    graph.move_param("radius", 0).unwrap();
+    graph.rename_param("radius", "size").unwrap();
+    assert!(graph.rename_param("size", "count").is_err());
+    assert_eq!(graph.exposed_as(circle, "radius"), Some("size"));
+    let id = lower(&graph, &mut engine);
+    let names: Vec<_> = engine.programs().get(id).visible_params().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["size", "count"]);
+
+    // Gone with its links: the circle has its own radius again.
+    graph.remove_param("size").unwrap();
+    assert_eq!(graph.exposed_as(circle, "radius"), None);
+    assert!(graph.node(circle).unwrap().inputs.is_empty());
+}
+
+#[test]
+fn the_output_node_holds_the_outputs() {
+    use oneiroi_graph::{EditError, NodeKind};
+
+    let (mut graph, nodes) = tube();
+    let output = graph.add_node(NodeKind::Output);
+    assert_eq!(graph.add_node(NodeKind::Output), output, "there is only one");
+    // Linking into it adds an output, linking again replaces it.
+    graph.connect(nodes.sweep, "surface", output, "surface").unwrap();
+    graph.connect(nodes.circle, "circle", output, "surface").unwrap();
+    let names: Vec<_> = graph.outputs().iter().map(|output| output.name.as_str()).collect();
+    assert_eq!(names, ["positions", "indices", "surface"]);
+    assert_eq!(graph.outputs()[2].node, nodes.circle);
+    assert_eq!(graph.connect(output, "surface", nodes.sweep, "spine"), Err(EditError::FromOutputNode));
+
+    graph.rename_output("surface", "profile").unwrap();
+    graph.move_output("profile", 0);
+    let names: Vec<_> = graph.outputs().iter().map(|output| output.name.as_str()).collect();
+    assert_eq!(names, ["profile", "positions", "indices"]);
+    graph.reset(output, "indices");
+
+    // Previewed, it shows every output of the graph.
+    let program = graph
+        .lower_node(
+            Context {
+                registry: &registry(),
+                programs: Engine::default().programs(),
+                graphs: &HashMap::new(),
+            },
+            output,
+        )
+        .unwrap();
+    let names: Vec<_> = program.outputs.iter().map(|output| output.name.as_str()).collect();
+    assert_eq!(names, ["profile", "positions"]);
+
+    graph.remove_node(output);
+    assert!(graph.outputs().is_empty());
 }

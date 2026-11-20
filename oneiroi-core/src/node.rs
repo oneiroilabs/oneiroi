@@ -103,7 +103,8 @@ impl PortDecl {
 }
 
 /// How many elements a port carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Card {
     /// A single one. Only something which is single can be linked to it.
     One,
@@ -773,6 +774,16 @@ impl NodeRegistry {
     /// Whether values of `ty` can be turned into anything else.
     pub fn converts(&self, ty: &TypeInfo) -> bool {
         self.conversion(ty, |_| true).is_some()
+    }
+
+    /// The data type called `name`, if any port of a registered node has
+    /// it.
+    pub fn type_named(&self, name: &str) -> Option<TypeInfo> {
+        self.nodes
+            .values()
+            .flat_map(|node| node.inputs.iter().chain(node.outputs))
+            .map(|port| port.ty)
+            .find(|ty| ty.name == name)
     }
 
     /// Says how values of a data type can be drawn.

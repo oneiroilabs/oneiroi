@@ -19,7 +19,7 @@ use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
 use oneiroi_core::program::ProgramId;
 use oneiroi_graph::{
     About, Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
-    Note, Value,
+    GraphParam, Note, Value,
 };
 use oneiroi_nodes::{
     curve::nurbs::clamped_uniform_knots,
@@ -666,6 +666,12 @@ impl Document {
             NodeKind::Graph(name) => {
                 self.library.get(name).and_then(|graph| graph.about.doc.clone()).unwrap_or_default()
             }
+            NodeKind::Input => "The parameters of the graph: what it takes where another graph \
+                uses it. Each is set there, or starts at its default."
+                .into(),
+            NodeKind::Output => "The outputs of the graph: what another graph which uses it gets, \
+                and what the preview shows of the graph as a whole."
+                .into(),
         }
     }
 
@@ -721,6 +727,31 @@ impl Document {
                 None => (label_of(port), String::new()),
             },
             NodeKind::Graph(_) => (label_of(port), String::new()),
+            // A parameter and an output of this graph are described by their
+            // note, or like the port they come from.
+            NodeKind::Input | NodeKind::Output if depth < 32 => {
+                let (note, source) = match node.kind {
+                    NodeKind::Input => (
+                        graph.about.params.get(port),
+                        graph.param_source(port).map(|(node, port)| (node, Side::Input, port)),
+                    ),
+                    _ => (
+                        graph.about.outputs.get(port),
+                        graph
+                            .outputs()
+                            .iter()
+                            .find(|output| output.name == port)
+                            .map(|output| (output.node, Side::Output, output.output.as_str())),
+                    ),
+                };
+                let doc = note.and_then(|note| note.doc.clone()).unwrap_or_else(|| {
+                    source.map_or_else(String::new, |(node, side, port)| {
+                        self.port_text(graph, node, side, port, depth + 1).1
+                    })
+                });
+                (note.and_then(|note| note.label.clone()).unwrap_or_else(|| label_of(port)), doc)
+            }
+            NodeKind::Input | NodeKind::Output => (label_of(port), String::new()),
         };
         (
             note.and_then(|note| note.label.clone()).unwrap_or(label),
@@ -728,13 +759,84 @@ impl Document {
         )
     }
 
+    /// A parameter of the open graph as a port: of its own type, or of the
+    /// type of the first port it is linked to.
+    fn param_view(&self, param: &GraphParam) -> PortView {
+        let source = self.graph().param_source(&param.name).and_then(|(node, port)| {
+            let view = self.pins(node)?;
+            view.inputs.into_iter().find(|input| input.name == port)
+        });
+        let ty = match &param.ty {
+            Some(name) => self.registry.type_named(name).map_or(PinType::Unknown, PinType::Exact),
+            None => source.as_ref().map_or(PinType::Unknown, |port| port.ty),
+        };
+        let default = match (&param.default, &ty) {
+            (Some(value), _) => match value {
+                Value::F32(values) => bytemuck::cast_slice(values).to_vec(),
+                Value::U32(values) => values.clone(),
+            },
+            (None, _) => source.as_ref().map(|port| port.default.clone()).unwrap_or_default(),
+        };
+        PortView {
+            name: param.name.clone(),
+            label: String::new(),
+            doc: String::new(),
+            ty,
+            card: param.card.or(source.as_ref().map(|port| port.card)).unwrap_or(Card::Many),
+            default,
+            choices: source.map(|port| port.choices).unwrap_or_default(),
+        }
+    }
+
     /// The pins of node `id` of the open graph, without their text.
     fn pins(&self, id: NodeId) -> Option<NodeView> {
         let node = self.graph().node(id)?;
         let name = match &node.kind {
             NodeKind::Node(id) | NodeKind::Graph(id) => id.as_str(),
+            NodeKind::Input => "Input",
+            NodeKind::Output => "Output",
         };
         let custom = node.meta.name.clone();
+
+        // The parameters of the graph are the outputs of its input node, and
+        // its outputs the inputs of the output node.
+        match node.kind {
+            NodeKind::Input => {
+                let outputs = self.graph().params().iter().map(|param| self.param_view(param)).collect();
+                return Some(NodeView {
+                    title: custom.unwrap_or_else(|| name.into()),
+                    doc: String::new(),
+                    inputs: Vec::new(),
+                    outputs,
+                    known: true,
+                });
+            }
+            NodeKind::Output => {
+                let inputs = self
+                    .graph()
+                    .outputs()
+                    .iter()
+                    .map(|output| PortView {
+                        name: output.name.clone(),
+                        label: String::new(),
+                        doc: String::new(),
+                        // It takes whatever is linked to it.
+                        ty: PinType::Unknown,
+                        card: Card::Many,
+                        default: Vec::new(),
+                        choices: Vec::new(),
+                    })
+                    .collect();
+                return Some(NodeView {
+                    title: custom.unwrap_or_else(|| name.into()),
+                    doc: String::new(),
+                    inputs,
+                    outputs: Vec::new(),
+                    known: true,
+                });
+            }
+            _ => {}
+        }
 
         // Another graph shows up with its parameters and outputs as pins.
         if let NodeKind::Graph(graph) = &node.kind
@@ -982,18 +1084,57 @@ impl Document {
         let stored = self.graph().node(node)?.inputs.get(input);
         match stored {
             Some(Input::Link { each: true, .. }) => return Some(("each element".into(), false)),
-            Some(Input::Link { .. }) => return Some(("linked".into(), false)),
+            Some(Input::Link { .. }) => {
+                return Some(match self.graph().exposed_as(node, input) {
+                    Some(name) => (format!("parameter `{name}`"), false),
+                    None => ("linked".into(), false),
+                });
+            }
             _ => {}
         }
         let PinType::Exact(ty) = port.ty else {
             return Some(("needs a link".into(), false));
         };
         Some(match stored {
-            Some(Input::Value(value)) | Some(Input::Exposed { value: Some(value), .. }) => {
-                (format_value(value), true)
-            }
+            Some(Input::Value(value)) => (format_value(value), true),
             _ => (format_value(&words_to_value(&port.default, ty.scalar)), true),
         })
+    }
+
+    /// What parameter `name` of the open graph starts at, as text.
+    pub fn param_text(&self, name: &str) -> Option<String> {
+        let param = self.graph().param(name)?;
+        let view = self.param_view(param);
+        let scalar = match view.ty {
+            PinType::Exact(ty) => ty.scalar,
+            _ => return param.default.as_ref().map(format_value),
+        };
+        Some(format_value(&words_to_value(&view.default, scalar)))
+    }
+
+    /// Sets what parameter `name` of the open graph starts at from text.
+    /// Returns whether the text was a value of its type.
+    pub fn set_param(&mut self, name: &str, text: &str) -> bool {
+        let Some(param) = self.graph().param(name) else {
+            return false;
+        };
+        let view = self.param_view(param);
+        let PinType::Exact(ty) = view.ty else {
+            return false;
+        };
+        let Some(value) = parse_value(text, ty.scalar) else {
+            return false;
+        };
+        let len = match &value {
+            Value::F32(values) => values.len(),
+            Value::U32(values) => values.len(),
+        };
+        if len % ty.words as usize != 0 || (view.card == Card::One && len != ty.words as usize) {
+            return false;
+        }
+        self.graph_mut().param_mut(name).unwrap().default = Some(value);
+        self.refresh();
+        true
     }
 
     /// What an input to pick from can say, and which of it is picked, if
@@ -1006,9 +1147,7 @@ impl Document {
         }
         let picked = match self.graph().node(node)?.inputs.get(input) {
             Some(Input::Link { .. }) => return None,
-            Some(Input::Value(Value::U32(value))) | Some(Input::Exposed { value: Some(Value::U32(value)), .. }) => {
-                value.first().copied()
-            }
+            Some(Input::Value(Value::U32(value))) => value.first().copied(),
             _ => port.default.first().copied(),
         };
         let last = port.choices.len() - 1;
@@ -1050,17 +1189,7 @@ impl Document {
         if len % ty.words as usize != 0 || (card == Card::One && len != ty.words as usize) {
             return false;
         }
-        // A parameter stays one, the value is what it starts with.
-        let exposed = match self.graph().input_of(node, input) {
-            Some(Input::Exposed { name, .. }) => Some(name.clone()),
-            _ => None,
-        };
-        let graph = self.graph_mut();
-        let set = match exposed {
-            Some(name) => graph.expose(node, input, &name, Some(value)),
-            None => graph.set(node, input, value),
-        };
-        if set.is_err() {
+        if self.graph_mut().set(node, input, value).is_err() {
             return false;
         }
         self.refresh();
@@ -1256,21 +1385,33 @@ impl Document {
         }
     }
 
+    /// Whether an input is linked to a parameter of the graph.
     pub fn is_exposed(&self, node: NodeId, input: &str) -> bool {
-        matches!(self.graph().input_of(node, input), Some(Input::Exposed { .. }))
+        self.graph().exposed_as(node, input).is_some()
     }
 
-    /// Makes an input a parameter of the graph, named after the input,
-    /// or a plain value again. A linked input stays what it is. Returns
-    /// whether anything changed.
+    /// Links an input to a parameter of the graph named after the input,
+    /// which is made if there is none, or makes it a plain value again: the
+    /// default of the parameter. A parameter nothing is linked to anymore,
+    /// and which has no type of its own, goes with it. Any other link stays
+    /// what it is. Returns whether anything changed.
     pub fn toggle_exposed(&mut self, node: NodeId, input: &str) -> bool {
         let graph = self.graph_mut();
-        let changed = match graph.input_of(node, input).cloned() {
-            Some(Input::Link { .. }) => false,
-            Some(Input::Exposed { value: Some(value), .. }) => graph.set(node, input, value).is_ok(),
-            Some(Input::Exposed { value: None, .. }) => graph.reset(node, input).is_some(),
-            Some(Input::Value(value)) => graph.expose(node, input, input, Some(value)).is_ok(),
-            None => graph.expose(node, input, input, None).is_ok(),
+        let changed = match (graph.exposed_as(node, input).map(str::to_string), graph.input_of(node, input).cloned()) {
+            (Some(name), _) => {
+                let param = graph.param(&name).cloned();
+                match param.as_ref().and_then(|param| param.default.clone()) {
+                    Some(value) => graph.set(node, input, value).is_ok(),
+                    None => graph.reset(node, input).is_some(),
+                };
+                if graph.param_source(&name).is_none() && param.is_some_and(|param| param.ty.is_none()) {
+                    graph.remove_param(&name);
+                }
+                true
+            }
+            (None, Some(Input::Link { .. })) => false,
+            (None, Some(Input::Value(value))) => graph.expose(node, input, input, Some(value)).is_ok(),
+            (None, None) => graph.expose(node, input, input, None).is_ok(),
         };
         if changed {
             self.refresh();
@@ -1691,8 +1832,9 @@ mod tests {
         // An edit inside the other graph is seen here.
         document.reset(used, "radius");
         document.open("graph");
-        assert!(document.set_input(circle, "radius", "1"));
         assert!(document.is_exposed(circle, "radius"));
+        assert!(document.set_param("radius", "1"));
+        assert_eq!(document.param_text("radius").as_deref(), Some("1"));
         document.open("tube");
         assert!(radius(&document) > thick);
 
@@ -1801,8 +1943,11 @@ mod tests {
         // The value an input had is what the parameter starts with, and
         // what it goes back to.
         assert!(document.toggle_exposed(circle, "radius"));
-        assert_eq!(document.input_text(circle, "radius").unwrap(), ("0.25".into(), true));
+        assert_eq!(document.input_text(circle, "radius").unwrap(), ("parameter `radius`".into(), false));
+        assert_eq!(document.param_text("radius").as_deref(), Some("0.25"));
         assert!(document.toggle_exposed(circle, "radius"));
+        // Nothing takes the parameter anymore, so it is gone.
+        assert!(document.graph().param("radius").is_none());
         assert!(!document.is_exposed(circle, "radius"));
         assert_eq!(document.input_text(circle, "radius").unwrap().0, "0.25");
         // A link is not a value to expose.

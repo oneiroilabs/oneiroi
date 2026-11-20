@@ -100,10 +100,16 @@ impl Library {
             library.insert(graph);
             return Ok(library);
         }
-        let library: Self = serde_json::from_str(json).map_err(crate::FormatError::Syntax)?;
-        for graph in library.iter() {
-            // Checks the version of every graph in there.
-            Graph::from_json(&graph.to_json())?;
+        // Every graph is read on its own, which checks its version and
+        // brings an older one up to date.
+        let file: serde_json::Value = serde_json::from_str(json).map_err(crate::FormatError::Syntax)?;
+        let graphs = file
+            .get("graphs")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| crate::FormatError::Syntax(serde::de::Error::missing_field("graphs")))?;
+        let mut library = Self::new();
+        for graph in graphs.values() {
+            library.insert(Graph::from_json(&graph.to_string())?);
         }
         Ok(library)
     }

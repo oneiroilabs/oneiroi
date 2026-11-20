@@ -50,8 +50,9 @@ pub enum LowerErrorKind {
     Value { expected: &'static str },
     /// The port takes a single value, and a list was written out for it.
     NotOne,
-    /// Two inputs of different types are exposed under one name.
-    ExposedTwice(String),
+    /// The parameter has no type of its own and is linked to no port of
+    /// one type it could take.
+    ParamType(String),
     /// Only a node which is another graph can run for each element.
     EachOnNode,
     /// A graph runs for each element of one input, not of several.
@@ -85,9 +86,10 @@ impl fmt::Display for LowerError {
                 write!(f, "the value is not a list of `{expected}`")
             }
             LowerErrorKind::NotOne => write!(f, "only a single value can go here"),
-            LowerErrorKind::ExposedTwice(name) => {
-                write!(f, "`{name}` is exposed with two different types")
-            }
+            LowerErrorKind::ParamType(name) => write!(
+                f,
+                "the parameter `{name}` needs a type of its own, or a link to a port of one type"
+            ),
             LowerErrorKind::EachOnNode => {
                 write!(f, "only a graph can run for each element")
             }
@@ -184,7 +186,8 @@ struct Lowerer<'a> {
     /// The outputs of every node that is lowered already, by name.
     done: HashMap<NodeId, Vec<(String, SlotId)>>,
     visiting: HashSet<NodeId>,
-    exposed: HashMap<String, SlotId>,
+    /// The parameters of the graph, by name, as far as they have a type.
+    params: Vec<(String, SlotId)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -204,13 +207,83 @@ impl<'a> Lowerer<'a> {
                 Some(id) => Ok(Target::Graph(*id, self.context.programs.get(*id))),
                 None => Err(LowerErrorKind::UnknownGraph(name.clone())),
             },
+            // Their ports are the parameters and outputs of the graph, see
+            // `Lowerer::node`.
+            NodeKind::Input => Err(LowerErrorKind::UnknownNode("input".into())),
+            NodeKind::Output => Err(LowerErrorKind::UnknownNode("output".into())),
         }
+    }
+
+    /// Makes every parameter of the graph, in their order, which has a
+    /// type: its own, or the one of the first port it is linked to.
+    fn params(&mut self) -> Result<(), LowerError> {
+        for param in self.graph.params() {
+            let at = |kind| LowerError {
+                node: None,
+                port: Some(param.name.clone()),
+                kind,
+            };
+            let source = self.graph.param_source(&param.name).and_then(|(node, port)| {
+                let node = self.graph.node(node)?;
+                let target = self.target(&node.kind).ok()?;
+                target.inputs().into_iter().find(|input| input.name == port)
+            });
+            let registry = self.context.registry;
+            let (ty, card) = match (&param.ty, source.as_ref()) {
+                (Some(name), _) => {
+                    let ty = registry
+                        .type_named(name)
+                        .ok_or_else(|| at(LowerErrorKind::Value { expected: "a known type" }))?;
+                    let card = param.card.or(source.as_ref().map(|port| port.card)).unwrap_or(Card::Many);
+                    (ty, card)
+                }
+                (None, Some(Port { ty: PortType::Exact(ty), card, .. })) => (*ty, *card),
+                // Nothing to tell its type by, so it can not be made. Where
+                // something takes it anyway, that is an error there.
+                (None, _) => continue,
+            };
+            let from_port = source.as_ref().filter(|port| port.ty == PortType::Exact(ty));
+            let default: Vec<u32> = match &param.default {
+                Some(value) => value
+                    .words(&ty)
+                    .ok_or_else(|| at(LowerErrorKind::Value { expected: ty.name }))?
+                    .to_vec(),
+                None => from_port.map(|port| port.default.clone()).unwrap_or_default(),
+            };
+            let default = match (card, default.is_empty()) {
+                (Card::One, true) => vec![0; ty.words as usize],
+                (Card::One, false) if default.len() != ty.words as usize => {
+                    return Err(at(LowerErrorKind::NotOne));
+                }
+                _ => default,
+            };
+            let name = param.name.clone();
+            let slot = match card {
+                Card::One => self.builder.param_one(name.clone(), ty, &default),
+                Card::Many => self.builder.param_words(name.clone(), ty, &default),
+                Card::Grouped => self.builder.param_grouped(name.clone(), ty, &default),
+            };
+            self.params.push((name, slot));
+        }
+        Ok(())
     }
 
     /// Lowers `id` and everything it depends on.
     fn node(&mut self, id: NodeId) -> Result<(), LowerError> {
         if self.done.contains_key(&id) {
             return Ok(());
+        }
+        // The input node gives the parameters, the output node gives nothing.
+        match self.graph.node(id).map(|node| &node.kind) {
+            Some(NodeKind::Input) => {
+                self.done.insert(id, self.params.clone());
+                return Ok(());
+            }
+            Some(NodeKind::Output) => {
+                self.done.insert(id, Vec::new());
+                return Ok(());
+            }
+            _ => {}
         }
         let at = |port: Option<&str>, kind| LowerError {
             node: Some(id),
@@ -265,32 +338,6 @@ impl<'a> Lowerer<'a> {
                     let ty = exact(LowerErrorKind::NeedsLink)?;
                     Some(self.builder.constant_words(ty, words(value, &ty)?))
                 }
-                Some(Input::Exposed { name, value }) => {
-                    let ty = exact(LowerErrorKind::NeedsLink)?;
-                    let default = match value {
-                        Some(value) => words(value, &ty)?,
-                        None => &port.default,
-                    };
-                    match self.exposed.get(name) {
-                        Some(slot) if self.builder.slot_type(*slot) == ty => Some(*slot),
-                        Some(_) => {
-                            let kind = LowerErrorKind::ExposedTwice(name.clone());
-                            return Err(at(Some(&port.name), kind));
-                        }
-                        None => {
-                            let name = name.clone();
-                            let slot = match port.card {
-                                Card::One => self.builder.param_one(name.clone(), ty, default),
-                                Card::Many => self.builder.param_words(name.clone(), ty, default),
-                                Card::Grouped => {
-                                    self.builder.param_grouped(name.clone(), ty, default)
-                                }
-                            };
-                            self.exposed.insert(name.clone(), slot);
-                            Some(slot)
-                        }
-                    }
-                }
                 Some(Input::Link {
                     node,
                     output,
@@ -316,9 +363,14 @@ impl<'a> Lowerer<'a> {
                         .find(|(name, _)| name == output)
                         .map(|(_, slot)| *slot)
                         .ok_or_else(|| {
-                            let kind = LowerErrorKind::UnknownOutput {
-                                node: *node,
-                                output: output.clone(),
+                            let kind = match self.graph.node(*node).map(|node| &node.kind) {
+                                Some(NodeKind::Input) if self.graph.param(output).is_some() => {
+                                    LowerErrorKind::ParamType(output.clone())
+                                }
+                                _ => LowerErrorKind::UnknownOutput {
+                                    node: *node,
+                                    output: output.clone(),
+                                },
                             };
                             at(Some(&port.name), kind)
                         })?;
@@ -410,7 +462,7 @@ impl Graph {
             builder: ProgramBuilder::new(self.name.clone()),
             done: HashMap::new(),
             visiting: HashSet::new(),
-            exposed: HashMap::new(),
+            params: Vec::new(),
         }
     }
 
@@ -420,6 +472,7 @@ impl Graph {
     /// reads can be broken or unknown without getting in the way.
     pub fn lower(&self, context: Context<'_>) -> Result<Program, LowerError> {
         let mut lowerer = self.lowerer(context);
+        lowerer.params()?;
         let mut names = HashSet::new();
         for output in self.outputs() {
             if !names.insert(&output.name) {
@@ -451,8 +504,38 @@ impl Graph {
     ) -> Result<Program, LowerError> {
         let registry = context.registry;
         let mut lowerer = self.lowerer(context);
-        lowerer.node(node)?;
-        for (name, slot) in lowerer.done[&node].clone() {
+        lowerer.params()?;
+        // The output node shows every output of the graph.
+        let shown_outputs = match self.node(node).map(|node| &node.kind) {
+            Some(NodeKind::Output) => {
+                let mut outputs = Vec::new();
+                for output in self.outputs() {
+                    let at = |kind| LowerError {
+                        node: Some(output.node),
+                        port: None,
+                        kind,
+                    };
+                    lowerer.node(output.node)?;
+                    let slot = lowerer.done[&output.node]
+                        .iter()
+                        .find(|(name, _)| *name == output.output)
+                        .map(|(_, slot)| *slot)
+                        .ok_or_else(|| {
+                            at(LowerErrorKind::UnknownOutput {
+                                node: output.node,
+                                output: output.output.clone(),
+                            })
+                        })?;
+                    outputs.push((output.name.clone(), slot));
+                }
+                outputs
+            }
+            _ => {
+                lowerer.node(node)?;
+                lowerer.done[&node].clone()
+            }
+        };
+        for (name, slot) in shown_outputs {
             let ty = lowerer.builder.slot_type(slot);
             let conversion = match shown(&ty) {
                 true => None,
