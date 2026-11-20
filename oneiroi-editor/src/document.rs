@@ -1720,8 +1720,9 @@ mod tests {
         let mut session = session.lock().unwrap();
         assert_eq!(session.run(), 0);
         // One patch for each of the 5 segments of the curve.
-        let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 28;
-        assert_eq!(patches, 5);
+        let patches = session.engine_mut().fetch_key::<u32>(key).unwrap().len() / 36;
+        // One for each of its 5 segments, and its 2 caps.
+        assert_eq!(patches, 5 + 2);
         let (center, radius) = session.bounds().unwrap();
         assert!(radius > 3.0 && (center.y - 3.5).abs() < 0.5);
     }
@@ -1730,8 +1731,8 @@ mod tests {
     fn a_mesh_node_shows_its_mesh() {
         let (document, _) = meshed();
         let mesh = document.mesh().unwrap();
-        // 5 segments, each a grid of the same size.
-        assert!(!mesh.positions.is_empty() && mesh.positions.len() % 5 == 0);
+        // 5 segments and 2 caps, each a grid of the same size.
+        assert!(!mesh.positions.is_empty() && mesh.positions.len() % 7 == 0);
         assert!(mesh.normals.is_some());
         // Only the mesh was new, the surface was there from before.
         assert_eq!(document.status(), "a mesh, 1 nodes ran");
@@ -1857,7 +1858,8 @@ mod tests {
             ports(&view.inputs),
             [
                 ("spine".to_string(), "cubic_nurbs_segment"),
-                ("profile".to_string(), "profile")
+                ("profile".to_string(), "profile"),
+                ("ends".to_string(), "u32")
             ]
         );
         assert_eq!(ports(&view.outputs), [("surface".to_string(), "surface")]);
@@ -2100,9 +2102,9 @@ mod tests {
         // The numbers, the curve once, and a circle and a sweep for each.
         assert_eq!(document.status(), "`tube_patch` drawn as it is, 8 nodes ran");
         let session = document.session();
-        let patches = session.lock().unwrap().engine_mut().fetch_key::<u32>(key).unwrap().len() / 28;
-        // Three tubes, each of the five segments of the curve.
-        assert_eq!(patches, 3 * 5);
+        let patches = session.lock().unwrap().engine_mut().fetch_key::<u32>(key).unwrap().len() / 36;
+        // Three tubes, each of the five segments of the curve and two caps.
+        assert_eq!(patches, 3 * (5 + 2));
         drop(session);
 
         // Once for all of it again, which is one tube of the first radius.

@@ -9,7 +9,7 @@ use oneiroi_core::{
     types::DataType,
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SAMPLE_CURVE, SWEEP, TRANSLATE},
+    curve::{NURBS, SAMPLE_CURVE, TRANSLATE, swept},
     instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
     surface,
@@ -115,7 +115,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let spine = curves(&mut b);
             let radius = b.param::<f32>("radius", &[0.1]);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = b.generic(registry, &SWEEP, &[spine, circle]).unwrap()[0];
+            let surface = swept(&mut b, registry, spine, circle).unwrap();
             b.output("surface", surface);
             b.finish()
         },
@@ -133,7 +133,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let square = b.param_grouped("square", <[f32; 4]>::INFO, &[]);
             let knots = b.constant(&square_knots());
             let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
-            let surface = b.generic(registry, &SWEEP, &[spine, profile]).unwrap()[0];
+            let surface = swept(&mut b, registry, spine, profile).unwrap();
             b.output("surface", surface);
             b.finish()
         },
@@ -178,7 +178,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
             let radius = b.constant::<f32>(&[0.1]);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = b.generic(registry, &SWEEP, &[moved, circle]).unwrap()[0];
+            let surface = swept(&mut b, registry, moved, circle).unwrap();
             let count = b.constant::<u32>(&[SAMPLES as u32]);
             let spacing = b.constant::<f32>(&[0.0]);
             let t = b.constant::<f32>(&[]);
@@ -257,7 +257,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let spine = curves(&mut b);
             let radius = b.constant::<f32>(&[0.1]);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let swept = b.generic(registry, &SWEEP, &[spine, circle]).unwrap()[0];
+            let swept = swept(&mut b, registry, spine, circle).unwrap();
             let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
             for (name, slot) in surface::mesh(&mut b, registry, swept, tolerance).unwrap() {
                 b.output(name, slot);
@@ -317,7 +317,7 @@ fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
     let ring = b.node(&NURBS, &[ring, knots]).unwrap()[0];
     let radius = b.constant::<f32>(&[0.06]);
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-    let torus = b.generic(registry, &SWEEP, &[ring, circle]).unwrap()[0];
+    let torus = swept(b, registry, ring, circle).unwrap();
     let scale = b.constant::<f32>(&[1.0]);
     b.generic(registry, &INSTANCE, &[frames, torus, scale]).unwrap()[0]
 }

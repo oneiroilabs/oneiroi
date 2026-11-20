@@ -11,7 +11,7 @@ use oneiroi_graph::{
     Note, Value,
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots},
+    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, swept},
     primitive::CIRCLE,
     surface,
 };
@@ -111,7 +111,7 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let tolerance = b.constant::<f32>(&[0.01]);
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-    let surface = b.generic(&registry(), &SWEEP, &[spine, circle]).unwrap()[0];
+    let surface = swept(&mut b, &registry(), spine, circle).unwrap();
     let mesh = surface::mesh(&mut b, &registry(), surface, tolerance).unwrap();
     b.output("positions", mesh[0].1);
     let by_hand = engine.add_program(b.finish());
@@ -340,6 +340,8 @@ fn moved_tube() -> Graph {
     let sweep = graph.add("curve.sweep");
     graph.connect(moved, "segments", sweep, "spine").unwrap();
     graph.connect(circle, "circle", sweep, "profile").unwrap();
+    // Open, so that every patch is one along the curve.
+    graph.set(sweep, "ends", 1u32).unwrap();
     graph.add_output("surface", sweep, "surface").unwrap();
     graph
 }
@@ -775,8 +777,9 @@ fn circles_and_rectangles_are_curves_where_curves_are_needed() {
 
     let mut instance = engine.instantiate(id);
     engine.evaluate([&mut instance]);
-    // 4 quarters of the ring, each swept by the 4 sides of the bar.
-    assert_eq!(engine.read::<SweptPatch>(&instance, "surface").map(<[_]>::len), Some(16));
+    // 4 quarters of the ring, each swept by the 4 sides of the bar, and
+    // caps which are not there: the ring is closed.
+    assert_eq!(engine.read::<SweptPatch>(&instance, "surface").map(<[_]>::len), Some(16 + 8));
     let line = engine.read::<CubicNurbsSegmentCache>(&instance, "line").unwrap();
     assert_eq!(line.len(), 1);
     assert!((line[0].length() - 1.0).abs() < 1e-5);

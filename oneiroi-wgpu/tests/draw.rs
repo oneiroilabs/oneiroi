@@ -11,7 +11,7 @@ use oneiroi_core::{
     program::{ProgramBuilder, SlotId},
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SWEEP, SweptPatch, TubePatch, nurbs::clamped_uniform_knots},
+    curve::{NURBS, SweptPatch, TubePatch, nurbs::clamped_uniform_knots, swept},
     primitive::CIRCLE,
     surface,
 };
@@ -126,7 +126,7 @@ fn program_along(
     } else {
         square(&mut b)
     };
-    let surface = b.generic(registry, &SWEEP, &[spine, profile]).unwrap()[0];
+    let surface = swept(&mut b, registry, spine, profile).unwrap();
     let tolerance = b.constant::<f32>(&[TOLERANCE]);
     let mesh = surface::mesh(&mut b, registry, surface, tolerance).unwrap();
     b.output("surface", surface);
@@ -471,7 +471,8 @@ fn a_device_can_turn_up_later() {
     let gpu = executor.gpu_mut().unwrap();
     gpu.sync(store);
     let handle = store.get(key).unwrap();
-    assert!(gpu.page(handle.page).is_some() && handle.len == 2 * 28);
+    // 2 segments and 2 caps.
+    assert!(gpu.page(handle.page).is_some() && handle.len == 4 * 36);
 }
 
 /// Both ways of drawing a surface as fine as it appears: with vertex
@@ -668,13 +669,14 @@ fn triangles_are_counted() {
             return;
         };
         for (name, mut stage) in stages(&scene) {
-            // As coarse as it gets: one step along each of the 2 segments,
-            // and around either a circle of 4 steps or 4 straight edges.
-            assert_eq!(counted(&mut scene, &mut stage, 4096.0), 16, "{name}");
+            // As coarse as it gets: one step along each of the 2 segments
+            // and across each of the 2 caps, and around either a circle of
+            // 4 steps or 4 straight edges.
+            assert_eq!(counted(&mut scene, &mut stage, 4096.0), 32, "{name}");
 
             let fine = counted(&mut scene, &mut stage, 4.0);
             let coarse = counted(&mut scene, &mut stage, 16.0);
-            assert!(fine > 4 * coarse / 2 && coarse > 16, "{name}: {fine} {coarse}");
+            assert!(fine > 4 * coarse / 2 && coarse > 32, "{name}: {fine} {coarse}");
 
             // What is out of view has none.
             let camera = scene.camera;
@@ -774,7 +776,7 @@ fn instances_scene() -> Option<Scene> {
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let radius = b.constant::<f32>(&[0.3]);
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-    let tube = b.generic(&registry, &SWEEP, &[spine, circle]).unwrap()[0];
+    let tube = swept(&mut b, &registry, spine, circle).unwrap();
 
     let line = b.constant::<[f32; 4]>(&[[-3., -3., 0., 1.], [-1., -1., 0., 1.], [1., 1., 0., 1.], [3., 3., 0., 1.]]);
     let knots = b.constant(&clamped_uniform_knots(4));

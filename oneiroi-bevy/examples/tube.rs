@@ -15,7 +15,7 @@ use bevy::{
 use oneiroi_bevy::{Oneiroi, OneiroiInstance, OneiroiPlugin};
 use oneiroi_core::program::{ProgramBuilder, ProgramId};
 use oneiroi_nodes::{
-    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, tube},
+    curve::{NURBS, nurbs::clamped_uniform_knots, swept, tube},
     surface,
 };
 
@@ -89,9 +89,7 @@ fn beam_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let points = b.constant(&square);
     let knots = b.constant(&square_knots);
     let profile = b.node(&NURBS, &[points, knots]).unwrap()[0];
-    let surface = b
-        .generic(oneiroi.registry(), &SWEEP, &[spine, profile])
-        .unwrap()[0];
+    let surface = swept(&mut b, oneiroi.registry(), spine, profile).unwrap();
     // Each edge of the square is flat, so the mesh takes a single step
     // across it by itself.
     let tolerance = b.constant::<f32>(&[surface::TOLERANCE]);

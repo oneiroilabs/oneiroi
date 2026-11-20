@@ -26,20 +26,30 @@ pub trait Profile: DataType + Sync {
         profile
     }
 
-    /// The surface this profile leaves behind when it is moved along
-    /// `spine`, a single curve. Nothing gets sampled here: every patch is still the exact
-    /// surface, only cut into pieces which are easy to evaluate.
-    fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<Self::Patch>;
+    /// How many patches each segment of a curve sweeps out of a profile of
+    /// `profile` elements. Each cap at an end of it has as many.
+    fn pieces(profile: usize) -> usize;
 
-    /// How many patches [`Profile::sweep`] makes of all curves of a spine
-    /// with `segments` together, out of a profile of `profile` elements.
-    fn patches(segments: usize, profile: usize) -> usize;
+    /// Piece `piece` of `profile` swept along `segment`, or of a cap of the
+    /// curve: a patch of [`kind`](super::sweep::kind), cut at its ends by
+    /// `miters`, which lies `along` of the whole curve. Nothing gets sampled
+    /// here: every patch is still the exact surface, only cut into pieces
+    /// which are easy to evaluate.
+    fn patch(
+        segment: CubicNurbsSegmentCache,
+        profile: &[Self],
+        piece: usize,
+        along: [f32; 2],
+        kind: u32,
+        miters: [[f32; 4]; 2],
+    ) -> Self::Patch;
 
-    /// The same as [`Profile::sweep`] for every curve at once, on the GPU:
-    /// `fn sweep_patch(index: u32) -> Patch` and
-    /// `fn sweep_offset(group: u32) -> u32`, where each group of patches
-    /// starts. The spine is the input `spine`, with its groups, the
-    /// profile is `profile`.
+    /// The same for the GPU: `alias Patch`, `fn sweep_pieces() -> u32` and
+    /// `fn sweep_piece(segment: CubicNurbsSegmentCache, curve: u32, piece:
+    /// u32, along: vec2<f32>, kind: u32, miter_start: vec4<f32>,
+    /// miter_end: vec4<f32>) -> Patch`, behind `fractions.wgsl` and
+    /// `sweep.wgsl`, which make every patch of them. The profile is the
+    /// input `profile`.
     const SWEEP_WGSL: &'static str;
 
     /// Inputs to compare both with, see [`GpuKernel::examples`].
@@ -49,14 +59,36 @@ pub trait Profile: DataType + Sync {
 }
 
 /// The inputs of a sweep as words: curves with as many `points` each
-/// as spine, `profile` and the offsets of the spine.
-pub(crate) fn sweep_example<P: Profile>(points: &[usize], profile: &[P]) -> Vec<Vec<u32>> {
+/// as spine, `profile`, whether the ends are capped and the offsets of the
+/// spine.
+pub(crate) fn sweep_example<P: Profile>(points: &[usize], profile: &[P], ends: u32) -> Vec<Vec<u32>> {
     let (segments, offsets) = super::nodes::example_curves(points);
+    sweep_example_along(&segments, &offsets, profile, ends)
+}
+
+/// [`sweep_example`] along `spine` with the offsets `offsets`.
+pub(crate) fn sweep_example_along<P: Profile>(
+    spine: &[CubicNurbsSegmentCache],
+    offsets: &[u32],
+    profile: &[P],
+    ends: u32,
+) -> Vec<Vec<u32>> {
     vec![
-        bytemuck::cast_slice(&segments).to_vec(),
+        bytemuck::cast_slice(spine).to_vec(),
         bytemuck::cast_slice(profile).to_vec(),
-        offsets,
+        vec![ends],
+        offsets.to_vec(),
     ]
+}
+
+/// Curves with corners and one which is closed, to sweep: a polyline which
+/// turns twice, and a rectangle.
+pub(crate) fn cornered_spine() -> (Vec<CubicNurbsSegmentCache>, Vec<u32>) {
+    use glam::Vec3;
+    let turns = super::polyline(&[Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 1.5, 0.5), Vec3::new(0.0, 2.0, 0.0)], false);
+    let closed = super::polyline(&[Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y], true);
+    let offsets = vec![0, turns.len() as u32, (turns.len() + closed.len()) as u32];
+    ([turns, closed].concat(), offsets)
 }
 
 /// Where along the whole curve each of its segments starts and ends, as
@@ -78,45 +110,52 @@ pub(crate) fn fractions(segments: &[CubicNurbsSegmentCache]) -> impl Iterator<It
 impl Profile for CubicNurbsSegmentCache {
     type Patch = SweptPatch;
 
-    fn patches(segments: usize, profile: usize) -> usize {
-        segments * profile
+    fn pieces(profile: usize) -> usize {
+        profile
     }
 
-    const SWEEP_WGSL: &'static str = concat!(include_str!("fractions.wgsl"), "
-fn sweep_patch(index: u32) -> SweptPatch {
-    let per = in_profile_len();
-    let at = index / per;
-    let piece = index % per;
-    let curve = in_spine_group_of(at);
-    let along = curve_fractions(in_spine(at), in_spine(in_spine_end(curve) - 1u));
-    let around = curve_fractions(in_profile(piece), in_profile(per - 1u));
-    return SweptPatch(in_spine(at), in_profile(piece), along, around);
+    fn patch(
+        segment: CubicNurbsSegmentCache,
+        profile: &[Self],
+        piece: usize,
+        along: [f32; 2],
+        kind: u32,
+        miters: [[f32; 4]; 2],
+    ) -> SweptPatch {
+        let around = fractions(profile).nth(piece).unwrap_or([0.0, 1.0]);
+        SweptPatch::cut(segment, profile[piece], along, around, kind, miters)
+    }
+
+    const SWEEP_WGSL: &'static str = concat!(include_str!("curve.wgsl"), include_str!("fractions.wgsl"), include_str!("sweep.wgsl"), "
+alias Patch = SweptPatch;
+
+fn sweep_pieces() -> u32 {
+    return in_profile_len();
 }
 
-fn sweep_offset(group: u32) -> u32 {
-    return spine_offset(group) * in_profile_len();
+fn sweep_piece(
+    segment: CubicNurbsSegmentCache,
+    curve: u32,
+    piece: u32,
+    along: vec2<f32>,
+    kind: u32,
+    miter_start: vec4<f32>,
+    miter_end: vec4<f32>,
+) -> SweptPatch {
+    let around = curve_fractions(in_profile(piece), in_profile(in_profile_len() - 1u));
+    return SweptPatch(segment, in_profile(piece), along, around, miter_start, miter_end, kind);
 }
 ");
 
     const SWEEP_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>] = &[
-        || sweep_example(&[6, 5], &square_profile()),
-        || sweep_example(&[7], &square_profile()[..1]),
-        || sweep_example::<CubicNurbsSegmentCache>(&[6], &[]),
+        || sweep_example(&[6, 5], &square_profile(), 0),
+        || sweep_example(&[7], &square_profile()[..1], 1),
+        || sweep_example::<CubicNurbsSegmentCache>(&[6], &[], 0),
+        || {
+            let (spine, offsets) = cornered_spine();
+            sweep_example_along(&spine, &offsets, &square_profile(), 0)
+        },
     ];
-
-    fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<SweptPatch> {
-        let around: Vec<_> = fractions(profile).collect();
-        spine
-            .iter()
-            .zip(fractions(spine))
-            .flat_map(|(spine, along)| {
-                profile
-                    .iter()
-                    .zip(&around)
-                    .map(move |(profile, around)| SweptPatch::new(*spine, *profile, along, *around))
-            })
-            .collect()
-    }
 }
 
 /// A square as a curve, with straight edges and sharp corners.

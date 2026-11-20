@@ -196,7 +196,7 @@ pub(crate) fn swept_example<P: Profile>(points: &[usize], profile: &[P]) -> (Vec
     let mut patches = Vec::new();
     let mut patch_offsets = vec![0];
     for curve in offsets.windows(2) {
-        patches.extend(P::sweep(&segments[curve[0] as usize..curve[1] as usize], profile));
+        patches.extend(crate::curve::sweep_curve(&segments[curve[0] as usize..curve[1] as usize], profile, true));
         patch_offsets.push(patches.len() as u32);
     }
     (patches, patch_offsets)
@@ -224,6 +224,9 @@ fn placed(value: Shape, place: Placement) -> Shape {
     var placed = value;
     placed.segment = curve_placed(value.segment, place);
     placed.radius = value.radius * place.scale;
+    // The planes it is cut at turn along.
+    placed.miter_start = vec4<f32>(place.rotation * value.miter_start.xyz, 0.0);
+    placed.miter_end = vec4<f32>(place.rotation * value.miter_end.xyz, 0.0);
     return placed;
 }
 "
@@ -260,6 +263,9 @@ fn placed(value: Shape, place: Placement) -> Shape {
     // only grows with the scale.
     let unturned = Placement(mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0)), place.scale, vec3<f32>(0.0));
     placed.profile = curve_placed(value.profile, unturned);
+    // The planes it is cut at turn along.
+    placed.miter_start = vec4<f32>(place.rotation * value.miter_start.xyz, 0.0);
+    placed.miter_end = vec4<f32>(place.rotation * value.miter_end.xyz, 0.0);
     return placed;
 }
 "

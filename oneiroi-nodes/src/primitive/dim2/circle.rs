@@ -7,7 +7,7 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
 };
 
-use crate::curve::{Curve, Profile, TubePatch, fractions, nurbs::CubicNurbsSegmentCache, sweep_example};
+use crate::curve::{Curve, Profile, TubePatch, nurbs::CubicNurbsSegmentCache, sweep_example};
 
 /// A circle around the origin. It is its radius and nothing else, every
 /// point on it is computed when it is asked for.
@@ -77,46 +77,52 @@ impl Profile for Circle {
         }
     }
 
-    fn patches(segments: usize, profile: usize) -> usize {
-        match profile {
-            0 => 0,
-            _ => segments,
-        }
+    fn pieces(profile: usize) -> usize {
+        profile.min(1)
     }
 
-    const SWEEP_WGSL: &'static str = concat!(include_str!("../../curve/fractions.wgsl"), "
-fn sweep_patch(index: u32) -> TubePatch {
-    let curve = in_spine_group_of(index);
-    let circle = in_profile(min(curve, in_profile_len() - 1u));
-    let along = curve_fractions(in_spine(index), in_spine(in_spine_end(curve) - 1u));
-    return TubePatch(in_spine(index), circle.radius, along);
+    fn patch(
+        segment: CubicNurbsSegmentCache,
+        profile: &[Self],
+        _piece: usize,
+        along: [f32; 2],
+        kind: u32,
+        miters: [[f32; 4]; 2],
+    ) -> TubePatch {
+        TubePatch::cut(segment, profile[0].radius, along, kind, miters)
+    }
+
+    const SWEEP_WGSL: &'static str = concat!(include_str!("../../curve/curve.wgsl"), include_str!("../../curve/fractions.wgsl"), include_str!("../../curve/sweep.wgsl"), "
+alias Patch = TubePatch;
+
+fn sweep_pieces() -> u32 {
+    return min(in_profile_len(), 1u);
 }
 
-fn sweep_offset(group: u32) -> u32 {
-    if (in_profile_len() == 0u) {
-        return 0u;
-    }
-    return spine_offset(group);
+fn sweep_piece(
+    segment: CubicNurbsSegmentCache,
+    curve: u32,
+    piece: u32,
+    along: vec2<f32>,
+    kind: u32,
+    miter_start: vec4<f32>,
+    miter_end: vec4<f32>,
+) -> TubePatch {
+    let circle = in_profile(min(curve, in_profile_len() - 1u));
+    return TubePatch(segment, circle.radius, along, kind, miter_start, miter_end);
 }
 ");
 
     const SWEEP_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>] = &[
-        || sweep_example(&[6, 5, 7], &[Circle::new(0.25), Circle::new(0.5)]),
-        || sweep_example(&[9], &[Circle::new(1.0)]),
-        || sweep_example::<Circle>(&[6], &[]),
-        || sweep_example(&[], &[Circle::new(1.0)]),
+        || sweep_example(&[6, 5, 7], &[Circle::new(0.25), Circle::new(0.5)], 0),
+        || sweep_example(&[9], &[Circle::new(1.0)], 1),
+        || sweep_example::<Circle>(&[6], &[], 0),
+        || sweep_example(&[], &[Circle::new(1.0)], 0),
+        || {
+            let (spine, offsets) = crate::curve::cornered_spine();
+            crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.1)], 0)
+        },
     ];
-
-    fn sweep(spine: &[CubicNurbsSegmentCache], profile: &[Self]) -> Vec<TubePatch> {
-        let Some(circle) = profile.first() else {
-            return Vec::new();
-        };
-        spine
-            .iter()
-            .zip(fractions(spine))
-            .map(|(segment, along)| TubePatch::new(*segment, circle.radius, along))
-            .collect()
-    }
 }
 
 /// A circle can be looked at as it is: a line around the origin of the
