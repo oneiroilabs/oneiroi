@@ -8,7 +8,7 @@
 //! recomputed from parameters, so the store is free to evict.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     hash::{Hash, Hasher},
     ptr::NonNull,
     sync::{Arc, Weak},
@@ -220,8 +220,9 @@ const DIRTY_RUNS: usize = 1024;
 
 struct Page {
     words: Words,
-    /// Free `(offset, len)` runs, sorted by offset and never adjacent.
-    free: Vec<(u32, u32)>,
+    /// Free runs, `offset → len`, never adjacent. [`Store::free_runs`] has
+    /// them by size.
+    free: BTreeMap<u32, u32>,
     /// The runs of words written since somebody last asked, as
     /// `(start, end)`, in the order they were written. Without anybody
     /// asking, as when nothing mirrors the pages, they are merged once
@@ -233,20 +234,9 @@ impl Page {
     fn new(words: u32) -> Self {
         Self {
             words: Words::zeroed(words as usize),
-            free: vec![(0, words)],
+            free: BTreeMap::new(),
             dirty: Vec::new(),
         }
-    }
-
-    fn alloc(&mut self, len: u32) -> Option<u32> {
-        let index = self.free.iter().position(|&(_, free)| free >= len)?;
-        let (offset, free) = self.free[index];
-        if free == len {
-            self.free.remove(index);
-        } else {
-            self.free[index] = (offset + len, free - len);
-        }
-        Some(offset)
     }
 
     fn mark_dirty(&mut self, start: u32, end: u32) {
@@ -298,19 +288,6 @@ impl Page {
         self.merge_dirty();
         std::mem::take(&mut self.dirty)
     }
-
-    fn free(&mut self, offset: u32, len: u32) {
-        let index = self.free.partition_point(|&(start, _)| start < offset);
-        self.free.insert(index, (offset, len));
-        if index + 1 < self.free.len() && offset + len == self.free[index + 1].0 {
-            self.free[index].1 += self.free[index + 1].1;
-            self.free.remove(index + 1);
-        }
-        if index > 0 && self.free[index - 1].0 + self.free[index - 1].1 == offset {
-            self.free[index - 1].1 += self.free[index].1;
-            self.free.remove(index);
-        }
-    }
 }
 
 struct Entry {
@@ -324,11 +301,21 @@ struct Entry {
     /// Who needs the value to stay, like an instance whose parameter it
     /// is: it is never evicted while one of them lives.
     holders: Vec<Weak<()>>,
+    /// The entries which are a part of this one, and go with it. Some may
+    /// be gone already, or be there twice.
+    parts: Vec<ContentKey>,
 }
 
 pub struct Store {
     pages: Vec<Page>,
+    /// Every free run of every page as `(len, page, offset)`: the smallest
+    /// which fits is found at once.
+    free_runs: BTreeSet<(u32, u32, u32)>,
     entries: KeyMap<Entry>,
+    /// When each entry was used, the oldest first: who is evicted next is
+    /// found at the front. An entry is in here once for each frame it was
+    /// used in, only the last of which counts.
+    used: VecDeque<(u64, ContentKey)>,
     page_words: u32,
     used_words: u64,
     frame: u64,
@@ -349,7 +336,9 @@ impl Store {
     pub fn with_page_words(page_words: u32) -> Self {
         Self {
             pages: Vec::new(),
+            free_runs: BTreeSet::new(),
             entries: KeyMap::default(),
+            used: VecDeque::new(),
             page_words,
             used_words: 0,
             frame: 0,
@@ -368,8 +357,11 @@ impl Store {
     /// the current frame.
     pub fn touch(&mut self, key: ContentKey) -> Option<Handle> {
         let entry = self.entries.get_mut(&key)?;
-        entry.last_used = self.frame;
         let (handle, parent) = (entry.handle, entry.alias_of);
+        if entry.last_used != self.frame {
+            entry.last_used = self.frame;
+            self.mark_used(key);
+        }
         // A part keeps what it is a part of.
         if let Some(parent) = parent {
             self.touch(parent);
@@ -405,7 +397,7 @@ impl Store {
             offset: whole.offset + start,
             len,
         };
-        self.entries.insert(
+        self.add(
             key,
             Entry {
                 handle,
@@ -413,8 +405,10 @@ impl Store {
                 resident: false,
                 alias_of: Some(parent),
                 holders: Vec::new(),
+                parts: Vec::new(),
             },
         );
+        self.add_part(parent, key);
         Some(handle)
     }
 
@@ -465,14 +459,14 @@ impl Store {
 
         if self.entries.contains_key(&key) {
             // The words were here already, the copy is not needed.
-            self.pages[handle.page as usize].free(handle.offset, handle.len);
+            self.free(handle);
             return (key, self.insert(key, words));
         }
         self.used_words += handle.len as u64;
         if !words.is_empty() {
             self.pages[handle.page as usize].mark_dirty(handle.offset, handle.offset + handle.len);
         }
-        self.entries.insert(
+        self.add(
             key,
             Entry {
                 handle,
@@ -480,6 +474,7 @@ impl Store {
                 resident: true,
                 alias_of: None,
                 holders: Vec::new(),
+                parts: Vec::new(),
             },
         );
         (key, handle)
@@ -510,7 +505,7 @@ impl Store {
         self.remove(key);
         let handle = self.alloc(len);
         self.used_words += len as u64;
-        self.entries.insert(
+        self.add(
             key,
             Entry {
                 handle,
@@ -518,6 +513,7 @@ impl Store {
                 resident: false,
                 alias_of: None,
                 holders: Vec::new(),
+                parts: Vec::new(),
             },
         );
         handle
@@ -561,14 +557,63 @@ impl Store {
     /// Takes the value of `key` out, if it is here and nothing is a part of
     /// it.
     fn remove(&mut self, key: ContentKey) {
+        self.remove_entry(key);
+    }
+
+    /// Takes the entry of `key` out, together with every part of it, and
+    /// frees what it owns. Returns how many entries that was.
+    fn remove_entry(&mut self, key: ContentKey) -> usize {
         let Some(entry) = self.entries.remove(&key) else {
-            return;
+            return 0;
         };
         if entry.alias_of.is_none() {
-            self.pages[entry.handle.page as usize].free(entry.handle.offset, entry.handle.len);
+            self.free(entry.handle);
             self.used_words -= entry.handle.len as u64;
-            self.entries.retain(|_, part| part.alias_of != Some(key));
         }
+        let mut removed = 1;
+        for part in entry.parts {
+            // Only what is still a part of it: a key can come back as
+            // something else.
+            if self.entries.get(&part).is_some_and(|entry| entry.alias_of == Some(key)) {
+                removed += self.remove_entry(part);
+            }
+        }
+        removed
+    }
+
+    /// A new entry, used in this frame.
+    fn add(&mut self, key: ContentKey, entry: Entry) {
+        self.entries.insert(key, entry);
+        self.mark_used(key);
+    }
+
+    /// Puts `key` last in line, as used in this frame.
+    fn mark_used(&mut self, key: ContentKey) {
+        self.used.push_back((self.frame, key));
+        // Most of what is in line is outdated once it is far longer than
+        // there are entries. Clearing it out then costs as much as it grew.
+        if self.used.len() > 2 * self.entries.len() + 64 {
+            let entries = &self.entries;
+            self.used
+                .retain(|(frame, key)| entries.get(key).is_some_and(|entry| entry.last_used == *frame));
+        }
+    }
+
+    /// Lets `part` go along with `parent`.
+    fn add_part(&mut self, parent: ContentKey, part: ContentKey) {
+        let Some(entry) = self.entries.get_mut(&parent) else {
+            return;
+        };
+        // Parts which are gone, or there twice, are only cleared out when
+        // the list would grow anyway, so it costs as much as it grew.
+        if entry.parts.len() == entry.parts.capacity() && !entry.parts.is_empty() {
+            let mut parts = std::mem::take(&mut entry.parts);
+            parts.sort_unstable();
+            parts.dedup();
+            parts.retain(|part| self.entries.get(part).is_some_and(|entry| entry.alias_of == Some(parent)));
+            self.entries.get_mut(&parent).unwrap().parts = parts;
+        }
+        self.entries.get_mut(&parent).unwrap().parts.push(part);
     }
 
     /// Makes room for a value of `len` words which a backend computes and
@@ -581,7 +626,7 @@ impl Store {
 
         let handle = self.alloc(len);
         self.used_words += len as u64;
-        self.entries.insert(
+        self.add(
             key,
             Entry {
                 handle,
@@ -590,6 +635,7 @@ impl Store {
                 resident: len == 0,
                 alias_of: None,
                 holders: Vec::new(),
+                parts: Vec::new(),
             },
         );
         handle
@@ -614,25 +660,60 @@ impl Store {
         true
     }
 
+    /// Room for `len` words: the smallest free run which fits, or a new
+    /// page if none does.
     fn alloc(&mut self, len: u32) -> Handle {
-        for (page, candidate) in self.pages.iter_mut().enumerate() {
-            if let Some(offset) = candidate.alloc(len) {
-                return Handle {
-                    page: page as u32,
-                    offset,
-                    len,
-                };
+        if len == 0 {
+            if self.pages.is_empty() {
+                self.pages.push(Page::new(self.page_words));
+                self.add_free_run(0, 0, self.page_words);
             }
+            return Handle { page: 0, offset: 0, len };
+        }
+        if let Some(&(run, page, offset)) = self.free_runs.range((len, 0, 0)..).next() {
+            self.free_runs.remove(&(run, page, offset));
+            self.pages[page as usize].free.remove(&offset);
+            if run > len {
+                self.add_free_run(page, offset + len, run - len);
+            }
+            return Handle { page, offset, len };
         }
 
-        let mut page = Page::new(self.page_words.max(len));
-        let offset = page.alloc(len).unwrap();
-        self.pages.push(page);
-        Handle {
-            page: self.pages.len() as u32 - 1,
-            offset,
-            len,
+        let page = self.pages.len() as u32;
+        let words = self.page_words.max(len);
+        self.pages.push(Page::new(words));
+        if words > len {
+            self.add_free_run(page, len, words - len);
         }
+        Handle { page, offset: 0, len }
+    }
+
+    /// Gives the room of `handle` back, merged with the free runs next to
+    /// it.
+    fn free(&mut self, handle: Handle) {
+        if handle.len == 0 {
+            return;
+        }
+        let Handle { page, mut offset, mut len } = handle;
+        let runs = &mut self.pages[page as usize].free;
+        if let Some((&before, &before_len)) = runs.range(..offset).next_back()
+            && before + before_len == offset
+        {
+            runs.remove(&before);
+            self.free_runs.remove(&(before_len, page, before));
+            offset = before;
+            len += before_len;
+        }
+        if let Some(after_len) = runs.remove(&(handle.offset + handle.len)) {
+            self.free_runs.remove(&(after_len, page, handle.offset + handle.len));
+            len += after_len;
+        }
+        self.add_free_run(page, offset, len);
+    }
+
+    fn add_free_run(&mut self, page: u32, offset: u32, len: u32) {
+        self.pages[page as usize].free.insert(offset, len);
+        self.free_runs.insert((len, page, offset));
     }
 
     pub fn words(&self, handle: Handle) -> &[u32] {
@@ -654,41 +735,34 @@ impl Store {
     /// are in use. Entries touched in the current frame are never freed.
     /// Returns how many entries were evicted.
     pub fn evict(&mut self, budget_words: u64) -> usize {
-        if self.used_words <= budget_words {
-            return 0;
-        }
-
-        for entry in self.entries.values_mut() {
-            entry.holders.retain(|holder| holder.strong_count() > 0);
-        }
-        let mut candidates: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| entry.last_used < self.frame && entry.holders.is_empty())
-            .map(|(key, entry)| (entry.last_used, *key))
-            .collect();
-        candidates.sort_unstable();
-
         let mut evicted = 0;
-        for (_, key) in candidates {
-            if self.used_words <= budget_words {
+        let mut held = Vec::new();
+        while self.used_words > budget_words {
+            let Some(&(frame, key)) = self.used.front() else {
+                break;
+            };
+            // Everything from here on was used in this frame.
+            if frame >= self.frame {
                 break;
             }
-            let Some(entry) = self.entries.remove(&key) else {
-                // A part which went along with what it is a part of.
+            self.used.pop_front();
+            let Some(entry) = self.entries.get_mut(&key) else {
                 continue;
             };
-            evicted += 1;
-            if entry.alias_of.is_some() {
+            // It was used again since.
+            if entry.last_used != frame {
                 continue;
             }
-            let handle = entry.handle;
-            self.pages[handle.page as usize].free(handle.offset, handle.len);
-            self.used_words -= handle.len as u64;
-            // Its parts point at memory which is free now.
-            let before = self.entries.len();
-            self.entries.retain(|_, entry| entry.alias_of != Some(key));
-            evicted += before - self.entries.len();
+            entry.holders.retain(|holder| holder.strong_count() > 0);
+            if !entry.holders.is_empty() {
+                held.push((frame, key));
+                continue;
+            }
+            evicted += self.remove_entry(key);
+        }
+        // What is held stays first in line, for when nobody holds it anymore.
+        for used in held.into_iter().rev() {
+            self.used.push_front(used);
         }
         evicted
     }
@@ -963,13 +1037,82 @@ mod tests {
 
     #[test]
     fn freed_runs_coalesce() {
-        let mut page = Page::new(12);
-        let a = page.alloc(4).unwrap();
-        let b = page.alloc(4).unwrap();
-        let c = page.alloc(4).unwrap();
-        page.free(a, 4);
-        page.free(c, 4);
-        page.free(b, 4);
-        assert_eq!(page.free, vec![(0, 12)]);
+        let mut store = Store::with_page_words(12);
+        let a = store.alloc(4);
+        let b = store.alloc(4);
+        let c = store.alloc(4);
+        store.free(a);
+        store.free(c);
+        store.free(b);
+        assert_eq!(store.pages[0].free, BTreeMap::from([(0, 12)]));
+        assert_eq!(store.free_runs, BTreeSet::from([(12, 0, 0)]));
+    }
+
+    #[test]
+    fn the_smallest_run_which_fits_is_taken() {
+        let mut store = Store::with_page_words(16);
+        let handles: Vec<_> = [3, 1, 5, 1, 2].into_iter().map(|len| store.alloc(len)).collect();
+        store.free(handles[0]);
+        store.free(handles[2]);
+        // Into the run of 3 rather than the one of 5.
+        assert_eq!(store.alloc(3).offset, 0);
+        // Into what is left at the end, which fits exactly.
+        assert_eq!(store.alloc(4).offset, 12);
+        assert_eq!(store.alloc(5).offset, 4);
+        assert_eq!(store.alloc(1).page, 1);
+    }
+
+    #[test]
+    fn parts_go_with_what_they_are_part_of() {
+        let mut store = Store::with_page_words(64);
+        store.insert(key(1), &[1, 2, 3, 4]);
+        for part in 0..100 {
+            store.alias(key(1000 + part), key(1), part % 4, 1);
+        }
+        // A part of a part, and parts which went on their own already.
+        store.alias(key(2000), key(1000), 0, 1);
+        store.end_frame();
+        store.touch(key(1));
+        store.evict(0);
+        assert_eq!(store.len(), 1);
+        assert!(store.entries[&key(1)].parts.len() <= 100);
+
+        store.alias(key(1000), key(1), 0, 1);
+        store.alias(key(2000), key(1000), 0, 1);
+        store.end_frame();
+        assert_eq!(store.evict(0), 3);
+        assert!(store.is_empty());
+        assert_eq!(store.used_words(), 0);
+    }
+
+    #[test]
+    fn eviction_leaves_held_values_first_in_line() {
+        let mut store = Store::with_page_words(8);
+        let holder = Arc::new(());
+        store.insert(key(1), &[1]);
+        store.hold(key(1), &holder);
+        store.end_frame();
+        store.insert(key(2), &[2]);
+        store.end_frame();
+        assert_eq!(store.evict(0), 1);
+        assert!(store.contains(key(1)));
+
+        drop(holder);
+        store.end_frame();
+        assert_eq!(store.evict(0), 1);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn what_was_used_stays_bounded_without_eviction() {
+        let mut store = Store::with_page_words(64);
+        for frame in 0..1000u32 {
+            store.insert(key(frame % 10), &[frame]);
+            for n in 0..10 {
+                store.touch(key(n));
+            }
+            store.end_frame();
+        }
+        assert!(store.used.len() <= 2 * store.len() + 64 + 10);
     }
 }
