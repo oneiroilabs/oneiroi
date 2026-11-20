@@ -5,7 +5,7 @@ use std::{f32::consts::TAU, marker::PhantomData};
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec3Swizzles, Vec4};
 use oneiroi_core::{
-    node::{Caps, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, PortType},
+    node::{Caps, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     program::{BuildError, Program, ProgramBuilder, SlotId},
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
@@ -579,14 +579,7 @@ pub fn swept(
     spine: SlotId,
     profile: SlotId,
 ) -> Result<SlotId, BuildError> {
-    let mut inputs = vec![spine, profile];
-    for port in &SWEEP.inputs[2..] {
-        let PortType::Exact(ty) = port.ty else {
-            unreachable!("only the spine and the profile are left to be linked");
-        };
-        inputs.push(builder.constant_words(ty, port.default.words()));
-    }
-    Ok(builder.generic(registry, &SWEEP, &inputs)?[0])
+    Ok(crate::with_defaults(builder, registry, &SWEEP, &[spine, profile])?[0])
 }
 
 struct Ports<P>(PhantomData<P>);

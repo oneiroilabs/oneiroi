@@ -828,7 +828,7 @@ fn instances_scene() -> Option<Scene> {
     let t = b.constant::<f32>(&[]);
     let frames = b.node(&oneiroi_nodes::curve::SAMPLE_CURVE, &[line, count, spacing, t]).unwrap()[0];
     let scale = b.constant(&[0.8f32]);
-    let placed = b.generic(&registry, &instance::INSTANCE, &[frames, tube, scale]).unwrap()[0];
+    let placed = oneiroi_nodes::with_defaults(&mut b, &registry, &instance::INSTANCE, &[frames, tube, scale]).unwrap()[0];
     let copies = b.generic(&registry, &instance::REALIZE, &[placed]).unwrap()[0];
     b.output("instances", placed);
     b.output("copies", copies);

@@ -319,7 +319,7 @@ fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
     let torus = swept(b, registry, ring, circle).unwrap();
     let scale = b.constant::<f32>(&[1.0]);
-    b.generic(registry, &INSTANCE, &[frames, torus, scale]).unwrap()[0]
+    oneiroi_nodes::with_defaults(b, registry, &INSTANCE, &[frames, torus, scale]).unwrap()[0]
 }
 
 /// The control points of every curve, with the first one of the first

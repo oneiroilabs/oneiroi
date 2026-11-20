@@ -16,6 +16,7 @@ mod describe;
 
 pub mod curve;
 mod generic;
+pub use generic::with_defaults;
 pub mod instance;
 mod parallel;
 pub mod primitive;

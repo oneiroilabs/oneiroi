@@ -96,8 +96,33 @@ pub fn quat_from_degrees(degrees: Vec3) -> Quat {
 
 /// Where a shape put onto `frame` goes, see [`Placement::onto`].
 pub fn onto_frame(frame: &EvaluatedFrame, scale: f32) -> Similarity {
+    aligned(frame, scale, ALIGN_FRAME)
+}
+
+/// How [`INSTANCE`] turns a shape it puts onto a point: as the frame there
+/// is turned.
+pub const ALIGN_FRAME: u32 = 0;
+/// Upright: its `x` along where the curve heads, seen from above, and its
+/// `y` up, like a fence along a path.
+pub const ALIGN_UPRIGHT: u32 = 1;
+/// Not at all: only moved.
+pub const ALIGN_POSITION: u32 = 2;
+const ALIGNS: &[&str] = &["frame", "upright", "position"];
+
+/// Where a shape put onto `frame` goes, turned as `align` says. The same as
+/// `instance_frame` on the GPU.
+pub fn aligned(frame: &EvaluatedFrame, scale: f32, align: u32) -> Similarity {
     let frame = MovingFrame::from(*frame);
-    Similarity::new(quat_from_basis(frame.normal, frame.binormal, frame.tangent), scale, frame.position)
+    let rotation = match align {
+        ALIGN_FRAME => quat_from_basis(frame.normal, frame.binormal, frame.tangent),
+        ALIGN_UPRIGHT => {
+            // Where it heads, flat; straight up or down it heads nowhere.
+            let heading = Vec3::new(frame.tangent.x, 0.0, frame.tangent.z).try_normalize().unwrap_or(Vec3::X);
+            quat_from_basis(heading, Vec3::Y, heading.cross(Vec3::Y))
+        }
+        _ => Quat::IDENTITY,
+    };
+    Similarity::new(rotation, scale, frame.position)
 }
 
 /// A shape which can be placed by reference.
@@ -307,6 +332,10 @@ generic_node! {
             port GenericPort::implementing("shape", PLACEABLE).grouped();
             /// How large the copies are, the same for all of them.
             port GenericPort::exact::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one();
+            /// How the copies are turned: as the frame is (`frame`), upright with
+            /// their `x` where the curve heads and their `y` up, like the posts of
+            /// a fence along a path (`upright`), or not at all (`position`).
+            port GenericPort::exact::<u32>("align").choices(ALIGNS);
         }
         outputs {
             /// The copies, a group of them per point.
@@ -433,11 +462,12 @@ fn instance<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let covered = covered(inputs, 1);
     let starts = group_firsts(&groups);
     let scale = inputs.get::<f32>(2).first().copied().unwrap_or(1.0);
+    let align = inputs.choice(3) as u32;
     let rows: Vec<InstanceRow> = points
         .par_iter()
         .enumerate()
         .flat_map_iter(|(point, frame)| {
-            let transform = onto_frame(frame, scale);
+            let transform = aligned(frame, scale, align);
             starts.iter().enumerate().map(move |(group, start)| InstanceRow {
                 transform,
                 group: group as u32,
@@ -493,12 +523,13 @@ fn instance_instances<S: Shape>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let points = inputs.get::<EvaluatedFrame>(0);
     let given = inputs.get::<InstanceRow>(1);
     let scale = inputs.get::<f32>(2).first().copied().unwrap_or(1.0);
+    let align = inputs.choice(3) as u32;
     let total = inputs.total(1).elements;
     let rows: Vec<InstanceRow> = points
         .par_iter()
         .enumerate()
         .flat_map_iter(|(point, frame)| {
-            let frame = onto_frame(frame, scale);
+            let frame = aligned(frame, scale, align);
             given.iter().map(move |row| InstanceRow {
                 transform: frame.then(&row.transform),
                 group: row.group,
@@ -587,11 +618,13 @@ impl<S: Shape> Ports<S> {
         PortDecl::new::<EvaluatedFrame>("points"),
         PortDecl::new::<S>("shape").grouped(),
         PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<u32>("align").choices(ALIGNS),
     ];
     const INSTANCE_INSTANCES: &'static [PortDecl] = &[
         PortDecl::new::<EvaluatedFrame>("points"),
         PortDecl::of("shape", S::INSTANCES).grouped(),
         PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<u32>("align").choices(ALIGNS),
     ];
     const INSTANCE_OUT: &'static [PortDecl] = &[PortDecl::of("instances", S::INSTANCES).grouped().instances_of(1)];
 
@@ -648,20 +681,24 @@ fn instance_offsets(point: u32) -> u32 {
         ],
         requires: Caps::NONE,
         // The offsets of the shape, for the total.
-        reads: &[3],
+        reads: &[4],
         accepts: None,
         examples: &[
             || {
                 let (shape, offsets) = S::examples().remove(0);
-                vec![words(&example_frames(3)), words(&shape), words(&[1.5f32]), offsets]
+                vec![words(&example_frames(3)), words(&shape), words(&[1.5f32]), vec![ALIGN_FRAME], offsets]
             },
             || {
                 let (shape, _) = S::examples().remove(0);
-                vec![words(&example_frames(2)), words(&shape), Vec::new(), Vec::new()]
+                vec![words(&example_frames(2)), words(&shape), Vec::new(), vec![ALIGN_UPRIGHT], Vec::new()]
             },
             || {
                 let (shape, offsets) = S::examples().remove(0);
-                vec![Vec::new(), words(&shape), Vec::new(), offsets]
+                vec![Vec::new(), words(&shape), Vec::new(), vec![ALIGN_POSITION], offsets]
+            },
+            || {
+                let (shape, offsets) = S::examples().remove(0);
+                vec![words(&example_frames(4)), words(&shape), words(&[0.5f32]), vec![ALIGN_UPRIGHT], offsets]
             },
         ],
         stages: &[],
@@ -703,16 +740,20 @@ fn instance_offsets(point: u32) -> u32 {
         ],
         requires: Caps::NONE,
         // The total of the instances which are put onto the points.
-        reads: &[6],
+        reads: &[7],
         accepts: None,
         examples: &[
             || {
                 let (rows, groups, shape, offsets, total) = instances_example::<S>(0);
-                vec![words(&example_frames(3)), rows, words(&[2.0f32]), groups, shape, offsets, total]
+                vec![words(&example_frames(3)), rows, words(&[2.0f32]), vec![ALIGN_FRAME], groups, shape, offsets, total]
             },
             || {
                 let (rows, groups, shape, offsets, total) = instances_example::<S>(1);
-                vec![words(&example_frames(1)), rows, Vec::new(), groups, shape, offsets, total]
+                vec![words(&example_frames(1)), rows, Vec::new(), vec![ALIGN_UPRIGHT], groups, shape, offsets, total]
+            },
+            || {
+                let (rows, groups, shape, offsets, total) = instances_example::<S>(0);
+                vec![words(&example_frames(2)), rows, Vec::new(), vec![ALIGN_POSITION], groups, shape, offsets, total]
             },
         ],
         stages: &[],
@@ -987,6 +1028,44 @@ mod tests {
     /// The rotation of a frame takes x, y and z to its normal, binormal and
     /// tangent, whichever way it is turned.
     #[test]
+    fn copies_can_stand_upright_or_keep_their_turn() {
+        let frame = |tangent: Vec3| {
+            let tangent = tangent.normalize();
+            // Any normal across the tangent: upright ignores it.
+            let normal = tangent.any_orthonormal_vector();
+            EvaluatedFrame::from(MovingFrame {
+                position: Vec3::new(1.0, 2.0, 3.0),
+                tangent,
+                normal,
+                binormal: tangent.cross(normal),
+            })
+        };
+        let turned = |frame: &EvaluatedFrame, align: u32, axis: Vec3| {
+            let similarity = aligned(frame, 1.0, align);
+            similarity.point(axis) - similarity.point(Vec3::ZERO)
+        };
+
+        // Along x upright is not turned at all, like only moved.
+        let along_x = frame(Vec3::X);
+        for align in [ALIGN_UPRIGHT, ALIGN_POSITION] {
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                assert!(turned(&along_x, align, axis).distance(axis) < 1e-5);
+            }
+            assert!(aligned(&along_x, 1.0, align).point(Vec3::ZERO).distance(Vec3::new(1.0, 2.0, 3.0)) < 1e-5);
+        }
+        // Climbing diagonally: x where it heads seen from above, y up.
+        let climbing = frame(Vec3::new(1.0, 0.7, 1.0));
+        let heading = Vec3::new(1.0, 0.0, 1.0).normalize();
+        assert!(turned(&climbing, ALIGN_UPRIGHT, Vec3::X).distance(heading) < 1e-5);
+        assert!(turned(&climbing, ALIGN_UPRIGHT, Vec3::Y).distance(Vec3::Y) < 1e-5);
+        // Straight up there is no heading, and it stays as it is.
+        let up = frame(Vec3::Y);
+        assert!(turned(&up, ALIGN_UPRIGHT, Vec3::Y).distance(Vec3::Y) < 1e-5);
+        // The frame itself turns z onto the tangent.
+        assert!(turned(&climbing, ALIGN_FRAME, Vec3::Z).distance(Vec3::new(1.0, 0.7, 1.0).normalize()) < 1e-5);
+    }
+
+    #[test]
     fn a_frame_puts_x_along_the_normal_and_z_along_the_tangent() {
         for frame in example_frames(8) {
             let frame = MovingFrame::from(frame);
@@ -1032,7 +1111,7 @@ mod tests {
         let (shape, shape_offsets) = crate::curve::example_curves(&[5, 6]);
         let shape_slot = b.param_grouped("shape", CubicNurbsSegmentCache::INFO, &[]);
         let scale = b.constant(&[0.5f32]);
-        let placed = b.generic(&registry, &INSTANCE, &[frames, shape_slot, scale]).unwrap()[0];
+        let placed = crate::with_defaults(&mut b, &registry, &INSTANCE, &[frames, shape_slot, scale]).unwrap()[0];
         assert_eq!(b.slot(placed).prototype.unwrap().elements, shape_slot);
         let copies = b.generic(&registry, &REALIZE, &[placed]).unwrap()[0];
         b.output("instances", placed);
