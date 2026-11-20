@@ -23,6 +23,9 @@ pub struct PortDecl {
     /// they refer to. Either the input is the shape, or instances of it
     /// and the shape is theirs.
     pub prototype: Option<usize>,
+    /// Only meaningful for inputs: the names of what a single `u32` can
+    /// say, by its value. See [`PortDecl::choices`].
+    pub choices: &'static [&'static str],
 }
 
 impl PortDecl {
@@ -35,6 +38,7 @@ impl PortDecl {
             card: Card::Many,
             groups: Groups::Own,
             prototype: None,
+            choices: &[],
         }
     }
 
@@ -47,6 +51,7 @@ impl PortDecl {
             card: Card::Many,
             groups: Groups::Own,
             prototype: None,
+            choices: &[],
         }
     }
 
@@ -65,6 +70,18 @@ impl PortDecl {
     /// A port of a single element.
     pub const fn one(mut self) -> Self {
         self.card = Card::One;
+        self
+    }
+
+    /// An input of a single `u32` which picks one of `choices`, by its
+    /// index: an editor offers their names instead of a number. It starts
+    /// at the first one. The kernel reads it with [`Inputs::choice`].
+    pub const fn choices(mut self, choices: &'static [&'static str]) -> Self {
+        self.card = Card::One;
+        self.choices = choices;
+        if matches!(self.default, PortDefault::Empty) {
+            self.default = PortDefault::U32(&[0]);
+        }
         self
     }
 
@@ -169,6 +186,13 @@ impl<'a> Inputs<'a> {
             .first()
             .copied()
             .unwrap_or_else(T::zeroed)
+    }
+
+    /// Which of the [choices](PortDecl::choices) of input `index` is
+    /// picked. A number past the last one is the last one.
+    pub fn choice(&self, index: usize) -> usize {
+        let last = self.ports[index].choices.len().saturating_sub(1);
+        (self.value::<u32>(index) as usize).min(last)
     }
 
     /// The offsets of a grouped input, if it has groups.
@@ -536,6 +560,8 @@ pub struct GenericPort {
     /// Every version has the same. Where the groups of an output come
     /// from can differ between the versions.
     pub card: Card,
+    /// See [`PortDecl::choices`]. Every version has the same.
+    pub choices: &'static [&'static str],
 }
 
 impl GenericPort {
@@ -545,6 +571,7 @@ impl GenericPort {
             ty: PortType::Exact(T::INFO),
             default: PortDefault::Empty,
             card: Card::Many,
+            choices: &[],
         }
     }
 
@@ -554,6 +581,7 @@ impl GenericPort {
             ty: PortType::Trait(tr),
             default: PortDefault::Empty,
             card: Card::Many,
+            choices: &[],
         }
     }
 
@@ -569,6 +597,16 @@ impl GenericPort {
 
     pub const fn grouped(mut self) -> Self {
         self.card = Card::Grouped;
+        self
+    }
+
+    /// See [`PortDecl::choices`].
+    pub const fn choices(mut self, choices: &'static [&'static str]) -> Self {
+        self.card = Card::One;
+        self.choices = choices;
+        if matches!(self.default, PortDefault::Empty) {
+            self.default = PortDefault::U32(&[0]);
+        }
         self
     }
 }
@@ -639,6 +677,14 @@ impl NodeRegistry {
 
     /// Panics when a different node is already registered under the same id.
     pub fn register(&mut self, node: &'static NodeDef) {
+        for port in node.inputs.iter().filter(|port| !port.choices.is_empty()) {
+            assert!(
+                port.ty == u32::INFO && port.card == Card::One,
+                "`{}` of `{}` has choices, so it has to be a single `u32`",
+                port.name,
+                node.id
+            );
+        }
         if let Some(existing) = self.nodes.insert(node.id, node) {
             assert!(
                 std::ptr::eq(existing, node),
@@ -658,6 +704,7 @@ impl NodeRegistry {
                 && generic.iter().zip(node).all(|(generic, port)| {
                     generic.name == port.name
                         && generic.card == port.card
+                        && generic.choices == port.choices
                         && match generic.ty {
                             PortType::Exact(ty) => ty == port.ty,
                             PortType::Trait(_) => true,
@@ -794,5 +841,48 @@ impl NodeRegistry {
 
     pub fn implements(&self, ty: &TypeInfo, tr: Trait) -> bool {
         self.implementors(tr).contains(ty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static PICK: NodeDef = NodeDef {
+        id: "test.pick",
+        version: 0,
+        inputs: &[PortDecl::new::<u32>("mode").choices(&["a", "b", "c"])],
+        outputs: &[PortDecl::new::<u32>("mode")],
+        cpu: |inputs, outputs| outputs.set(0, &[inputs.choice(0) as u32]),
+        gpu: &[],
+    };
+
+    #[test]
+    fn a_choice_starts_at_the_first_and_ends_at_the_last() {
+        let port = &PICK.inputs[0];
+        assert_eq!((port.card, port.default.words()), (Card::One, &[0][..]));
+
+        let mut store = Store::new();
+        for (value, picked) in [(0, 0), (2, 2), (7, 2)] {
+            let key = crate::store::ContentKey::of_data(&u32::INFO, &[value]);
+            let handles = [store.insert(key, &[value])];
+            let inputs = Inputs::new(&store, &PICK, &handles);
+            assert_eq!(inputs.choice(0), picked);
+        }
+        NodeRegistry::new().register(&PICK);
+    }
+
+    #[test]
+    #[should_panic(expected = "has to be a single `u32`")]
+    fn only_a_single_u32_has_choices() {
+        static WRONG: NodeDef = NodeDef {
+            id: "test.wrong",
+            version: 0,
+            inputs: &[PortDecl::new::<f32>("mode").choices(&["a"])],
+            outputs: &[],
+            cpu: |_, _| {},
+            gpu: &[],
+        };
+        NodeRegistry::new().register(&WRONG);
     }
 }

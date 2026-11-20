@@ -91,6 +91,10 @@ pub fn port_tip(document: &Document, port: &PortView) -> String {
         tip += "\n\n";
         tip += port.doc.trim();
     }
+    if !port.choices.is_empty() {
+        let choices: Vec<_> = port.choices.iter().map(|choice| format!("`{choice}`")).collect();
+        tip += &format!("\n\nOne of {}.", choices.join(", "));
+    }
     if !ty_doc.trim().is_empty() {
         tip += &format!("\n\n*{ty}:* {}", oneiroi_nodes::meta::summary(&ty_doc));
     }

@@ -69,6 +69,9 @@ pub struct PortView {
     pub card: Card,
     /// The value of an input nothing is set on.
     pub default: Vec<u32>,
+    /// The names of what an input of a single `u32` can say, if it is one
+    /// to pick from.
+    pub choices: Vec<String>,
 }
 
 /// Which side of a node a port is on.
@@ -751,6 +754,7 @@ impl Document {
                         ty: PinType::Exact(program.slot(param.slot).ty),
                         card: program.slot(param.slot).card,
                         default: param.default.to_vec(),
+                        choices: Vec::new(),
                     })
                     .collect(),
                 outputs: program
@@ -763,6 +767,7 @@ impl Document {
                         ty: PinType::Exact(program.slot(output.slot).ty),
                         card: program.slot(output.slot).card,
                         default: Vec::new(),
+                        choices: Vec::new(),
                     })
                     .collect(),
                 known: true,
@@ -778,6 +783,7 @@ impl Document {
                 ty: port.ty.into(),
                 card: port.card,
                 default: port.default.words().into(),
+                choices: port.choices.iter().map(|choice| choice.to_string()).collect(),
             };
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| self.label(generic.id)),
@@ -795,6 +801,7 @@ impl Document {
                 ty: PinType::Exact(port.ty),
                 card: port.card,
                 default: port.default.words().into(),
+                choices: port.choices.iter().map(|choice| choice.to_string()).collect(),
             };
             return Some(NodeView {
                 title: custom.unwrap_or_else(|| self.label(def.id)),
@@ -814,6 +821,7 @@ impl Document {
             ty: PinType::Unknown,
             card: Card::Many,
             default: Vec::new(),
+            choices: Vec::new(),
         };
         let mut outputs: Vec<String> = self
             .graph()
@@ -989,6 +997,37 @@ impl Document {
             }
             _ => (format_value(&words_to_value(&port.default, ty.scalar)), true),
         })
+    }
+
+    /// What an input to pick from can say, and which of it is picked, if
+    /// it is one and nothing is linked to it.
+    pub fn input_choice(&self, node: NodeId, input: &str) -> Option<(Vec<String>, usize)> {
+        let view = self.view(node)?;
+        let port = view.inputs.into_iter().find(|port| port.name == input)?;
+        if port.choices.is_empty() {
+            return None;
+        }
+        let picked = match self.graph().node(node)?.inputs.get(input) {
+            Some(Input::Link { .. }) => return None,
+            Some(Input::Value(Value::U32(value))) | Some(Input::Exposed { value: Some(Value::U32(value)), .. }) => {
+                value.first().copied()
+            }
+            _ => port.default.first().copied(),
+        };
+        let last = port.choices.len() - 1;
+        Some((port.choices, (picked.unwrap_or(0) as usize).min(last)))
+    }
+
+    /// Picks `choice` for an input to pick from. Returns whether it is one
+    /// of its choices.
+    pub fn choose(&mut self, node: NodeId, input: &str, choice: &str) -> bool {
+        let Some((choices, _)) = self.input_choice(node, input) else {
+            return false;
+        };
+        match choices.iter().position(|known| known == choice) {
+            Some(index) => self.set_input(node, input, &index.to_string()),
+            None => false,
+        }
     }
 
     /// Sets an input from text. Returns whether the text was a value of
@@ -1795,6 +1834,31 @@ mod tests {
         let view = loaded.view(unknown).unwrap();
         assert!(!view.known);
         assert_eq!(view.inputs[0].name, "curve");
+    }
+
+    #[test]
+    fn an_input_to_pick_from_offers_its_choices() {
+        use oneiroi_core::node::{NodeDef, PortDecl};
+        static PICK: NodeDef = NodeDef {
+            id: "test.pick",
+            version: 0,
+            inputs: &[PortDecl::new::<u32>("mode").choices(&["first", "second", "third"])],
+            outputs: &[PortDecl::new::<u32>("mode")],
+            cpu: |inputs, outputs| outputs.set(0, &[inputs.choice(0) as u32]),
+            gpu: &[],
+        };
+        let mut document = Document::example();
+        document.registry.register(&PICK);
+        let node = document.add(NodeKind::Node("test.pick".into()), [0.0, 0.0]);
+
+        let first = vec!["first".to_string(), "second".into(), "third".into()];
+        assert_eq!(document.input_choice(node, "mode"), Some((first.clone(), 0)));
+        assert!(document.choose(node, "mode", "third"));
+        assert_eq!(document.input_choice(node, "mode"), Some((first, 2)));
+        assert!(!document.choose(node, "mode", "fourth"));
+        // Other inputs have nothing to pick from.
+        let [curve, ..] = nodes(&document);
+        assert_eq!(document.input_choice(curve, "points"), None);
     }
 
     #[test]

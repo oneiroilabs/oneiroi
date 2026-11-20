@@ -59,6 +59,8 @@ enum Message {
     Display(u32),
     Edited(u32, String, String),
     Committed(u32, String),
+    /// One of the choices of an input to pick from was picked.
+    Chosen(u32, String, String),
     Reset(u32, String),
     Frame,
     Detail(usize),
@@ -265,6 +267,10 @@ impl Editor {
                 {
                     self.note = Some(format!("`{text}` is not a value for `{}`", key.1));
                 }
+            }
+            Message::Chosen(node, input, choice) => {
+                self.edits.remove(&(node.into(), input.clone()));
+                self.document.choose(node.into(), &input, &choice);
             }
             Message::Reset(node, input) => {
                 self.edits.remove(&(node.into(), input.clone()));
@@ -571,7 +577,15 @@ impl Editor {
                 tooltip::Position::Right,
             );
 
-            let field: Element<'_, Message> = if editable {
+            let choice = self.document.input_choice(node, &port.name);
+            let field: Element<'_, Message> = if let Some((choices, picked)) = choice {
+                let name = port.name.clone();
+                let picked = choices[picked].clone();
+                pick_list(Some(picked), choices, |choice: &String| choice.clone())
+                    .text_size(12)
+                    .on_select(move |choice| Message::Chosen(node.raw(), name.clone(), choice))
+                    .into()
+            } else if editable {
                 let name = port.name.clone();
                 let shown = self.edits.get(&key).cloned().unwrap_or(stored);
                 text_input("", shown)
