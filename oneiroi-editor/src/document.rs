@@ -1526,9 +1526,13 @@ mod tests {
             labels,
             [
                 "Curve / Circle",
+                "Curve / Line",
                 "Curve / NURBS Curve",
+                "Curve / Polyline",
+                "Curve / Rectangle",
                 "Curve / Sample Curve",
                 "Curve / Sweep",
+                "Curve / To Curve",
                 "Curve / Translate Curve",
                 "Instance / Instance on Points",
                 "Instance / Realize Instances",
@@ -1899,6 +1903,18 @@ mod tests {
         let [_, circle, sweep] = nodes(&document);
         assert!(document.converts(value, "values", sweep, "profile"));
         assert!(!document.converts(circle, "circle", sweep, "profile"));
+    }
+
+    #[test]
+    fn a_rectangle_is_shown_as_its_curve() {
+        let mut document = Document::example();
+        let rectangle = document.add_node("curve.rectangle", [0.0, 0.0]);
+        document.set_display(Some(rectangle));
+        let Shown::Drawn { drawable, .. } = document.shown() else {
+            panic!("the rectangle is not drawn");
+        };
+        assert_eq!(drawable.ty.name, "cubic_nurbs_segment");
+        assert!(document.error().is_none());
     }
 
     #[test]

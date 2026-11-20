@@ -563,6 +563,7 @@ pub fn register(registry: &mut NodeRegistry) {
     registry.register(&crate::primitive::CIRCLE);
     super::register_profile::<crate::primitive::Circle>(registry);
     super::register_profile::<CubicNurbsSegmentCache>(registry);
+    super::shapes::register(registry);
 }
 
 #[cfg(test)]
@@ -746,11 +747,12 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 5 nodes of curves, a mesh for each of the 2 surfaces, a sweep
-        // for each of the 2 profiles and 2 values. For each of the 4
-        // shapes Instance on Points and Transform, given the shape or
-        // instances of it, and Realize for the 3 which can be copied.
-        assert_eq!(registry.iter().count(), 10 + 4 * 4 + 3);
+        // 8 nodes of curves, a curve of each of the 2 outlines, a mesh
+        // for each of the 2 surfaces, a sweep for each of the 2 profiles
+        // and 2 values. For each of the 4 shapes Instance on Points and
+        // Transform, given the shape or instances of it, and Realize for
+        // the 3 which can be copied.
+        assert_eq!(registry.iter().count(), 15 + 4 * 4 + 3);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

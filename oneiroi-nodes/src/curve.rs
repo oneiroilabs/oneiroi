@@ -7,17 +7,20 @@ mod nodes;
 pub mod nurbs;
 pub mod ops;
 mod profile;
+pub mod shapes;
 mod sweep;
 
 pub use nodes::{EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
 pub(crate) use nodes::example_curves;
 pub(crate) use profile::{fractions, sweep_example};
 pub use profile::{PROFILE, Profile};
+pub use shapes::{LINE, OUTLINE, Outline, POLYLINE, TO_CURVE, polyline, register_outline};
 pub use sweep::{SWEEP, SweptPatch, TubePatch, register_profile, tube};
 #[cfg(feature = "meta")]
 pub use {
     nodes::{NURBS_META, SAMPLE_CURVE_META, TRANSLATE_META},
     profile::PROFILE_META,
+    shapes::{LINE_META, OUTLINE_META, POLYLINE_META, TO_CURVE_META},
     sweep::SWEEP_META,
 };
 

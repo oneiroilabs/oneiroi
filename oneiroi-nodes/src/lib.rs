@@ -51,6 +51,10 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         &curve::TRANSLATE_META,
         &curve::SWEEP_META,
         &primitive::CIRCLE_META,
+        &primitive::RECTANGLE_META,
+        &curve::LINE_META,
+        &curve::POLYLINE_META,
+        &curve::TO_CURVE_META,
         &surface::MESH_META,
         &instance::INSTANCE_META,
         &instance::TRANSFORM_META,
@@ -67,12 +71,14 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         CubicNurbsSegmentCache::META,
         EvaluatedFrame::META,
         primitive::Circle::META,
+        primitive::Rectangle::META,
         TubePatch::META,
         SweptPatch::META,
     ] {
         meta.add_type(ty);
     }
     meta.add_trait(curve::PROFILE_META);
+    meta.add_trait(curve::OUTLINE_META);
     meta.add_trait(surface::SURFACE_META);
     meta.add_trait(instance::PLACEABLE_META);
     instance::describe(meta);

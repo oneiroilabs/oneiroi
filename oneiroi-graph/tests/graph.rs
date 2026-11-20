@@ -732,3 +732,45 @@ fn instances_are_copied_where_the_shape_is_needed() {
     let rows = engine.read::<oneiroi_core::types::InstanceRow>(&instance, "instances");
     assert_eq!(rows.map(<[_]>::len), Some(3));
 }
+
+#[test]
+fn circles_and_rectangles_are_curves_where_curves_are_needed() {
+    use oneiroi_nodes::curve::{SweptPatch, nurbs::CubicNurbsSegmentCache};
+
+    // A rectangular bar bent into a ring: the circle becomes the spine,
+    // the rectangle the profile, both as curves.
+    let mut graph = Graph::new("ring");
+    let circle = graph.add("curve.circle");
+    graph.set(circle, "radius", 2.0f32).unwrap();
+    let rectangle = graph.add("curve.rectangle");
+    graph.set(rectangle, "width", 0.2f32).unwrap();
+    graph.set(rectangle, "height", 0.1f32).unwrap();
+    let sweep = graph.add("curve.sweep");
+    graph.connect(circle, "circle", sweep, "spine").unwrap();
+    graph.connect(rectangle, "rectangle", sweep, "profile").unwrap();
+    graph.add_output("surface", sweep, "surface").unwrap();
+    // A line on its own, which needs nothing in between.
+    let line = graph.add("curve.line");
+    graph.add_output("line", line, "curve").unwrap();
+
+    let mut engine = Engine::default();
+    let id = lower(&graph, &mut engine);
+    let program = engine.programs().get(id);
+    let conversions: Vec<_> = program
+        .ops
+        .iter()
+        .filter_map(|op| match op.kind {
+            oneiroi_core::program::OpKind::Node(node) if node.id.starts_with("curve.to_curve") => Some(node.id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(conversions, ["curve.to_curve<circle>", "curve.to_curve<rectangle>"]);
+
+    let mut instance = engine.instantiate(id);
+    engine.evaluate([&mut instance]);
+    // 4 quarters of the ring, each swept by the 4 sides of the bar.
+    assert_eq!(engine.read::<SweptPatch>(&instance, "surface").map(<[_]>::len), Some(16));
+    let line = engine.read::<CubicNurbsSegmentCache>(&instance, "line").unwrap();
+    assert_eq!(line.len(), 1);
+    assert!((line[0].length() - 1.0).abs() < 1e-5);
+}
