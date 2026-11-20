@@ -364,20 +364,22 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// `slot` as `port` takes it: instances linked to a port which takes
-    /// a shape are copied into the shape in front of it.
+    /// `slot` as `port` takes it: a value of a type the port does not take
+    /// goes through a conversion into one it does, like instances linked
+    /// to a port which takes their shape.
     fn realized(&mut self, slot: SlotId, port: &Port) -> Result<SlotId, BuildError> {
         let registry = self.context.registry;
         let ty = self.builder.slot_type(slot);
-        let taken = match port.ty {
-            PortType::Exact(expected) => expected == ty,
-            PortType::Trait(tr) => registry.implements(&ty, tr),
+        let takes = |ty: &TypeInfo| match port.ty {
+            PortType::Exact(expected) => expected == *ty,
+            PortType::Trait(tr) => registry.implements(ty, tr),
         };
-        match (taken, registry.realizer()) {
-            (false, Some(realizer)) if registry.realizes(&ty) => {
-                Ok(self.builder.generic(registry, realizer, &[slot])?[0])
-            }
-            _ => Ok(slot),
+        if takes(&ty) {
+            return Ok(slot);
+        }
+        match registry.conversion(&ty, takes) {
+            Some((conversion, _)) => Ok(self.builder.generic(registry, conversion, &[slot])?[0]),
+            None => Ok(slot),
         }
     }
 
@@ -435,9 +437,38 @@ impl Graph {
     /// The program which computes every output of one node, under the
     /// names of its ports. This is what a preview of that node runs.
     pub fn lower_node(&self, context: Context<'_>, node: NodeId) -> Result<Program, LowerError> {
+        self.lower_preview(context, node, |_| true)
+    }
+
+    /// [`Graph::lower_node`] for a preview which can only show what
+    /// `shown` says yes to: an output of another type which a conversion
+    /// turns into one it can show is converted.
+    pub fn lower_preview(
+        &self,
+        context: Context<'_>,
+        node: NodeId,
+        shown: impl Fn(&TypeInfo) -> bool,
+    ) -> Result<Program, LowerError> {
+        let registry = context.registry;
         let mut lowerer = self.lowerer(context);
         lowerer.node(node)?;
         for (name, slot) in lowerer.done[&node].clone() {
+            let ty = lowerer.builder.slot_type(slot);
+            let conversion = match shown(&ty) {
+                true => None,
+                false => registry.conversion(&ty, &shown),
+            };
+            let slot = match conversion {
+                Some((conversion, _)) => lowerer
+                    .builder
+                    .generic(registry, conversion, &[slot])
+                    .map_err(|error| LowerError {
+                        node: Some(node),
+                        port: Some(name.clone()),
+                        kind: LowerErrorKind::Build(error),
+                    })?[0],
+                None => slot,
+            };
             lowerer.builder.output(name, slot);
         }
         Ok(lowerer.builder.finish())

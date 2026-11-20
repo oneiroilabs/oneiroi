@@ -907,7 +907,7 @@ pub fn register(registry: &mut NodeRegistry) {
     register_placeable::<TubePatch>(registry);
     register_placeable::<SweptPatch>(registry);
     register_shape::<Circle>(registry);
-    registry.set_realizer(&REALIZE);
+    registry.add_conversion(&REALIZE);
 }
 
 /// What people see of the instances of every shape.
@@ -1080,8 +1080,9 @@ mod tests {
         b.output("twice", twice);
         // Circles can not be copied anywhere, they have no place of their own.
         assert!(b.generic(&registry, &REALIZE, &[twice]).is_err());
-        assert!(!registry.realizes(&Circle::INSTANCES));
-        assert!(registry.realizes(&TubePatch::INSTANCES));
+        assert!(!registry.converts(&Circle::INSTANCES));
+        let (conversion, to) = registry.conversion(&TubePatch::INSTANCES, |_| true).unwrap();
+        assert_eq!((conversion.id, to), (REALIZE.id, TubePatch::INFO));
 
         let mut engine = Engine::default();
         let id = engine.add_program(b.finish());

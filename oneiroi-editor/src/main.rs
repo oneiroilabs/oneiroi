@@ -513,10 +513,10 @@ impl Editor {
                         format!("{}:{name}", id.raw()),
                     );
                     // A link a graph runs for each element of is dashed, one
-                    // which copies instances into their shape dotted: both
-                    // cost work for every element.
-                    let realizes = document.realizes(*node, output, id, name);
-                    let edge = match (each, realizes) {
+                    // which goes through a conversion dotted, like instances
+                    // copied into their shape: both cost work for every element.
+                    let converts = document.converts(*node, output, id, name);
+                    let edge = match (each, converts) {
                         (true, _) => edge.style(|theme, status, _, _| EdgeStyle {
                             pattern: Pattern::dashed(2.5, 8.0, 5.0),
                             ..default_edge_style(theme, status)

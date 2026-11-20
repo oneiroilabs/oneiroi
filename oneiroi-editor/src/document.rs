@@ -848,15 +848,15 @@ impl Document {
         self.link(from, output, to, input).is_some()
     }
 
-    /// Whether a link from `output` of `from` to `input` of `to` copies
-    /// instances into the shape they refer to: the input takes the shape,
-    /// and is given instances of it.
-    pub fn realizes(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
+    /// Whether a link from `output` of `from` to `input` of `to` goes
+    /// through a conversion, like instances which are copied into the shape
+    /// they refer to.
+    pub fn converts(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> bool {
         self.link(from, output, to, input) == Some(true)
     }
 
-    /// Whether the link can be made, and if so whether instances are copied
-    /// on the way.
+    /// Whether the link can be made, and if so whether it goes through a
+    /// conversion.
     fn link(&self, from: NodeId, output: &str, to: NodeId, input: &str) -> Option<bool> {
         let port = |id, name: &str, outputs: bool| {
             let view = self.view(id)?;
@@ -871,10 +871,7 @@ impl Document {
         };
         match source.ty {
             PinType::Exact(found) if takes(&found) => Some(false),
-            PinType::Exact(found) => {
-                let shape = found.prototype.filter(|_| self.registry.realizes(&found))?;
-                takes(shape).then_some(true)
-            }
+            PinType::Exact(found) => self.registry.conversion(&found, takes).map(|_| true),
             // Only lowering can tell once a trait or an unknown node is involved.
             _ => Some(false),
         }
@@ -1093,14 +1090,18 @@ impl Document {
         let keep: Vec<_> = self.programs.values().copied().collect();
 
         let graph = self.library.get(&self.current).unwrap();
+        // What the preview can not draw goes through a conversion into
+        // something it can, if there is one.
+        let drawable = |ty: &TypeInfo| self.registry.drawable(ty).is_some();
         let lowered = graph.display.map(|display| {
-            graph.lower_node(
+            graph.lower_preview(
                 Context {
                     registry: &self.registry,
                     programs: session.engine.programs(),
                     graphs: &self.programs,
                 },
                 display,
+                drawable,
             )
         });
         let program = match lowered {
@@ -1859,6 +1860,45 @@ mod tests {
         // Other inputs have nothing to pick from.
         let [curve, ..] = nodes(&document);
         assert_eq!(document.input_choice(curve, "points"), None);
+    }
+
+    #[test]
+    fn what_can_not_be_drawn_is_shown_through_a_conversion() {
+        use oneiroi_core::node::{GenericNode, GenericPort, NodeDef, PortDecl};
+        use oneiroi_nodes::primitive::Circle;
+        // Numbers as circles of that radius, only for this test.
+        static AS_CIRCLES: GenericNode = GenericNode {
+            id: "test.as_circles",
+            inputs: &[GenericPort::exact::<f32>("values")],
+            outputs: &[GenericPort::exact::<Circle>("circles")],
+        };
+        static F32_AS_CIRCLES: NodeDef = NodeDef {
+            id: "test.as_circles.f32",
+            version: 0,
+            inputs: &[PortDecl::new::<f32>("values")],
+            outputs: &[PortDecl::new::<Circle>("circles")],
+            cpu: |inputs, outputs| {
+                let circles: Vec<_> = inputs.get::<f32>(0).iter().map(|r| Circle::new(*r)).collect();
+                outputs.set(0, &circles);
+            },
+            gpu: &[],
+        };
+        let mut document = Document::example();
+        let value = document.add_node("value.f32", [0.0, 0.0]);
+        document.set_display(Some(value));
+        assert!(matches!(document.shown(), Shown::Nothing));
+
+        document.registry.register_instance(&AS_CIRCLES, &F32_AS_CIRCLES);
+        document.registry.add_conversion(&AS_CIRCLES);
+        document.set_display(Some(value));
+        let Shown::Drawn { drawable, .. } = document.shown() else {
+            panic!("the numbers are not drawn as circles");
+        };
+        assert_eq!(drawable.ty, Circle::INFO);
+        // A link into a port which takes circles goes through it as well.
+        let [_, circle, sweep] = nodes(&document);
+        assert!(document.converts(value, "values", sweep, "profile"));
+        assert!(!document.converts(circle, "circle", sweep, "profile"));
     }
 
     #[test]

@@ -666,8 +666,9 @@ pub struct NodeRegistry {
     drawables: HashMap<&'static str, Drawable>,
     /// Nodes which are never placed by hand, by id.
     hidden: std::collections::HashSet<&'static str>,
-    /// What copies instances back into the shape they refer to.
-    realizer: Option<&'static GenericNode>,
+    /// What turns a value into one of another type where only that one is
+    /// taken, in the order they were added. See [`NodeRegistry::add_conversion`].
+    conversions: Vec<&'static GenericNode>,
 }
 
 impl NodeRegistry {
@@ -736,19 +737,42 @@ impl NodeRegistry {
     /// Says which generic node copies instances back into their shape: it
     /// takes instances as its only input and gives the shape. It is put in
     /// front of a port which takes a shape where instances are linked.
-    pub fn set_realizer(&mut self, realizer: &'static GenericNode) {
-        self.realizer = Some(realizer);
+    /// Lets `conversion` turn values into others implicitly: a value
+    /// linked to a port which does not take it goes through the version of
+    /// `conversion` whose input is its type and whose output the port takes.
+    /// Copying instances back into their shape is one, making a curve of a
+    /// circle another.
+    ///
+    /// Panics unless `conversion` has a single input and a single output.
+    pub fn add_conversion(&mut self, conversion: &'static GenericNode) {
+        assert!(
+            conversion.inputs.len() == 1 && conversion.outputs.len() == 1,
+            "`{}` takes one value and makes one, or it is no conversion",
+            conversion.id
+        );
+        if !self.conversions.iter().any(|known| std::ptr::eq(*known, conversion)) {
+            self.conversions.push(conversion);
+        }
     }
 
-    pub fn realizer(&self) -> Option<&'static GenericNode> {
-        self.realizer
-    }
-
-    /// Whether instances of type `ty` can be copied back into their shape.
-    pub fn realizes(&self, ty: &TypeInfo) -> bool {
-        self.realizer.is_some_and(|realizer| {
-            self.instances(realizer).iter().any(|node| node.inputs[0].ty == *ty)
+    /// The conversion of values of `from` into a type `takes` says yes to,
+    /// the first one there is, and that type.
+    pub fn conversion(
+        &self,
+        from: &TypeInfo,
+        takes: impl Fn(&TypeInfo) -> bool,
+    ) -> Option<(&'static GenericNode, TypeInfo)> {
+        self.conversions.iter().find_map(|conversion| {
+            self.instances(conversion)
+                .iter()
+                .find(|node| node.inputs[0].ty == *from && takes(&node.outputs[0].ty))
+                .map(|node| (*conversion, node.outputs[0].ty))
         })
+    }
+
+    /// Whether values of `ty` can be turned into anything else.
+    pub fn converts(&self, ty: &TypeInfo) -> bool {
+        self.conversion(ty, |_| true).is_some()
     }
 
     /// Says how values of a data type can be drawn.
@@ -870,6 +894,33 @@ mod tests {
             assert_eq!(inputs.choice(0), picked);
         }
         NodeRegistry::new().register(&PICK);
+    }
+
+    #[test]
+    fn a_conversion_is_found_by_what_it_makes() {
+        static TO_U32: GenericNode = GenericNode {
+            id: "test.to_u32",
+            inputs: &[GenericPort::exact::<f32>("values")],
+            outputs: &[GenericPort::exact::<u32>("values")],
+        };
+        static F32_TO_U32: NodeDef = NodeDef {
+            id: "test.to_u32.f32",
+            version: 0,
+            inputs: &[PortDecl::new::<f32>("values")],
+            outputs: &[PortDecl::new::<u32>("values")],
+            cpu: |_, _| {},
+            gpu: &[],
+        };
+        let mut registry = NodeRegistry::new();
+        registry.register_instance(&TO_U32, &F32_TO_U32);
+        assert!(!registry.converts(&f32::INFO));
+        registry.add_conversion(&TO_U32);
+        registry.add_conversion(&TO_U32);
+
+        let (conversion, to) = registry.conversion(&f32::INFO, |ty| *ty == u32::INFO).unwrap();
+        assert_eq!((conversion.id, to), ("test.to_u32", u32::INFO));
+        assert!(registry.conversion(&f32::INFO, |ty| *ty == f32::INFO).is_none());
+        assert!(registry.conversion(&u32::INFO, |_| true).is_none());
     }
 
     #[test]
