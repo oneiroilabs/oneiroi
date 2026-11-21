@@ -84,13 +84,58 @@ fn passes(node: &NodeDef, kernel: &GpuKernel) -> Vec<Pass> {
     stages.chain(outputs).collect()
 }
 
-/// One node to run on the GPU, with what is known before it does.
-struct Call<'a> {
-    item: &'a Work,
-    /// Its inputs and the offsets of the grouped ones.
+/// Calls of one node to run on the GPU together, with what is known before
+/// they do. Kept flat, so that a call costs no allocation of its own.
+struct Batch<'a> {
+    items: Vec<&'a Work>,
+    /// The inputs of every call and the offsets of the grouped ones, one
+    /// call after the other.
     inputs: Vec<Handle>,
-    /// How many elements each of its passes makes.
+    /// Where the inputs of each call start in `inputs`, and where the last
+    /// ends.
+    starts: Vec<usize>,
+    /// How many elements each pass makes, `passes` for each call.
     elements: Vec<usize>,
+    passes: usize,
+}
+
+impl<'a> Batch<'a> {
+    fn new(passes: usize) -> Self {
+        Self {
+            items: Vec::new(),
+            inputs: Vec::new(),
+            starts: vec![0],
+            elements: Vec::new(),
+            passes,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn inputs(&self, call: usize) -> &[Handle] {
+        &self.inputs[self.starts[call]..self.starts[call + 1]]
+    }
+
+    fn elements(&self, call: usize) -> &[usize] {
+        &self.elements[call * self.passes..][..self.passes]
+    }
+
+    /// Takes back the inputs and the elements of a call which was looked
+    /// at, and does not go into the batch.
+    fn drop_last_inputs(&mut self) {
+        let start = *self.starts.last().unwrap();
+        self.inputs.truncate(start);
+        self.elements.truncate(self.items.len() * self.passes);
+    }
+
+    fn clear(&mut self) {
+        self.items.clear();
+        self.inputs.clear();
+        self.starts.truncate(1);
+        self.elements.clear();
+    }
 }
 
 /// What is needed to run anything at all, if the device can.
@@ -691,107 +736,122 @@ impl GpuExecutor {
         let max_groups = limits.max_compute_workgroups_per_dimension as usize;
         let max_rows = (CALL_WINDOW as usize / call_words).min(max_groups);
 
-        let mut batch: Vec<Call<'_>> = Vec::new();
-        for item in items {
-            // Asking for the length may look at some inputs, which then
-            // have to be here.
-            let reads: Vec<_> = kernel.reads.iter().map(|index| item.inputs[*index]).collect();
-            self.download(store, &reads);
-
-            let inputs: Vec<_> = item
-                .inputs
+        // What the lengths depend on, for all calls at once.
+        if !kernel.reads.is_empty() {
+            let reads: Vec<ContentKey> = items
                 .iter()
-                .map(|key| {
-                    store
-                        .get(*key)
-                        .expect("planned inputs are stored before they are read")
-                })
+                .flat_map(|item| kernel.reads.iter().map(|index| item.inputs[*index]))
                 .collect();
-            let view = Inputs::new(store, node, &inputs);
+            self.download(store, &reads);
+        }
+
+        let mut batch = Batch::new(passes.len());
+        for item in items {
+            let start = batch.inputs.len();
+            batch.inputs.extend(item.inputs.iter().map(|key| {
+                store
+                    .get(*key)
+                    .expect("planned inputs are stored before they are read")
+            }));
+            let view = Inputs::new(store, node, &batch.inputs[start..]);
             if kernel.accepts.is_some_and(|accepts| !accepts(&view)) {
+                batch.drop_last_inputs();
                 self.run_on_cpu(store, item);
                 continue;
             }
-            let elements: Vec<usize> = passes.iter().map(|pass| (pass.len)(&view)).collect();
-            let fits = elements.iter().zip(&passes).all(|(elements, pass)| {
+            let first = batch.elements.len();
+            batch.elements.extend(passes.iter().map(|pass| (pass.len)(&view)));
+            let fits = batch.elements[first..].iter().zip(&passes).all(|(elements, pass)| {
                 (*elements * pass.words) as u64 * 4 <= max_bytes
                     && elements.div_ceil(WORKGROUP_SIZE as usize) <= max_groups
-            }) && inputs.iter().all(|handle| self.reachable(handle));
+            }) && batch.inputs[start..].iter().all(|handle| self.reachable(handle));
             if !fits {
+                batch.drop_last_inputs();
                 self.run_on_cpu(store, item);
                 continue;
             }
             if batch.len() == max_rows {
+                // This call goes first into the next batch.
+                let inputs = batch.inputs.split_off(start);
+                let elements = batch.elements.split_off(first);
                 self.dispatch(store, node, &batch);
                 batch.clear();
+                batch.inputs = inputs;
+                batch.elements = elements;
             }
-            batch.push(Call {
-                item,
-                inputs,
-                elements,
-            });
+            batch.items.push(item);
+            batch.starts.push(batch.inputs.len());
         }
         self.dispatch(store, node, &batch);
     }
 
     /// A compute pass per stage and per output for all of `batch`.
-    fn dispatch(&mut self, store: &mut Store, node: &'static NodeDef, batch: &[Call<'_>]) {
-        if batch.is_empty() {
+    fn dispatch(&mut self, store: &mut Store, node: &'static NodeDef, batch: &Batch<'_>) {
+        if batch.len() == 0 {
             return;
         }
         let kernel = self.pipelines[node.id].as_ref().unwrap().kernel;
         let passes = passes(node, kernel);
+        let count = passes.len();
 
-        // Make room for what the passes make, or write what the CPU knows
-        // already, then bring the device up to date with what the CPU wrote
-        // and the new pages. A stage is kept in the store under a key of
-        // its own, for every pass after it to read.
-        let targets: Vec<Vec<Option<Handle>>> = batch
-            .iter()
-            .map(|call| {
-                let mut output = 0;
-                passes
-                    .iter()
-                    .enumerate()
-                    .map(|(index, pass)| {
-                        let key = match pass.stage {
-                            true => ContentKey::derive("stage", index as u32, &[call.item.outputs[0]]),
-                            false => {
-                                output += 1;
-                                call.item.outputs[output - 1]
-                            }
-                        };
-                        match pass.words_of {
-                            Some(make) => {
-                                let values = make(&Inputs::new(store, node, &call.inputs));
-                                let handle = store.insert(key, &values);
-                                pass.stage.then_some(handle)
-                            }
-                            None => {
-                                let len = (call.elements[index] * pass.words) as u32;
-                                Some(store.reserve(key, len))
-                            }
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
+        // Make room for what the passes make, all at once, or write what
+        // the CPU knows already, then bring the device up to date with what
+        // the CPU wrote and the new pages. A stage is kept in the store
+        // under a key of its own, for every pass after it to read.
+        let mut targets: Vec<Option<Handle>> = Vec::with_capacity(batch.len() * count);
+        let mut wanted: Vec<(ContentKey, u32)> = Vec::with_capacity(batch.len() * count);
+        let mut at: Vec<usize> = Vec::with_capacity(batch.len() * count);
+        for call in 0..batch.len() {
+            let item = batch.items[call];
+            let elements = batch.elements(call);
+            let mut output = 0;
+            for (index, pass) in passes.iter().enumerate() {
+                let key = match pass.stage {
+                    true => ContentKey::derive("stage", index as u32, &[item.outputs[0]]),
+                    false => {
+                        output += 1;
+                        item.outputs[output - 1]
+                    }
+                };
+                match pass.words_of {
+                    Some(make) => {
+                        let values = make(&Inputs::new(store, node, batch.inputs(call)));
+                        let handle = store.insert(key, &values);
+                        targets.push(pass.stage.then_some(handle));
+                    }
+                    None => {
+                        at.push(targets.len());
+                        targets.push(None);
+                        wanted.push((key, (elements[index] * pass.words) as u32));
+                    }
+                }
+            }
+        }
+        let mut handles = Vec::with_capacity(wanted.len());
+        store.reserve_many(&wanted, &mut handles);
+        for (at, handle) in at.into_iter().zip(handles) {
+            targets[at] = Some(handle);
+        }
         self.upload(store);
-        let reachable = targets.iter().flatten().flatten().all(|target| self.reachable(target));
+        let reachable = targets.iter().flatten().all(|target| self.reachable(target));
         if !reachable {
-            for call in batch {
-                self.run_on_cpu(store, call.item);
+            for item in &batch.items {
+                self.run_on_cpu(store, item);
             }
             return;
         }
 
+        let call_words = self.pipelines[node.id].as_ref().unwrap().call_words;
+        let mut calls = Vec::with_capacity(batch.len() * call_words);
         for (index, pass) in passes.iter().enumerate() {
             if pass.words_of.is_some() {
                 continue;
             }
-            let mut calls = Vec::new();
-            for (call, targets) in batch.iter().zip(&targets) {
-                for input in &call.inputs {
+            calls.clear();
+            let mut most = 0;
+            for call in 0..batch.len() {
+                let targets = &targets[call * count..][..count];
+                for input in batch.inputs(call) {
                     calls.extend([input.page, input.offset, input.len]);
                 }
                 for (stage, handle) in passes.iter().zip(targets).filter(|(pass, _)| pass.stage) {
@@ -800,9 +860,10 @@ impl GpuExecutor {
                     calls.extend([handle.page, handle.offset, handle.len]);
                 }
                 let target = targets[index].unwrap();
-                calls.extend([target.page, target.offset, call.elements[index] as u32]);
+                let elements = batch.elements(call)[index];
+                most = most.max(elements);
+                calls.extend([target.page, target.offset, elements as u32]);
             }
-            let most = batch.iter().map(|call| call.elements[index]).max().unwrap_or(0);
             if most == 0 {
                 continue;
             }

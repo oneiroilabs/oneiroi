@@ -204,7 +204,41 @@ pub struct Inputs<'a> {
     pub(crate) ports: &'static [PortDecl],
     pub(crate) handles: &'a [Handle],
     /// The words of every handle.
-    pub(crate) words: Vec<&'a [u32]>,
+    pub(crate) words: Words<'a>,
+}
+
+/// The words of the inputs of a call. Inline for as many inputs as nodes
+/// have, so that a call allocates nothing for them.
+pub(crate) enum Words<'a> {
+    Inline { len: usize, words: [&'a [u32]; INLINE_INPUTS] },
+    Heap(Vec<&'a [u32]>),
+}
+
+/// How many inputs [`Words`] keeps without allocating.
+const INLINE_INPUTS: usize = 12;
+
+impl<'a> Words<'a> {
+    fn of(words: impl ExactSizeIterator<Item = &'a [u32]>) -> Self {
+        if words.len() > INLINE_INPUTS {
+            return Words::Heap(words.collect());
+        }
+        let mut inline: [&'a [u32]; INLINE_INPUTS] = [&[]; INLINE_INPUTS];
+        let len = words.len();
+        for (slot, words) in inline.iter_mut().zip(words) {
+            *slot = words;
+        }
+        Words::Inline { len, words: inline }
+    }
+
+    fn get(&self, index: usize) -> &'a [u32] {
+        match self {
+            Words::Inline { len, words } => {
+                assert!(index < *len, "there is no input {index}");
+                words[index]
+            }
+            Words::Heap(words) => words[index],
+        }
+    }
 }
 
 impl<'a> Inputs<'a> {
@@ -212,7 +246,7 @@ impl<'a> Inputs<'a> {
         Self {
             ports: node.inputs,
             handles,
-            words: handles.iter().map(|handle| store.words(*handle)).collect(),
+            words: Words::of(handles.iter().map(|handle| store.words(*handle))),
         }
     }
 
@@ -227,12 +261,12 @@ impl<'a> Inputs<'a> {
         Self {
             ports,
             handles,
-            words: handles.iter().map(|handle| unsafe { store.words_unbound(*handle) }).collect(),
+            words: Words::of(handles.iter().map(|handle| unsafe { store.words_unbound(*handle) })),
         }
     }
 
     fn slice<T: DataType>(&self, index: usize) -> &'a [T] {
-        bytemuck::cast_slice(self.words[index])
+        bytemuck::cast_slice(self.words.get(index))
     }
 
     /// How many elements an input has. Unlike [`Inputs::get`] this never

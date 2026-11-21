@@ -691,6 +691,84 @@ impl Store {
         handle
     }
 
+    /// [`Store::reserve`] for many values at once, which go one after the
+    /// other into as few runs as fit into a page: a run is found once for
+    /// all of them instead of once for each. Every piece is freed on its own
+    /// later, like any other. Pushes the handle of each onto `handles`, in
+    /// their order.
+    pub fn reserve_many(&mut self, wanted: &[(ContentKey, u32)], handles: &mut Vec<Handle>) {
+        let start = handles.len();
+        // What is here already keeps its place, the rest is unset so far.
+        let mut missing = 0u64;
+        for (key, len) in wanted {
+            match self.touch(*key) {
+                Some(handle) => handles.push(handle),
+                None => {
+                    handles.push(Handle { page: u32::MAX, offset: 0, len: *len });
+                    missing += *len as u64;
+                }
+            }
+        }
+        if missing == 0 {
+            // Values of no words, or all of them here.
+            for (index, (key, len)) in wanted.iter().enumerate() {
+                if handles[start + index].page == u32::MAX {
+                    handles[start + index] = self.reserve(*key, *len);
+                }
+            }
+            return;
+        }
+
+        let mut index = 0;
+        while index < wanted.len() {
+            // As many of the missing ones from here as fit into a page; one
+            // longer than a page goes on its own.
+            let mut end = index;
+            let mut run = 0u32;
+            while end < wanted.len() {
+                let handle = handles[start + end];
+                let len = if handle.page == u32::MAX { handle.len } else { 0 };
+                if run > 0 && run as u64 + len as u64 > self.page_words as u64 {
+                    break;
+                }
+                run += len;
+                end += 1;
+            }
+            let room = self.alloc(run);
+            self.used_words += run as u64;
+            let mut offset = room.offset;
+            for at in index..end {
+                if handles[start + at].page != u32::MAX {
+                    continue;
+                }
+                let (key, len) = wanted[at];
+                let handle = Handle { page: room.page, offset, len };
+                offset += len;
+                // Wanted twice: the first one has it.
+                if let Some(entry) = self.entries.get(&key) {
+                    handles[start + at] = entry.handle;
+                    self.free(handle);
+                    self.used_words -= len as u64;
+                    continue;
+                }
+                handles[start + at] = handle;
+                self.add(
+                    key,
+                    Entry {
+                        handle,
+                        last_used: self.frame,
+                        resident: len == 0,
+                        alias_of: None,
+                        holders: Vec::new(),
+                        pins: 0,
+                        parts: Vec::new(),
+                    },
+                );
+            }
+            index = end;
+        }
+    }
+
     /// Writes the value of a reserved entry which was brought over from
     /// the backend. Returns whether there was such an entry.
     pub fn fill(&mut self, key: ContentKey, words: &[u32]) -> bool {
@@ -861,6 +939,34 @@ mod tests {
 
     fn key(n: u32) -> ContentKey {
         ContentKey::of_data(&u32::INFO, &[n])
+    }
+
+    #[test]
+    fn many_values_are_reserved_next_to_each_other_and_freed_on_their_own() {
+        let mut store = Store::with_page_words(16);
+        let there = store.reserve(key(0), 3);
+        let wanted = [(key(1), 4), (key(0), 3), (key(2), 6), (key(3), 10), (key(1), 4)];
+        let mut handles = Vec::new();
+        store.reserve_many(&wanted, &mut handles);
+
+        assert_eq!(handles[1], there, "what is there keeps its place");
+        assert_eq!(handles[4], handles[0], "what is wanted twice is one value");
+        assert_eq!(handles[2].page, handles[0].page);
+        assert_eq!(handles[2].offset, handles[0].offset + 4, "one after the other");
+        assert_ne!(handles[3].page, handles[0].page, "what does not fit goes on");
+        assert_eq!(store.used_words(), 3 + 4 + 6 + 10);
+        for (key, handle) in wanted.iter().map(|(key, _)| *key).zip(&handles) {
+            assert_eq!(store.get(key), Some(*handle));
+        }
+
+        // Every piece goes back on its own, and the room is found again.
+        store.evict(0);
+        store.end_frame();
+        assert_eq!(store.evict(0), 4);
+        assert_eq!(store.used_words(), 0);
+        let again = store.reserve(key(4), 16);
+        assert_eq!(again.len, 16);
+        assert!(again.page <= handles[3].page);
     }
 
     #[test]
