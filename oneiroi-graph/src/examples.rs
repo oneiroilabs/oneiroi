@@ -63,8 +63,9 @@ fn spike(base: f32) -> [(f32, f32); 2] {
 /// `x` and stands up along `y`, as long as its parameter `length`, as high
 /// as `height`, with a picket every `spacing`.
 ///
-/// Every picket is made once around a point on the ground and put onto the
-/// points along the fence by reference.
+/// Every part is made once, as a single shape, and put onto the points where
+/// it goes by reference: a picket onto every point along the fence, a rail
+/// onto three heights, a post onto both ends.
 pub fn fence() -> Graph {
     let mut graph = Graph::new("fence");
     let input = graph.add_node(NodeKind::Input);
@@ -82,14 +83,21 @@ pub fn fence() -> Graph {
     let (length, height, spacing) = (link(input, "length"), link(input, "height"), link(input, "spacing"));
     let g = &mut graph;
 
-    // The rails: at the bottom, and at both edges of the band.
+    // A rail along the whole fence, put at the bottom and at both edges of
+    // the band.
     let ground = math(g, [-250., 0.], height.clone_link(), f32s(&[0.0, 1.0, 1.0]), MULTIPLY);
     let rails_y = math(g, [0., 0.], link(ground, "values"), f32s(&[0.12, -0.45, -0.15]), ADD);
-    let rails_from = vectors(g, [250., 0.], f32s(&[0.0]), link(rails_y, "values"));
-    let rails_to = vectors(g, [250., 120.], length.clone_link(), link(rails_y, "values"));
-    let rails = add(g, "curve.line", [500., 0.], vec![("start", link(rails_from, "vectors")), ("end", link(rails_to, "vectors"))]);
-    let flat_bar = add(g, "curve.rectangle", [500., 120.], vec![("width", f32s(&[0.05])), ("height", f32s(&[0.03]))]);
-    let rails = add(g, "curve.sweep", [750., 0.], vec![("spine", link(rails, "curve")), ("profile", link(flat_bar, "rectangle"))]);
+    let rails_at = vectors(g, [250., 0.], f32s(&[0.0]), link(rails_y, "values"));
+    let rail_to = vectors(g, [250., 120.], length.clone_link(), f32s(&[0.0]));
+    let rail = add(g, "curve.line", [500., 120.], vec![("end", link(rail_to, "vectors"))]);
+    let flat_bar = add(g, "curve.rectangle", [500., 240.], vec![("width", f32s(&[0.05])), ("height", f32s(&[0.03]))]);
+    let rail = add(g, "curve.sweep", [750., 120.], vec![("spine", link(rail, "curve")), ("profile", link(flat_bar, "rectangle"))]);
+    let rails = add(
+        g,
+        "instance.on_points",
+        [1000., 0.],
+        vec![("points", link(rails_at, "vectors")), ("shape", link(rail, "surface")), ("align", Arg::U32(2))],
+    );
 
     // Where the rods of the pickets stand: every `spacing` along the
     // ground, from one `spacing` in to one before the end. The line goes
@@ -181,31 +189,41 @@ pub fn fence() -> Graph {
         vec![("points", link(band, "frames")), ("shape", link(loop_, "surface")), ("align", Arg::U32(2))],
     );
 
-    // A post at either end, with a pointed cap.
+    // A post with a pointed cap, put at either end.
     let posts_x = math(g, [-250., 2100.], length.clone_link(), f32s(&[0.0, 1.0]), MULTIPLY);
-    let posts_to = math(g, [-250., 2220.], height.clone_link(), f32s(&[0.1]), ADD);
-    let caps_to = math(g, [-250., 2340.], height.clone_link(), f32s(&[0.28]), ADD);
-    let posts_from = vectors(g, [0., 2100.], link(posts_x, "values"), f32s(&[0.0]));
-    let posts_to = vectors(g, [0., 2220.], link(posts_x, "values"), link(posts_to, "values"));
-    let caps_to = vectors(g, [0., 2340.], link(posts_x, "values"), link(caps_to, "values"));
-    let posts = add(g, "curve.line", [250., 2100.], vec![("start", link(posts_from, "vectors")), ("end", link(posts_to, "vectors"))]);
-    let caps = add(g, "curve.line", [250., 2220.], vec![("start", link(posts_to, "vectors")), ("end", link(caps_to, "vectors"))]);
-    let post_bar = add(g, "curve.rectangle", [250., 2340.], vec![("width", f32s(&[0.09])), ("height", f32s(&[0.09]))]);
-    let posts = add(g, "curve.sweep", [500., 2100.], vec![("spine", link(posts, "curve")), ("profile", link(post_bar, "rectangle"))]);
-    let pointed = scale(g, [250., 2460.], &spike(1.0));
-    let caps = add(
+    let posts_at = vectors(g, [0., 2100.], link(posts_x, "values"), f32s(&[0.0]));
+    let post_top = math(g, [-250., 2220.], height.clone_link(), f32s(&[0.1]), ADD);
+    let cap_top = math(g, [-250., 2340.], height.clone_link(), f32s(&[0.28]), ADD);
+    let post_top = vectors(g, [0., 2220.], f32s(&[0.0]), link(post_top, "values"));
+    let cap_top = vectors(g, [0., 2340.], f32s(&[0.0]), link(cap_top, "values"));
+    let post = add(g, "curve.line", [250., 2220.], vec![("end", link(post_top, "vectors"))]);
+    let cap = add(g, "curve.line", [250., 2340.], vec![("start", link(post_top, "vectors")), ("end", link(cap_top, "vectors"))]);
+    let post_bar = add(g, "curve.rectangle", [250., 2460.], vec![("width", f32s(&[0.09])), ("height", f32s(&[0.09]))]);
+    let post = add(g, "curve.sweep", [500., 2220.], vec![("spine", link(post, "curve")), ("profile", link(post_bar, "rectangle"))]);
+    let pointed = scale(g, [250., 2580.], &spike(1.0));
+    let cap = add(
         g,
         "curve.sweep",
-        [500., 2220.],
-        vec![("spine", link(caps, "curve")), ("profile", link(post_bar, "rectangle")), ("scale", link(pointed, "curve"))],
+        [500., 2340.],
+        vec![("spine", link(cap, "curve")), ("profile", link(post_bar, "rectangle")), ("scale", link(pointed, "curve"))],
     );
+    let at_ends = |g: &mut Graph, y: f32, shape: NodeId| {
+        add(
+            g,
+            "instance.on_points",
+            [1000., y],
+            vec![("points", link(posts_at, "vectors")), ("shape", link(shape, "surface")), ("align", Arg::U32(2))],
+        )
+    };
+    let posts = at_ends(g, 2220., post);
+    let caps = at_ends(g, 2340., cap);
 
     let output = g.add_node(NodeKind::Output);
     g.node_mut(output).unwrap().meta.position = [1300., 900.];
     for (name, node, port) in [
-        ("rails", rails, "surface"),
-        ("posts", posts, "surface"),
-        ("caps", caps, "surface"),
+        ("rails", rails, "instances"),
+        ("posts", posts, "instances"),
+        ("caps", caps, "instances"),
         ("frames", frames, "instances"),
         ("rings", rings, "instances"),
         ("rods", rods, "instances"),

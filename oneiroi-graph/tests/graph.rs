@@ -107,7 +107,7 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let mut b = ProgramBuilder::new("by hand");
     let points = b.constant(&POINTS.map(ControlPoint::from));
     let knots = b.constant(&clamped_uniform_knots(5));
-    let radius = b.param::<f32>("radius", &[0.25]);
+    let radius = b.param_one_of::<f32>("radius", 0.25);
     let tolerance = b.constant::<f32>(&[0.01]);
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
@@ -624,17 +624,17 @@ fn exposed_inputs_keep_what_they_carry() {
     let mut engine = Engine::default();
     let id = lower(&graph, &mut engine);
     let program = engine.programs().get(id);
-    // The points of several curves keep their groups in a parameter which
-    // is not shown, and the tolerance is a single number.
+    // The points of the curve are a list, and the tolerance is a single
+    // number.
     let names: Vec<_> = program.visible_params().map(|p| p.name.as_str()).collect();
     // In the order they were made.
     assert_eq!(names, ["radius", "points", "tolerance"]);
-    assert_eq!(program.params.len(), 4);
+    assert_eq!(program.params.len(), 3);
     let card = |name: &str| {
         let param = program.params.iter().find(|p| p.name == name).unwrap();
         program.slot(param.slot).card
     };
-    assert_eq!(card("points"), Card::Grouped);
+    assert_eq!(card("points"), Card::Many);
     assert_eq!(card("tolerance"), Card::One);
 
     // A graph used as a node shows only those three.
@@ -916,17 +916,21 @@ fn the_fence_stands() {
 
     let mut instance = engine.instantiate(id);
     engine.evaluate([&mut instance]);
-    // 3 rails of 4 sides and 2 caps of 4 each; 2 posts the same, and
-    // their pointed caps, the tips of which are not there.
-    let patches = |name| engine.read::<SweptPatch>(&instance, name).unwrap().to_vec();
-    assert_eq!(patches("rails").len(), 3 * (4 + 8));
-    assert_eq!(patches("posts").len(), 2 * (4 + 8));
-    let tips: Vec<_> = patches("caps").iter().map(SweptPatch::kind).collect();
-    assert_eq!(tips.len(), 2 * (4 + 8));
-    assert_eq!(tips.iter().filter(|kind| **kind == oneiroi_nodes::curve::kind::NONE).count(), 2 * 4);
     fn rows(engine: &Engine, instance: &oneiroi_core::exec::Instance, name: &str) -> usize {
         engine.read::<InstanceRow>(instance, name).map_or(0, <[_]>::len)
     }
+    // A rail of 4 sides and 2 caps of 4 each, put at 3 heights; a post the
+    // same, and its pointed cap, the tip of which is not there, put at
+    // both ends.
+    let shape = |name| {
+        let (elements, _) = engine.prototype_keys(&instance, name).unwrap();
+        engine.store().read::<SweptPatch>(elements).unwrap().to_vec()
+    };
+    assert_eq!((rows(&engine, &instance, "rails"), shape("rails").len()), (3, 4 + 8));
+    assert_eq!((rows(&engine, &instance, "posts"), shape("posts").len()), (2, 4 + 8));
+    let tips: Vec<_> = shape("caps").iter().map(SweptPatch::kind).collect();
+    assert_eq!((rows(&engine, &instance, "caps"), tips.len()), (2, 4 + 8));
+    assert_eq!(tips.iter().filter(|kind| **kind == oneiroi_nodes::curve::kind::NONE).count(), 4);
     // From one spacing in to one before the end: 0.4, 0.8 up to 3.6.
     let pickets = rows(&engine, &instance, "frames");
     assert_eq!(pickets, 9);
