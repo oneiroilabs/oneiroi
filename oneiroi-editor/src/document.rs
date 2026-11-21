@@ -26,7 +26,11 @@ use oneiroi_nodes::{
         CURVE_2D, curve2d::INTERPOLATIONS, curve_through,
         nurbs::{CubicNurbsSegmentCache, clamped_uniform_knots},
     },
-    meta::{Hue, MetaRegistry, label_of, markdown},
+    meta::{
+        Hue, MetaRegistry,
+        gizmo::{Gizmo, GizmoInputs, GizmoMeta, Handle, Point as GizmoPoint},
+        label_of, markdown,
+    },
 };
 
 /// How many 32-bit words of results the preview keeps around.
@@ -206,6 +210,8 @@ pub struct Session {
     overflows: Vec<Overflow>,
     /// The shapes of the instances which are shown.
     summaries: Vec<ShapeSummary>,
+    /// The camera the preview drew with last, which gizmos are drawn with.
+    pub camera: Option<OrbitCamera>,
 }
 
 /// What drawing instances needs to know of the shape they refer to, see
@@ -237,6 +243,7 @@ impl Session {
             settling: 0,
             overflows: Vec::new(),
             summaries: Vec::new(),
+            camera: None,
         }
     }
 
@@ -1654,6 +1661,58 @@ impl Document {
         done
     }
 
+    /// The gizmo of `node`, if it has one: what the viewport draws of its
+    /// inputs to drag. Inputs which are linked are none of its business.
+    pub fn gizmo(&self, node: NodeId) -> Option<Gizmo> {
+        let (meta, inputs) = self.gizmo_inputs(node)?;
+        Some((meta.show)(&inputs))
+    }
+
+    /// The gizmo of `node` and the inputs it shows, as words.
+    fn gizmo_inputs(&self, node: NodeId) -> Option<(GizmoMeta, GizmoInputs)> {
+        let NodeKind::Node(id) = &self.graph().node(node)?.kind else {
+            return None;
+        };
+        let meta = *self.meta.gizmo(id)?;
+        let stored = &self.graph().node(node)?.inputs;
+        let mut inputs = GizmoInputs::new();
+        for port in self.view(node)?.inputs {
+            let words = match stored.get(&port.name) {
+                Some(Input::Value(value)) => value_words(value),
+                None => port.default,
+                Some(Input::Link { .. } | Input::Inline(_)) => continue,
+            };
+            inputs = inputs.with(port.name, words);
+        }
+        Some((meta, inputs))
+    }
+
+    /// Drags `handle` of the gizmo of `node` to `to`: sets the inputs the
+    /// gizmo says. Returns whether anything changed.
+    pub fn drag_gizmo(&mut self, node: NodeId, handle: &Handle, to: GizmoPoint) -> bool {
+        let Some((meta, inputs)) = self.gizmo_inputs(node) else {
+            return false;
+        };
+        let Some(view) = self.view(node) else {
+            return false;
+        };
+        let mut changed = false;
+        for edit in (meta.drag)(&inputs, handle, to) {
+            let Some(PinType::Exact(ty)) = view.inputs.iter().find(|port| port.name == edit.port).map(|port| port.ty)
+            else {
+                continue;
+            };
+            if inputs.get(edit.port) == Some(edit.words.as_slice()) {
+                continue;
+            }
+            changed |= self.graph_mut().set(node, edit.port, words_to_value(&edit.words, ty.scalar)).is_ok();
+        }
+        if changed {
+            self.refresh();
+        }
+        changed
+    }
+
     /// What an input to pick from can say, and which of it is picked, if
     /// it is one and nothing is linked to it.
     pub fn input_choice(&self, node: NodeId, input: &str) -> Option<(Vec<String>, usize)> {
@@ -2781,6 +2840,40 @@ mod tests {
         assert!(document.set_curve(curve, "points", &[Vec2::ZERO, Vec2::new(1.0, 2.0)], 2));
         assert_eq!(document.input_choice(curve, "interpolation").unwrap().1, 2);
         assert_eq!(document.curve_drawing(curve, "points").unwrap().points[1], Vec2::new(1.0, 2.0));
+    }
+
+    #[test]
+    fn a_gizmo_drags_what_a_node_is_made_of() {
+        let (mut document, [curve, circle, sweep, _]) = meshed();
+        // The control points of the curve, joined as its control polygon.
+        let gizmo = document.gizmo(curve).unwrap();
+        let count = document.fields(&Target::Input(curve, "points".into())).unwrap().elements.len();
+        assert_eq!(gizmo.handles.len(), count);
+        assert_eq!(gizmo.guides.len(), 1);
+
+        let before = document.session().lock().unwrap().generation();
+        let handle = gizmo.handles[2].clone();
+        assert!(document.drag_gizmo(curve, &handle, [1.0, 2.0, 3.0]));
+        assert_ne!(document.session().lock().unwrap().generation(), before);
+        assert_eq!(document.gizmo(curve).unwrap().handles[2].at, [1.0, 2.0, 3.0]);
+        let point = &document.fields(&Target::Input(curve, "points".into())).unwrap().elements[2];
+        assert_eq!(point[..3], ["1", "2", "3"]);
+        // Dragged to where it is, nothing changes.
+        let handle = document.gizmo(curve).unwrap().handles[2].clone();
+        assert!(!document.drag_gizmo(curve, &handle, [1.0, 2.0, 3.0]));
+
+        // A circle's radius, and a sweep has no gizmo.
+        let radius = document.gizmo(circle).unwrap().handles[0].clone();
+        assert!(document.drag_gizmo(circle, &radius, [0.5, 0.0, 0.0]));
+        assert_eq!(document.input_text(circle, "radius").unwrap().0, "0.5");
+        assert!(document.gizmo(sweep).is_none());
+
+        // A linked input is not the gizmo's to show.
+        let points = document.add_node("value.vec3", [0.0, 0.0]);
+        let line = document.add_node("curve.polyline", [0.0, 0.0]);
+        assert!(document.connect(points, "values", line, "points"));
+        assert!(document.gizmo(line).unwrap().handles.is_empty());
+        assert_eq!(document.gizmo(points).unwrap().handles.len(), 1);
     }
 
     #[test]

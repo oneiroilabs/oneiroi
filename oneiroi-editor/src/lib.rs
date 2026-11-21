@@ -2,6 +2,7 @@ use iced::window;
 
 pub mod curve_edit;
 pub mod document;
+pub mod gizmo_view;
 pub mod look;
 pub mod preview;
 pub mod viewport;

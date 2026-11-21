@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    button, canvas, checkbox, column, container, markdown, pick_list, row, scrollable, shader, space,
+    button, canvas, checkbox, stack, column, container, markdown, pick_list, row, scrollable, shader, space,
     text, text_input, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Point, Theme, Vector};
@@ -12,6 +12,7 @@ use iced_nodegraph::{
 };
 use oneiroi_core::node::Card;
 use oneiroi_editor::curve_edit::CurveEdit;
+use oneiroi_editor::gizmo_view::GizmoOverlay;
 use oneiroi_editor::document::{CurveDrawing, Document, Fields, PaletteEntry, Side, Target, parse_word};
 use oneiroi_nodes::curve::curve2d::INTERPOLATIONS;
 use oneiroi_editor::look::{self, PinLook};
@@ -99,6 +100,8 @@ enum Message {
     CurveInterpolation(u32, String, String),
     /// A curve drawn right at an input which takes one.
     DrawCurve(u32, String),
+    /// A handle of the gizmo of a node dragged to a point.
+    GizmoDragged(u32, usize, [f32; 3]),
     /// A link in documentation was clicked, which leads nowhere yet.
     Link,
 }
@@ -413,6 +416,12 @@ impl Editor {
             Message::DrawCurve(node, input) => {
                 self.document.draw_curve(node.into(), &input);
             }
+            Message::GizmoDragged(node, index, to) => {
+                let node = NodeId::from(node);
+                if let Some(handle) = self.document.gizmo(node).and_then(|gizmo| gizmo.handles.get(index).cloned()) {
+                    self.document.drag_gizmo(node, &handle, to);
+                }
+            }
             Message::Link => {}
         }
     }
@@ -468,6 +477,26 @@ impl Editor {
         })
         .width(Fill)
         .height(Fill);
+        // The gizmo of the selected node, over the preview.
+        let gizmo = self
+            .selected
+            .first()
+            .and_then(|node| Some((*node, self.document.gizmo(*node)?)))
+            .filter(|(_, gizmo)| !gizmo.handles.is_empty() || !gizmo.guides.is_empty());
+        let preview: Element<'_, Message> = match gizmo {
+            Some((node, gizmo)) => {
+                let overlay: Element<'_, (usize, [f32; 3])> = canvas(GizmoOverlay {
+                    gizmo,
+                    session: self.document.session(),
+                })
+                .width(Fill)
+                .height(Fill)
+                .into();
+                let overlay = overlay.map(move |(handle, to)| Message::GizmoDragged(node.raw(), handle, to));
+                stack![preview, overlay].into()
+            }
+            None => preview.into(),
+        };
 
         let mut detail = row![text("Detail").size(12)].spacing(4).align_y(Center);
         for (index, (label, _)) in DETAIL.into_iter().enumerate() {

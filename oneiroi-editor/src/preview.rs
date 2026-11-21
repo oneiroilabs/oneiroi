@@ -164,6 +164,8 @@ impl<Message> shader::Program<Message> for Preview {
                 None => (state.camera, Some(self.frame)),
             }
         };
+        // Gizmos are drawn over the preview with the same camera.
+        self.session.lock().unwrap().camera = Some(camera);
         Shot {
             session: self.session.clone(),
             camera,
