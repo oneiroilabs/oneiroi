@@ -286,7 +286,7 @@ pub const SCENARIOS: &[Scenario] = &[
             oneiroi_graph::examples::fence().lower(context).expect("the fence is a whole graph")
         },
         setup: |size| vec![("length", words(&[fence_length(size)])), ("spacing", words(&[PICKETS]))],
-        edit: |size, n| vec![("length", words(&[fence_length(size) + n as f32 * 1e-4]))],
+        edit: |size, n| vec![("length", words(&[longer(fence_length(size), n)]))],
     },
 ];
 
@@ -294,6 +294,14 @@ pub const SCENARIOS: &[Scenario] = &[
 /// apart from either end.
 fn fence_length(size: Size) -> f32 {
     (size.curves + 1) as f32 * PICKETS
+}
+
+/// `length` a little longer for the `n`th edit, by steps big enough that
+/// every edit is a new value even where an `f32` is coarse, and small
+/// enough that no picket is added over all of them.
+fn longer(length: f32, n: u32) -> f32 {
+    let step = f32::from_bits(length.to_bits() + 1) - length;
+    length + n as f32 * step.max(1e-4)
 }
 
 fn words<T: Pod>(values: &[T]) -> Vec<u32> {
