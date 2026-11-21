@@ -2087,6 +2087,7 @@ mod tests {
                 "Curve / Circle",
                 "Curve / Line",
                 "Curve / NURBS Curve",
+                "Curve / Points to Frames",
                 "Curve / Polyline",
                 "Curve / Rectangle",
                 "Curve / Sample Curve",
@@ -2177,7 +2178,7 @@ mod tests {
         // Without notes, like the ports the parameters and outputs come from.
         assert_eq!(view.doc, "");
         assert_eq!(view.inputs[0].label, "Radius");
-        assert_eq!(view.inputs[0].doc, "The radius, a circle for each.");
+        assert_eq!(view.inputs[0].doc, "The radius.");
 
         // A note inside wins over the node, and one of the graph over both.
         document.open("graph");
@@ -2516,7 +2517,7 @@ mod tests {
         // radius the circle had.
         assert!(document.connect(input, NEW_PORT, circle, "radius"));
         let param = document.graph().param("radius").unwrap();
-        assert_eq!((param.ty.as_deref(), param.card), (Some("f32"), Some(Card::Many)));
+        assert_eq!((param.ty.as_deref(), param.card), (Some("f32"), Some(Card::One)));
         assert_eq!(document.param_text("radius").as_deref(), Some("0.25"));
         assert!(document.is_exposed(circle, "radius"));
         assert!(document.set_param("radius", "0.5"));
@@ -2551,13 +2552,14 @@ mod tests {
         let mut document = Document::example();
         assert!(document.open("fence"));
         assert!(document.error().is_none(), "{:?}", document.error());
-        // Its output node shows every part of it at once: the rails, the
-        // posts and their caps, and the pickets as instances.
+        // Its output node shows every part of it at once, each made once and
+        // put where it goes: the rails, the posts and their caps, and the
+        // pickets.
         let Shown::Drawn(drawn) = document.shown() else {
             panic!("the fence is not drawn");
         };
         assert_eq!(drawn.len(), 8);
-        assert_eq!(drawn.iter().filter(|drawn| drawn.shape.is_some()).count(), 5);
+        assert_eq!(drawn.iter().filter(|drawn| drawn.shape.is_some()).count(), 8);
         assert!(document.set_param("length", "6"));
         assert!(matches!(document.shown(), Shown::Drawn(_)));
     }
@@ -2582,7 +2584,7 @@ mod tests {
         let (mut document, [curve, circle, sweep, mesh]) = meshed();
         let points = Target::Input(curve, "points".into());
         let fields = document.fields(&points).unwrap();
-        assert_eq!((fields.components.len(), fields.card), (4, Card::Grouped));
+        assert_eq!((fields.components.len(), fields.card), (4, Card::Many));
         let count = fields.elements.len();
         assert!(count >= 4);
 

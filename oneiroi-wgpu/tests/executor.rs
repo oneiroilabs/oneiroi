@@ -8,7 +8,9 @@ use oneiroi_core::{
     program::{ProgramBuilder, ProgramId},
 };
 use oneiroi_core::program::SlotId;
-use oneiroi_nodes::curve::{ControlPoint, EvaluatedFrame, NURBS, SAMPLE_CURVE, nurbs::clamped_uniform_knots};
+use oneiroi_nodes::curve::{
+    ControlPoint, EvaluatedFrame, NURBS, NURBS_BATCH, SAMPLE_CURVE, SAMPLE_CURVE_BATCH, nurbs::clamped_uniform_knots,
+};
 use oneiroi_wgpu::{GpuExecutor, GpuStats};
 
 /// Nodes on the GPU, nodes on the CPU, compute passes and downloads.
@@ -446,11 +448,13 @@ mod for_each {
         let points = b.param_grouped("points", ControlPoint::INFO, bytemuck::cast_slice(&both));
         let knots = b.constant::<f32>(&[]);
         let samples = b.constant::<u32>(&[16]);
-        let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        // Both curves at once, with the batches.
+        let segments = b.node(&NURBS_BATCH, &[points, knots]).unwrap()[0];
         let each = b
             .for_each(engine.programs(), one, &[Some(segments)], 0, 100)
             .unwrap();
-        let whole = sample(&mut b, segments, samples);
+        let (spacing, t) = (b.constant::<f32>(&[0.0]), b.constant::<f32>(&[]));
+        let whole = b.node(&SAMPLE_CURVE_BATCH, &[segments, samples, spacing, t]).unwrap()[0];
         b.output("each", each[0]);
         b.output("whole", whole);
         engine.add_program(b.finish())

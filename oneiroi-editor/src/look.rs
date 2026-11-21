@@ -139,6 +139,21 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_made_of_parts_is_one() {
+        use oneiroi_core::types::DataType;
+        use oneiroi_nodes::curve::{EvaluatedFrame, nurbs::CubicNurbsSegmentCache};
+
+        let look = |card, ty| brackets(items(card, &PinType::Exact(ty)));
+        // The segments of a curve are one curve, with offsets a list of them.
+        assert_eq!(look(Card::Many, CubicNurbsSegmentCache::INFO), PinBrackets::None);
+        assert_eq!(look(Card::Grouped, CubicNurbsSegmentCache::INFO), PinBrackets::Square);
+        // Frames are each one, so in groups they are a list of lists.
+        assert_eq!(look(Card::Many, EvaluatedFrame::INFO), PinBrackets::Square);
+        assert_eq!(look(Card::Grouped, EvaluatedFrame::INFO), PinBrackets::Curly);
+        assert_eq!(look(Card::One, f32::INFO), PinBrackets::None);
+    }
+
+    #[test]
     fn the_brackets_say_how_many_and_the_fill_how_exact() {
         let document = Document::example();
         let sweep = document
@@ -150,12 +165,13 @@ mod tests {
         let view = document.view(sweep).unwrap();
         let spine = pin_look(&document, &view.inputs[0]);
         let profile = pin_look(&document, &view.inputs[1]);
-        assert_eq!((spine.brackets, spine.fill), (PinBrackets::Curly, PinFill::Solid));
-        assert_eq!((profile.brackets, profile.fill), (PinBrackets::Square, PinFill::Ring));
+        // A curve is one, however many segments it has.
+        assert_eq!((spine.brackets, spine.fill), (PinBrackets::None, PinFill::Solid));
+        assert_eq!((profile.brackets, profile.fill), (PinBrackets::None, PinFill::Ring));
         assert_eq!(spine.color, color(Hue::Amber));
 
         let tip = port_tip(&document, &view.inputs[1]);
-        assert!(tip.starts_with("**Profile** · any Profile, a list\n\nThe cross-section"), "{tip}");
+        assert!(tip.starts_with("**Profile** · any Profile, one\n\nThe cross-section"), "{tip}");
         assert!(tip.contains("*any Profile:* A flat outline"), "{tip}");
     }
 }

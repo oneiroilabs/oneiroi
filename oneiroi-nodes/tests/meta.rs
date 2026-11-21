@@ -40,7 +40,10 @@ fn every_node_port_type_and_trait_is_described() {
     let mut types = BTreeSet::new();
     let mut traits = BTreeSet::new();
 
-    for node in nodes.iter() {
+    // The batches the engine runs where it knows there are many are not
+    // seen by anybody: a graph has the single nodes.
+    let batch = |id: &str| id.split('<').next().unwrap().ends_with(".batch");
+    for node in nodes.iter().filter(|node| !batch(node.id)) {
         let Some(described) = meta.node(node.id) else {
             errors.push(format!("{}: not described", node.id));
             continue;
@@ -54,7 +57,7 @@ fn every_node_port_type_and_trait_is_described() {
         }
         types.extend(node.inputs.iter().chain(node.outputs).map(|port| port.ty.name));
     }
-    for generic in nodes.generics() {
+    for generic in nodes.generics().filter(|generic| !batch(generic.id)) {
         let Some(described) = meta.node(generic.id) else {
             errors.push(format!("{}: not described", generic.id));
             continue;
