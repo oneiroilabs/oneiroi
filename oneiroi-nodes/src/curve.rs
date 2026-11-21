@@ -10,16 +10,21 @@ mod profile;
 pub mod shapes;
 mod sweep;
 
-pub use nodes::{ControlPoint, EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
+pub use nodes::{
+    ControlPoint, EvaluatedFrame, NURBS, NURBS_BATCH, SAMPLE_CURVE, SAMPLE_CURVE_BATCH, TO_FRAMES, TRANSLATE, register,
+};
 pub(crate) use nodes::example_curves;
-pub(crate) use profile::{LATE, SPIKE, cornered_spine, fractions, sweep_example, sweep_example_along};
+pub(crate) use profile::{
+    LATE, SPIKE, cornered_curve, cornered_spine, example_curve, fractions, sweep_example, sweep_example_along,
+    sweep_single_example,
+};
 pub use profile::{PROFILE, Profile};
 pub use shapes::{LINE, OUTLINE, Outline, POLYLINE, TO_CURVE, polyline, register_outline};
 pub(crate) use sweep::sweep_curve;
-pub use sweep::{Piece, SWEEP, SweptPatch, TubePatch, kind, register_profile, swept, tube};
+pub use sweep::{Piece, SWEEP, SWEEP_BATCH, SweptPatch, TubePatch, kind, register_profile, swept, swept_batch, tube};
 #[cfg(feature = "meta")]
 pub use {
-    nodes::{NURBS_META, SAMPLE_CURVE_META, TRANSLATE_META},
+    nodes::{NURBS_META, SAMPLE_CURVE_META, TO_FRAMES_META, TRANSLATE_META},
     profile::PROFILE_META,
     shapes::{LINE_META, OUTLINE_META, POLYLINE_META, TO_CURVE_META},
     sweep::SWEEP_META,

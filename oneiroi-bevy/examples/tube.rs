@@ -51,7 +51,7 @@ fn tube_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
 
     let mut b = ProgramBuilder::new("tube along curve");
     let points = b.param("points", &points(0.0));
-    let radius = b.param::<f32>("radius", &[0.2]);
+    let radius = b.param_one_of::<f32>("radius", 0.2);
     let knots = b.constant(&clamped_uniform_knots(8));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     // The mesh keeps the default tolerance of the tube.

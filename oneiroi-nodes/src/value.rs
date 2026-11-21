@@ -22,7 +22,7 @@ node! {
         }
         outputs {
             /// The same numbers.
-            port PortDecl::new::<f32>("values");
+            port PortDecl::new::<f32>("values").follows(&[0]);
         }
         cpu: pass::<f32>,
         gpu: &[],
@@ -42,7 +42,7 @@ node! {
         }
         outputs {
             /// The same vectors.
-            port PortDecl::new::<Vec3>("values");
+            port PortDecl::new::<Vec3>("values").follows(&[0]);
         }
         cpu: pass::<Vec3>,
         gpu: &[],
@@ -82,8 +82,9 @@ node! {
             port PortDecl::new::<u32>("operation").choices(OPERATIONS);
         }
         outputs {
-            /// What came out, as many as the longer list has.
-            port PortDecl::new::<f32>("values");
+            /// What came out, as many as the longer list has: a single number of
+            /// two single ones.
+            port PortDecl::new::<f32>("values").follows(&[0, 1]);
         }
         cpu: math,
         gpu: &[GpuKernel {
@@ -153,8 +154,9 @@ node! {
             port PortDecl::new::<f32>("z").with_default(&[0.0f32]);
         }
         outputs {
-            /// The vectors, as many as the longest list has.
-            port PortDecl::new::<Vec3>("vectors");
+            /// The vectors, as many as the longest list has: a single vector of
+            /// single numbers.
+            port PortDecl::new::<Vec3>("vectors").follows(&[0, 1, 2]);
         }
         cpu: combine_xyz,
         gpu: &[GpuKernel {

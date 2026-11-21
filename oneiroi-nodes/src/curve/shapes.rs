@@ -141,8 +141,8 @@ describe_trait! {
 }
 
 generic_node! {
-    /// The curve along a flat shape, like a circle or a rectangle, a curve for
-    /// each shape.
+    /// The curve along a flat shape, like a circle or a rectangle: a curve for
+    /// each shape, so a single one for a single shape.
     ///
     /// A shape linked to a port which takes a curve goes through this on its
     /// own, so it is only needed to make that visible.
@@ -178,7 +178,7 @@ struct OutlinePorts<T>(std::marker::PhantomData<T>);
 
 impl<T: Outline> OutlinePorts<T> {
     const INPUTS: &'static [PortDecl] = &[PortDecl::new::<T>("shape")];
-    const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<CubicNurbsSegmentCache>("curve").grouped()];
+    const OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<CubicNurbsSegmentCache>("curve").grouped().follows(&[0])];
 }
 
 fn to_curve<T: Outline>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
@@ -199,21 +199,20 @@ fn curves(curves: impl Iterator<Item = Vec<CubicNurbsSegmentCache>>) -> (Vec<Cub
 }
 
 node! {
-    /// Straight lines, each from a start to an end.
+    /// A straight line from a start to an end.
     pub static LINE = "curve.line" {
         label: "Line",
         category: "Curve",
-        version: 1,
+        version: 2,
         inputs {
-            /// Where each line starts. The shorter of the starts and ends repeats its
-            /// last one.
-            port PortDecl::new::<Vec3>("start").with_default(&[Vec3::ZERO]);
-            /// Where each line ends.
-            port PortDecl::new::<Vec3>("end").with_default(&[Vec3::X]);
+            /// Where the line starts.
+            port PortDecl::new::<Vec3>("start").with_default(&[Vec3::ZERO]).one();
+            /// Where the line ends.
+            port PortDecl::new::<Vec3>("end").with_default(&[Vec3::X]).one();
         }
         outputs {
-            /// The lines, a curve for each.
-            port PortDecl::new::<CubicNurbsSegmentCache>("curve").grouped(), "Curves";
+            /// The line.
+            port PortDecl::new::<CubicNurbsSegmentCache>("curve").one();
         }
         cpu: line,
         gpu: &[],
@@ -221,15 +220,8 @@ node! {
 }
 
 fn line(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let (starts, ends) = (inputs.get::<Vec3>(0), inputs.get::<Vec3>(1));
-    let count = match starts.is_empty() || ends.is_empty() {
-        true => 0,
-        false => starts.len().max(ends.len()),
-    };
-    let at = |values: &[Vec3], index: usize| values[index.min(values.len() - 1)];
-    let (segments, offsets) = curves((0..count).map(|index| polyline(&[at(starts, index), at(ends, index)], false)));
-    outputs.set(0, &segments);
-    outputs.set_groups(0, &offsets);
+    let (start, end) = (inputs.value::<Vec3>(0), inputs.value::<Vec3>(1));
+    outputs.set(0, &polyline(&[start, end], false));
 }
 
 node! {
@@ -237,16 +229,16 @@ node! {
     pub static POLYLINE = "curve.polyline" {
         label: "Polyline",
         category: "Curve",
-        version: 1,
+        version: 2,
         inputs {
-            /// The points, a polyline for each group of them.
-            port PortDecl::new::<Vec3>("points").grouped(), "Points";
+            /// The points, one after the other.
+            port PortDecl::new::<Vec3>("points");
             /// Whether an edge leads from the last point back to the first.
             port PortDecl::new::<u32>("closed").choices(&["open", "closed"]);
         }
         outputs {
-            /// The polylines, a curve for each.
-            port PortDecl::new::<CubicNurbsSegmentCache>("curve").grouped(), "Curves";
+            /// The polyline.
+            port PortDecl::new::<CubicNurbsSegmentCache>("curve").one();
         }
         cpu: polyline_node,
         gpu: &[],
@@ -254,11 +246,7 @@ node! {
 }
 
 fn polyline_node(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let points = inputs.get::<Vec3>(0);
-    let closed = inputs.choice(1) == 1;
-    let (segments, offsets) = curves(inputs.groups(0).into_iter().map(|group| polyline(&points[group], closed)));
-    outputs.set(0, &segments);
-    outputs.set_groups(0, &offsets);
+    outputs.set(0, &polyline(inputs.get::<Vec3>(0), inputs.choice(1) == 1));
 }
 
 pub fn register(registry: &mut NodeRegistry) {

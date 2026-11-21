@@ -6,7 +6,7 @@ use crate::parallel::per_group;
 use glam::{Vec3, Vec4};
 use oneiroi_core::{
     node::{
-        Caps, Drawable, GpuKernel, GpuOutput, GpuStage, Inputs, NodeRegistry, Outputs, PortDecl,
+        Caps, Drawable, GenericPort, GpuKernel, GpuOutput, GpuStage, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl,
         Topology,
     },
     types::{DataType, Field, FieldType, Layout, Scalar},
@@ -138,99 +138,139 @@ impl From<EvaluatedFrame> for MovingFrame {
 }
 
 node! {
-    /// A smooth curve through the pull of its control points.
-    ///
-    /// Every group of points is a curve of its own, and so are its segments. The
-    /// curve is cubic: each of its segments follows four of the points.
+    /// A smooth curve through the pull of its control points. It is cubic: each
+    /// of its segments follows four of the points.
     pub static NURBS = "curve.nurbs" {
         label: "NURBS Curve",
         category: "Curve",
-        version: 2,
+        version: 3,
         inputs {
-            /// The control points, a group per curve. The larger the weight of a
-            /// point, the closer the curve comes to it. Use `1` for all of them
-            /// unless the curve has to be a circle or another conic.
-            port PortDecl::new::<ControlPoint>("points").grouped(), "Control points";
-            /// Where on the curve each control point pulls, a group per curve. A curve
-            /// takes the group with its index, or the last group if there are fewer.
+            /// The control points. The larger the weight of a point, the closer the
+            /// curve comes to it. Use `1` for all of them unless the curve has to be
+            /// a circle or another conic.
+            port PortDecl::new::<ControlPoint>("points"), "Control points";
+            /// Where on the curve each control point pulls, four more than there are
+            /// points.
             ///
             /// Left empty, the curve starts at its first point, ends at its last, and
             /// its segments are spread evenly. A knot repeated three times makes a sharp
             /// corner.
-            port PortDecl::new::<f32>("knots").grouped();
+            port PortDecl::new::<f32>("knots");
         }
         outputs {
-            /// The curves, a group of segments for each.
-            port PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(), "Curves";
+            /// The curve.
+            port PortDecl::new::<CubicNurbsSegmentCache>("segments").one(), "Curve";
         }
         cpu: nurbs,
         gpu: &[GpuKernel {
-            wgsl: concat!(include_str!("curve.wgsl"), include_str!("nurbs.wgsl")),
-            outputs: &[
-                GpuOutput {
-                    entry: "nurbs_segment",
-                    len: |inputs| segment_counts(inputs).sum(),
-                    words: None,
-                },
-                GpuOutput {
-                    entry: "",
-                    len: |inputs| inputs.group_count(0) + 1,
-                    // Known from the knots, so the CPU has them right away.
-                    words: Some(|inputs| offsets(segment_counts(inputs))),
-                },
-            ],
+            wgsl: NURBS_WGSL,
+            outputs: &[GpuOutput {
+                entry: "nurbs_segment",
+                len: |inputs| segment_counts(inputs).sum(),
+                words: None,
+            }],
             requires: Caps::NONE,
-            // The knots, and where the points and the knots of each curve start.
-            reads: &[1, 2, 3],
-            // Each segment joins the pieces of its curve before it, which is
-            // cheap but still grows with the length of the curve.
-            accepts: Some(|inputs| {
-                (inputs.len(1) == 0 || !inputs.groups(1).is_empty())
-                    && segment_counts(inputs).all(|count| count <= MAX_GPU_SEGMENTS)
-            }),
+            // The knots.
+            reads: &[1],
+            accepts: Some(nurbs_accepts),
             examples: &[
-                || nurbs_example(&[9, 5], &[]),
+                || nurbs_example(&[9], &[]),
                 || nurbs_example(&[7], &[&[0., 0., 0., 0., 0.3, 0.3, 0.3, 0.6, 1., 1., 1.]]),
-                || {
-                    let uniform: Vec<f32> = (0..10).map(|k| k as f32 / 9.0).collect();
-                    nurbs_example(&[6, 6], &[&clamped_uniform_knots(6), &uniform])
-                },
-                // No curve of 3 points, then knots which do not fit and ones
-                // which do.
-                || nurbs_example(&[3, 6, 5], &[&clamped_uniform_knots(3), &[0.0; 4], &clamped_uniform_knots(5)]),
-                || nurbs_example(&[40], &[]),
-                || nurbs_example(&[200, 3, 120], &[]),
+                || nurbs_example(&[6], &[&clamped_uniform_knots(6)]),
+                // Too few points for a curve, and knots which do not fit.
+                || nurbs_example(&[3], &[&clamped_uniform_knots(3)]),
+                || nurbs_example(&[6], &[&[0.0; 4]]),
+                || nurbs_example(&[200], &[]),
                 || {
                     let line: Vec<ControlPoint> = (0..6).map(|i| ControlPoint::at(Vec3::X * i as f32)).collect();
-                    vec![bytemuck::cast_slice(&line).to_vec(), Vec::new(), Vec::new(), Vec::new()]
+                    vec![bytemuck::cast_slice(&line).to_vec(), Vec::new()]
                 },
             ],
-            stages: &[
-                GpuStage {
-                    name: "starts",
-                    ty: u32::INFO,
-                    entry: "",
-                    len: |inputs| inputs.group_count(0) + 1,
-                    words: Some(|inputs| offsets(segment_counts(inputs))),
-                },
-                GpuStage {
-                    name: "spans",
-                    ty: u32::INFO,
-                    entry: "",
-                    len: |inputs| segment_counts(inputs).sum(),
-                    words: Some(span_words),
-                },
-                GpuStage {
-                    name: "pieces",
-                    ty: NurbsPiece::INFO,
-                    entry: "nurbs_piece",
-                    len: |inputs| segment_counts(inputs).sum(),
-                    words: None,
-                },
-            ],
+            stages: NURBS_STAGES,
         }],
     }
 }
+
+/// [`NURBS`] for many curves at once, a group of points and of knots for
+/// each, a group of segments for each curve. Not for the palette: it is
+/// the batch the engine runs where it knows there are many, like the
+/// benchmarks do. A curve takes the group of knots with its index, or the
+/// last group if there are fewer.
+pub static NURBS_BATCH: NodeDef = NodeDef {
+    id: "curve.nurbs.batch",
+    version: 1,
+    inputs: &[
+        PortDecl::new::<ControlPoint>("points").grouped(),
+        PortDecl::new::<f32>("knots").grouped(),
+    ],
+    outputs: &[PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped()],
+    cpu: nurbs,
+    gpu: &[GpuKernel {
+        wgsl: NURBS_WGSL,
+        outputs: &[
+            GpuOutput {
+                entry: "nurbs_segment",
+                len: |inputs| segment_counts(inputs).sum(),
+                words: None,
+            },
+            GpuOutput {
+                entry: "",
+                len: |inputs| inputs.group_count(0) + 1,
+                // Known from the knots, so the CPU has them right away.
+                words: Some(|inputs| offsets(segment_counts(inputs))),
+            },
+        ],
+        requires: Caps::NONE,
+        // The knots, and where the points and the knots of each curve start.
+        reads: &[1, 2, 3],
+        accepts: Some(nurbs_accepts),
+        examples: &[
+            || nurbs_batch_example(&[9, 5], &[]),
+            || {
+                let uniform: Vec<f32> = (0..10).map(|k| k as f32 / 9.0).collect();
+                nurbs_batch_example(&[6, 6], &[&clamped_uniform_knots(6), &uniform])
+            },
+            // No curve of 3 points, then knots which do not fit and ones
+            // which do.
+            || nurbs_batch_example(&[3, 6, 5], &[&clamped_uniform_knots(3), &[0.0; 4], &clamped_uniform_knots(5)]),
+            || nurbs_batch_example(&[200, 3, 120], &[]),
+        ],
+        stages: NURBS_STAGES,
+    }],
+};
+
+const NURBS_WGSL: &str = concat!(include_str!("curve.wgsl"), include_str!("nurbs.wgsl"));
+
+/// Each segment joins the pieces of its curve before it, which is cheap but
+/// still grows with the length of the curve.
+fn nurbs_accepts(inputs: &Inputs<'_>) -> bool {
+    (inputs.len(1) == 0 || !inputs.groups(1).is_empty())
+        && segment_counts(inputs).all(|count| count <= MAX_GPU_SEGMENTS)
+}
+
+const NURBS_STAGES: &[GpuStage] = &[
+    GpuStage {
+        name: "starts",
+        ty: u32::INFO,
+        entry: "",
+        len: |inputs| inputs.group_count(0) + 1,
+        words: Some(|inputs| offsets(segment_counts(inputs))),
+    },
+    GpuStage {
+        name: "spans",
+        ty: u32::INFO,
+        entry: "",
+        len: |inputs| segment_counts(inputs).sum(),
+        words: Some(span_words),
+    },
+    GpuStage {
+        name: "pieces",
+        ty: NurbsPiece::INFO,
+        entry: "nurbs_piece",
+        len: |inputs| segment_counts(inputs).sum(),
+        words: None,
+    },
+];
 
 /// The knot span of every segment of every curve.
 fn span_words(inputs: &Inputs<'_>) -> Vec<u32> {
@@ -259,9 +299,17 @@ fn offsets(lengths: impl Iterator<Item = usize>) -> Vec<u32> {
 /// No longer curves than these on the GPU.
 const MAX_GPU_SEGMENTS: usize = 4096;
 
-/// The inputs of [`NURBS`] as words: curves with as many `points` each,
-/// with a group of `knots` each or none at all.
+/// The inputs of [`NURBS`] as words: a curve of as many `points`, with
+/// `knots` or none at all.
 fn nurbs_example(points: &[usize], knots: &[&[f32]]) -> Vec<Vec<u32>> {
+    let mut words = nurbs_batch_example(points, knots);
+    words.truncate(2);
+    words
+}
+
+/// The inputs of [`NURBS_BATCH`] as words: curves with as many `points`
+/// each, with a group of `knots` each or none at all.
+fn nurbs_batch_example(points: &[usize], knots: &[&[f32]]) -> Vec<Vec<u32>> {
     let (points, offsets) = example_points(points);
     let points: Vec<ControlPoint> = points.iter().map(|p| ControlPoint::new(p.truncate() / p.w, p.w)).collect();
     let mut knot_offsets = vec![0];
@@ -369,52 +417,39 @@ node! {
     pub static SAMPLE_CURVE = "curve.sample" {
         label: "Sample Curve",
         category: "Curve",
-        version: 2,
+        version: 3,
         inputs {
-            /// The curves to put frames on.
-            port PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(), "Curves";
-            /// How many frames each curve gets, from its start to its end. Used only without `t` and `spacing`.
+            /// The curve to put frames on.
+            port PortDecl::new::<CubicNurbsSegmentCache>("segments").one(), "Curve";
+            /// How many frames, from the start of the curve to its end. Used only
+            /// without `t` and `spacing`.
             port PortDecl::new::<u32>("count").with_default(&[32u32]).one();
             /// The distance between two frames along the curve, from its start. A
             /// longer curve gets more frames. `0` turns it off.
             port PortDecl::new::<f32>("spacing").with_default(&[0.0f32]).one();
-            /// Where the frames are, as fractions of the length of each curve: `0` is
-            /// its start, `1` its end. The same for every curve.
+            /// Where the frames are, as fractions of the length of the curve: `0` is
+            /// its start, `1` its end.
             port PortDecl::new::<f32>("t"), "Positions";
         }
         outputs {
-            /// The frames, a group per curve.
-            port PortDecl::new::<EvaluatedFrame>("frames").grouped();
+            /// The frames, from the start of the curve to its end.
+            port PortDecl::new::<EvaluatedFrame>("frames");
         }
         cpu: sample_curve,
         gpu: &[GpuKernel {
-            wgsl: concat!(include_str!("curve.wgsl"), include_str!("sample.wgsl")),
-            outputs: &[
-                GpuOutput {
-                    entry: "sample_curve_frames",
-                    len: |inputs| inputs.group_count(0) * per_curve(inputs),
-                    words: None,
-                },
-                GpuOutput {
-                    entry: "sample_curve_offsets",
-                    len: |inputs| inputs.group_count(0) + 1,
-                    words: Some(|inputs| {
-                        offsets((0..inputs.group_count(0)).map(|_| per_curve(inputs)))
-                    }),
-                },
-            ],
+            wgsl: SAMPLE_WGSL,
+            outputs: &[GpuOutput {
+                entry: "sample_curve_frames",
+                len: |inputs| per_curve(inputs),
+                words: None,
+            }],
             requires: Caps::NONE,
-            // The count, the spacing and the offsets of the curves.
-            reads: &[1, 2, 4],
-            // How many frames come of a spacing depends on how long the curves
-            // are, which only the CPU knows before they are made.
-            accepts: Some(|inputs| {
-                inputs.value::<f32>(2) <= 0.0 && inputs.groups(0).iter().all(|curve| !curve.is_empty())
-            }),
+            // The count and the spacing.
+            reads: &[1, 2],
+            accepts: Some(sample_accepts),
             examples: &[
                 || sample_example(&[9], 8, 0.0, &[]),
-                || sample_example(&[9, 5], 5, 0.0, &[]),
-                || sample_example(&[6, 4], 3, 0.0, &[0.0, 0.25, 1.0, 1.5, -1.0]),
+                || sample_example(&[6], 3, 0.0, &[0.0, 0.25, 1.0, 1.5, -1.0]),
                 || sample_example(&[4], 1, 0.0, &[]),
                 || sample_example(&[5], 0, 0.0, &[]),
                 || sample_example(&[7], 4, 0.5, &[]),
@@ -423,6 +458,55 @@ node! {
             stages: &[],
         }],
     }
+}
+
+/// [`SAMPLE_CURVE`] on many curves at once, a group of frames for each.
+/// Not for the palette, see [`NURBS_BATCH`]. `t` is the same for every
+/// curve.
+pub static SAMPLE_CURVE_BATCH: NodeDef = NodeDef {
+    id: "curve.sample.batch",
+    version: 1,
+    inputs: &[
+        PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(),
+        PortDecl::new::<u32>("count").with_default(&[32u32]).one(),
+        PortDecl::new::<f32>("spacing").with_default(&[0.0f32]).one(),
+        PortDecl::new::<f32>("t"),
+    ],
+    outputs: &[PortDecl::new::<EvaluatedFrame>("frames").grouped()],
+    cpu: sample_curve,
+    gpu: &[GpuKernel {
+        wgsl: SAMPLE_WGSL,
+        outputs: &[
+            GpuOutput {
+                entry: "sample_curve_frames",
+                len: |inputs| inputs.group_count(0) * per_curve(inputs),
+                words: None,
+            },
+            GpuOutput {
+                entry: "sample_curve_offsets",
+                len: |inputs| inputs.group_count(0) + 1,
+                words: Some(|inputs| offsets((0..inputs.group_count(0)).map(|_| per_curve(inputs)))),
+            },
+        ],
+        requires: Caps::NONE,
+        // The count, the spacing and the offsets of the curves.
+        reads: &[1, 2, 4],
+        accepts: Some(sample_accepts),
+        examples: &[
+            || sample_batch_example(&[9, 5], 5, 0.0, &[]),
+            || sample_batch_example(&[6, 4], 3, 0.0, &[0.0, 0.25, 1.0, 1.5, -1.0]),
+            || sample_batch_example(&[7, 0], 4, 0.0, &[]),
+        ],
+        stages: &[],
+    }],
+};
+
+const SAMPLE_WGSL: &str = concat!(include_str!("curve.wgsl"), include_str!("sample.wgsl"));
+
+/// How many frames come of a spacing depends on how long the curves are,
+/// which only the CPU knows before they are made.
+fn sample_accepts(inputs: &Inputs<'_>) -> bool {
+    inputs.value::<f32>(2) <= 0.0 && inputs.groups(0).iter().all(|curve| !curve.is_empty())
 }
 
 /// Control points of curves with as many `points` each, which bend in
@@ -454,9 +538,17 @@ pub(crate) fn example_curves(points: &[usize]) -> (Vec<CubicNurbsSegmentCache>, 
     (segments, offsets)
 }
 
-/// The inputs of [`SAMPLE_CURVE`] as words, along curves of as many
-/// `points` each.
+/// The inputs of [`SAMPLE_CURVE`] as words, along a curve of as many
+/// `points`.
 fn sample_example(points: &[usize], count: u32, spacing: f32, t: &[f32]) -> Vec<Vec<u32>> {
+    let mut words = sample_batch_example(points, count, spacing, t);
+    words.truncate(4);
+    words
+}
+
+/// The inputs of [`SAMPLE_CURVE_BATCH`] as words, along curves of as many
+/// `points` each.
+fn sample_batch_example(points: &[usize], count: u32, spacing: f32, t: &[f32]) -> Vec<Vec<u32>> {
     let (segments, offsets) = example_curves(points);
     vec![
         bytemuck::cast_slice(&segments).to_vec(),
@@ -607,6 +699,66 @@ fn curve_bounds(words: &[u32]) -> Option<(Vec3, f32)> {
     (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
 }
 
+generic_node! {
+    /// Frames at points, each where its point is and not turned at all: its
+    /// tangent along `z`, its normal along `x` and its binormal along `y`.
+    ///
+    /// Points linked to a port which takes frames go through this on their own,
+    /// so shapes can be put onto any points.
+    pub static TO_FRAMES = "curve.to_frames" {
+        label: "Points to Frames",
+        category: "Curve",
+        inputs {
+            /// The points.
+            port GenericPort::exact::<Vec3>("points");
+        }
+        outputs {
+            /// A frame at each point.
+            port GenericPort::exact::<EvaluatedFrame>("frames");
+        }
+    }
+}
+
+/// The only version of [`TO_FRAMES`].
+static TO_FRAMES_VEC3: NodeDef = NodeDef {
+    id: "curve.to_frames<vec3>",
+    version: 1,
+    inputs: &[PortDecl::new::<Vec3>("points")],
+    outputs: &[PortDecl::new::<EvaluatedFrame>("frames").follows(&[0])],
+    cpu: to_frames,
+    gpu: &[GpuKernel {
+        wgsl: "
+fn to_frame(index: u32) -> EvaluatedFrame {
+    return EvaluatedFrame(in_points(index), vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0));
+}",
+        outputs: &[GpuOutput {
+            entry: "to_frame",
+            len: |inputs| inputs.len(0),
+            words: None,
+        }],
+        requires: Caps::NONE,
+        reads: &[],
+        accepts: None,
+        examples: &[
+            || vec![bytemuck::cast_slice(&[Vec3::new(1.0, 2.0, 3.0), Vec3::ZERO]).to_vec()],
+            || vec![Vec::new()],
+        ],
+        stages: &[],
+    }],
+};
+
+impl EvaluatedFrame {
+    /// The frame at `position` which is not turned, see [`TO_FRAMES`].
+    pub fn at(position: Vec3) -> Self {
+        MovingFrame { position, tangent: Vec3::Z, normal: Vec3::X, binormal: Vec3::Y }.into()
+    }
+}
+
+fn to_frames(inputs: &Inputs<'_>, outputs: &mut Outputs) {
+    let frames: Vec<_> = inputs.get::<Vec3>(0).iter().map(|point| EvaluatedFrame::at(*point)).collect();
+    outputs.set(0, &frames);
+}
+
 pub fn register(registry: &mut NodeRegistry) {
     // A curve can be looked at as it is: a line through its segments.
     registry.register_drawable(Drawable {
@@ -619,7 +771,14 @@ pub fn register(registry: &mut NodeRegistry) {
 
     registry.register(&NURBS);
     registry.register(&SAMPLE_CURVE);
+    // The batches the engine runs where it knows there are many.
+    for batch in [&NURBS_BATCH, &SAMPLE_CURVE_BATCH] {
+        registry.register(batch);
+        registry.hide(batch.id);
+    }
     registry.register(&TRANSLATE);
+    registry.register_instance(&TO_FRAMES, &TO_FRAMES_VEC3);
+    registry.add_conversion(&TO_FRAMES);
     registry.register(&crate::primitive::CIRCLE);
     super::register_profile::<crate::primitive::Circle>(registry);
     super::register_profile::<CubicNurbsSegmentCache>(registry);
@@ -720,7 +879,8 @@ mod tests {
         let length = curve().length();
         let frames = engine.read::<EvaluatedFrame>(&instance, "frames").unwrap();
         assert_eq!(frames.len(), (length / 0.5) as usize + 1);
-        assert_eq!(engine.groups(&instance, "frames"), Some(&[0, frames.len() as u32][..]));
+        // Along a single curve, so no groups.
+        assert_eq!(engine.groups(&instance, "frames"), None);
         // Neighbours are about as far apart as asked, a bit less where the
         // curve bends between them.
         for pair in frames.windows(2) {
@@ -762,7 +922,6 @@ mod tests {
             Some(&[][..])
         );
         assert_eq!(engine.read::<EvaluatedFrame>(&instance, "at"), Some(&[][..]));
-        assert_eq!(engine.groups(&instance, "frames"), Some(&[0, 0][..]));
     }
 
     #[test]
@@ -776,7 +935,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, 27);
+        assert_eq!(checked, 32);
 
         // And so does everything which says it can be drawn as it is: the
         // two kinds of surface, the curve and the circle.
@@ -809,12 +968,13 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 8 nodes of curves, a curve of each of the 2 outlines, a mesh
-        // for each of the 2 surfaces, a sweep for each of the 2 profiles
-        // and 4 values. For each of the 4 shapes Instance on Points and
+        // 8 nodes of curves and the batches of 2 of them, frames of points,
+        // a curve of each of the 2 outlines, a mesh for each of the 2
+        // surfaces, a sweep and its batch for each of the 2 profiles and 4
+        // values. For each of the 4 shapes Instance on Points and
         // Transform, given the shape or instances of it, and Realize for
         // the 3 which can be copied.
-        assert_eq!(registry.iter().count(), 17 + 4 * 4 + 3);
+        assert_eq!(registry.iter().count(), 22 + 4 * 4 + 3);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

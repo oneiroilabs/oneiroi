@@ -9,7 +9,7 @@ use oneiroi_core::{
     types::DataType,
 };
 use oneiroi_nodes::{
-    curve::{ControlPoint, NURBS, SAMPLE_CURVE, TRANSLATE, swept},
+    curve::{ControlPoint, NURBS, NURBS_BATCH, SAMPLE_CURVE_BATCH, TRANSLATE, swept, swept_batch},
     instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
     surface,
@@ -118,9 +118,9 @@ pub const SCENARIOS: &[Scenario] = &[
         build: |registry, _| {
             let mut b = ProgramBuilder::new("sweep circle");
             let spine = curves(&mut b);
-            let radius = b.param::<f32>("radius", &[0.1]);
+            let radius = b.param_one_of::<f32>("radius", 0.1);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = swept(&mut b, registry, spine, circle).unwrap();
+            let surface = swept_batch(&mut b, registry, spine, circle).unwrap();
             b.output("surface", surface);
             b.finish()
         },
@@ -135,10 +135,10 @@ pub const SCENARIOS: &[Scenario] = &[
         build: |registry, _| {
             let mut b = ProgramBuilder::new("sweep square");
             let spine = curves(&mut b);
-            let square = b.param_grouped("square", ControlPoint::INFO, &[]);
+            let square = b.param_words("square", ControlPoint::INFO, &[]);
             let knots = b.constant(&square_knots());
             let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
-            let surface = swept(&mut b, registry, spine, profile).unwrap();
+            let surface = swept_batch(&mut b, registry, spine, profile).unwrap();
             b.output("surface", surface);
             b.finish()
         },
@@ -160,7 +160,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let count = b.constant::<u32>(&[SAMPLES as u32]);
             let spacing = b.constant::<f32>(&[0.0]);
             let t = b.param::<f32>("t", &[]);
-            let frames = b.node(&SAMPLE_CURVE, &[segments, count, spacing, t]).unwrap()[0];
+            let frames = b.node(&SAMPLE_CURVE_BATCH, &[segments, count, spacing, t]).unwrap()[0];
             b.output("frames", frames);
             b.finish()
         },
@@ -183,11 +183,11 @@ pub const SCENARIOS: &[Scenario] = &[
             let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
             let radius = b.constant::<f32>(&[0.1]);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = swept(&mut b, registry, moved, circle).unwrap();
+            let surface = swept_batch(&mut b, registry, moved, circle).unwrap();
             let count = b.constant::<u32>(&[SAMPLES as u32]);
             let spacing = b.constant::<f32>(&[0.0]);
             let t = b.constant::<f32>(&[]);
-            let frames = b.node(&SAMPLE_CURVE, &[moved, count, spacing, t]).unwrap()[0];
+            let frames = b.node(&SAMPLE_CURVE_BATCH, &[moved, count, spacing, t]).unwrap()[0];
             b.output("surface", surface);
             b.output("frames", frames);
             b.finish()
@@ -262,7 +262,7 @@ pub const SCENARIOS: &[Scenario] = &[
             let spine = curves(&mut b);
             let radius = b.constant::<f32>(&[0.1]);
             let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let swept = swept(&mut b, registry, spine, circle).unwrap();
+            let swept = swept_batch(&mut b, registry, spine, circle).unwrap();
             let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
             for (name, slot) in surface::mesh(&mut b, registry, swept, tolerance).unwrap() {
                 b.output(name, slot);
@@ -312,7 +312,7 @@ fn words<T: Pod>(values: &[T]) -> Vec<u32> {
 fn curves(b: &mut ProgramBuilder) -> SlotId {
     let points = b.param_grouped("points", ControlPoint::INFO, &[]);
     let knots = b.constant::<f32>(&[]);
-    b.node(&NURBS, &[points, knots]).unwrap()[0]
+    b.node(&NURBS_BATCH, &[points, knots]).unwrap()[0]
 }
 
 /// A call of NURBS and Translate for every curve of the parameter
@@ -339,7 +339,7 @@ fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
     let count = b.constant::<u32>(&[SAMPLES as u32]);
     let spacing = b.constant::<f32>(&[0.0]);
     let t = b.constant::<f32>(&[]);
-    let frames = b.node(&SAMPLE_CURVE, &[spine, count, spacing, t]).unwrap()[0];
+    let frames = b.node(&SAMPLE_CURVE_BATCH, &[spine, count, spacing, t]).unwrap()[0];
 
     let around: Vec<ControlPoint> = (0..=12)
         .map(|i| {

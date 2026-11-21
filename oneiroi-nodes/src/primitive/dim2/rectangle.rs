@@ -63,20 +63,19 @@ node! {
     pub static RECTANGLE = "curve.rectangle" {
         label: "Rectangle",
         category: "Curve",
-        version: 1,
+        version: 2,
         inputs {
-            /// How wide it is along `x`, a rectangle for each. The shorter of the
-            /// widths and heights repeats its last value.
-            port PortDecl::new::<f32>("width").with_default(&[1.0f32]);
+            /// How wide it is along `x`.
+            port PortDecl::new::<f32>("width").with_default(&[1.0f32]).one();
             /// How high it is along `y`.
-            port PortDecl::new::<f32>("height").with_default(&[1.0f32]);
+            port PortDecl::new::<f32>("height").with_default(&[1.0f32]).one();
             /// The radius of its corners, `0` for sharp ones. At most half its
             /// shorter side.
             port PortDecl::new::<f32>("corner_radius").with_default(&[0.0f32]).one();
         }
         outputs {
-            /// The rectangles.
-            port PortDecl::new::<Rectangle>("rectangle"), "Rectangles";
+            /// The rectangle.
+            port PortDecl::new::<Rectangle>("rectangle").one();
         }
         cpu: rectangle,
         gpu: &[],
@@ -84,15 +83,6 @@ node! {
 }
 
 fn rectangle(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let (widths, heights) = (inputs.get::<f32>(0), inputs.get::<f32>(1));
-    let corner = inputs.value::<f32>(2);
-    let count = match widths.is_empty() || heights.is_empty() {
-        true => 0,
-        false => widths.len().max(heights.len()),
-    };
-    let at = |values: &[f32], index: usize| values[index.min(values.len() - 1)];
-    let rectangles: Vec<_> = (0..count)
-        .map(|index| Rectangle::new(at(widths, index), at(heights, index), corner))
-        .collect();
-    outputs.set(0, &rectangles);
+    let [width, height, corner] = [0, 1, 2].map(|index| inputs.value::<f32>(index));
+    outputs.set(0, &[Rectangle::new(width, height, corner)]);
 }

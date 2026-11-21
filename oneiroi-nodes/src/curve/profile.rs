@@ -48,6 +48,33 @@ pub trait Profile: DataType + Sync {
     ///
     /// [`GpuKernel::examples`]: oneiroi_core::node::GpuKernel::examples
     const SWEEP_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>];
+
+    /// Inputs of the sweep along a single curve to compare both with.
+    const SWEEP_SINGLE_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>];
+}
+
+/// The inputs of a sweep along the single curve `spine` as words: the
+/// spine, `profile`, whether the ends are capped and the polyline `scale`.
+pub(crate) fn sweep_single_example<P: Profile>(
+    spine: &[CubicNurbsSegmentCache],
+    profile: &[P],
+    ends: u32,
+    scale: Option<&[(f32, f32)]>,
+) -> Vec<Vec<u32>> {
+    let mut words = sweep_example_along(spine, &[], profile, ends, scale.as_slice());
+    words.truncate(4);
+    words
+}
+
+/// The curve of [`super::nodes::example_curves`] of as many `points`.
+pub(crate) fn example_curve(points: usize) -> Vec<CubicNurbsSegmentCache> {
+    super::nodes::example_curves(&[points]).0
+}
+
+/// Curve `index` of [`cornered_spine`]: 0 turns twice, 1 is closed.
+pub(crate) fn cornered_curve(index: usize) -> Vec<CubicNurbsSegmentCache> {
+    let (spine, offsets) = cornered_spine();
+    spine[offsets[index] as usize..offsets[index + 1] as usize].to_vec()
 }
 
 /// The inputs of a sweep as words: curves with as many `points` each
@@ -165,6 +192,15 @@ fn sweep_piece(
             let (spine, offsets) = super::nodes::example_curves(&[7, 5]);
             sweep_example_along(&spine, &offsets, &square_profile(), 0, &[LATE, SPIKE])
         },
+    ];
+
+    const SWEEP_SINGLE_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>] = &[
+        || sweep_single_example(&example_curve(6), &square_profile(), 0, None),
+        || sweep_single_example(&example_curve(7), &square_profile()[..1], 1, None),
+        || sweep_single_example::<CubicNurbsSegmentCache>(&example_curve(6), &[], 0, None),
+        || sweep_single_example(&cornered_curve(0), &square_profile(), 0, None),
+        || sweep_single_example(&cornered_curve(1), &square_profile(), 0, Some(LATE)),
+        || sweep_single_example(&example_curve(7), &square_profile(), 0, Some(SPIKE)),
     ];
 }
 

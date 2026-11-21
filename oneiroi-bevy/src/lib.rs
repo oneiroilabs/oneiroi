@@ -233,7 +233,7 @@ mod tests {
         let mut b = ProgramBuilder::new("test");
         let points = b.constant(&[[0., 0., 0., 1.], [1., 2., 0., 1.], [2., 0., 1., 1.], [3., 2., 0., 1.]].map(ControlPoint::from));
         let knots = b.constant(&clamped_uniform_knots(4));
-        let radius = b.param::<f32>("radius", &[0.25]);
+        let radius = b.param_one_of::<f32>("radius", 0.25);
         let tolerance = b.constant::<f32>(&[0.01]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let outputs = b

@@ -5,7 +5,7 @@ use std::{f32::consts::TAU, marker::PhantomData};
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec3Swizzles, Vec4};
 use oneiroi_core::{
-    node::{Caps, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
+    node::{Caps, GenericNode, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
     program::{BuildError, Program, ProgramBuilder, SlotId},
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
@@ -172,6 +172,8 @@ impl DataType for TubePatch {
 
     const NAME: &'static str = "tube_patch";
     const WGSL: &'static str = "TubePatch";
+    /// A surface is all of its patches.
+    const PARTS: bool = true;
     const SCALAR: Scalar = Scalar::F32;
     const LAYOUT: Layout = Layout::Struct(&[
         Field::nested("segment", CubicNurbsSegmentCache::INFO),
@@ -288,6 +290,8 @@ impl DataType for SweptPatch {
 
     const NAME: &'static str = "swept_patch";
     const WGSL: &'static str = "SweptPatch";
+    /// A surface is all of its patches.
+    const PARTS: bool = true;
     const SCALAR: Scalar = Scalar::F32;
     const LAYOUT: Layout = Layout::Struct(&[
         Field::nested("spine", CubicNurbsSegmentCache::INFO),
@@ -551,28 +555,42 @@ generic_node! {
         label: "Sweep",
         category: "Curve",
         inputs {
-            /// The curves to move the profile along, a surface for each.
-            port GenericPort::exact::<CubicNurbsSegmentCache>("spine").grouped();
+            /// The curve to move the profile along.
+            port GenericPort::exact::<CubicNurbsSegmentCache>("spine").one();
             /// The cross-section, in the plane of `x` and `y`: `x` points along the
             /// normal of the curve, `y` along its binormal.
-            port GenericPort::implementing("profile", PROFILE);
+            port GenericPort::implementing("profile", PROFILE).one();
             /// Whether the ends of a curve are closed by flat caps, or left open. A
             /// curve which ends where it starts has no ends. A cap is flat across
             /// from the middle of the profile, which has to see all of it.
             port GenericPort::exact::<u32>("ends").choices(&["capped", "open"]);
             /// How big the profile is along the curve: a curve whose `x` is how far
             /// along, from `0` at its start to `1` at its end, and whose `y` is the
-            /// scale there. From `(0, 1)` to `(1, 0)` it ends in a point. A curve
-            /// of the spine takes the scale with its index, or the last one. None
-            /// keeps the profile as it is.
-            port GenericPort::exact::<CubicNurbsSegmentCache>("scale").grouped();
+            /// scale there. From `(0, 1)` to `(1, 0)` it ends in a point. None keeps
+            /// the profile as it is.
+            port GenericPort::exact::<CubicNurbsSegmentCache>("scale").one();
         }
         outputs {
-            /// The swept surfaces, one per curve of the spine.
-            port GenericPort::implementing("surface", SURFACE).grouped();
+            /// The swept surface.
+            port GenericPort::implementing("surface", SURFACE).one();
         }
     }
 }
+
+/// [`SWEEP`] along many curves at once, a surface for each. Not for the
+/// palette: it is the batch the engine runs where it knows there are many,
+/// like the benchmarks do. A curve of the spine takes the profile and the
+/// scale with its index, or the last ones.
+pub static SWEEP_BATCH: GenericNode = GenericNode {
+    id: "curve.sweep.batch",
+    inputs: &[
+        GenericPort::exact::<CubicNurbsSegmentCache>("spine").grouped(),
+        GenericPort::implementing("profile", PROFILE),
+        GenericPort::exact::<u32>("ends").choices(&["capped", "open"]),
+        GenericPort::exact::<CubicNurbsSegmentCache>("scale").grouped(),
+    ],
+    outputs: &[GenericPort::implementing("surface", SURFACE).grouped()],
+};
 
 /// The sweep of `profile` along `spine`, with every other input of
 /// [`SWEEP`] at its default. What a program written by hand calls.
@@ -585,9 +603,43 @@ pub fn swept(
     Ok(crate::with_defaults(builder, registry, &SWEEP, &[spine, profile])?[0])
 }
 
+/// [`swept`] along many curves at once, with [`SWEEP_BATCH`].
+pub fn swept_batch(
+    builder: &mut ProgramBuilder,
+    registry: &NodeRegistry,
+    spine: SlotId,
+    profile: SlotId,
+) -> Result<SlotId, BuildError> {
+    Ok(crate::with_defaults(builder, registry, &SWEEP_BATCH, &[spine, profile])?[0])
+}
+
 struct Ports<P>(PhantomData<P>);
 
 impl<P: Profile> Ports<P> {
+    const SINGLE: &'static [PortDecl] = &[
+        PortDecl::new::<CubicNurbsSegmentCache>("spine").one(),
+        PortDecl::new::<P>("profile").one(),
+        PortDecl::new::<u32>("ends").choices(&["capped", "open"]),
+        PortDecl::new::<CubicNurbsSegmentCache>("scale").one(),
+    ];
+    const SINGLE_OUTPUTS: &'static [PortDecl] = &[PortDecl::new::<P::Patch>("surface").one()];
+    const SINGLE_GPU: &'static [GpuKernel] = &[GpuKernel {
+        wgsl: P::SWEEP_WGSL,
+        outputs: &[GpuOutput {
+            entry: "sweep_patch",
+            len: |inputs| {
+                let pieces = P::pieces(inputs.len(1));
+                inputs.len(0) * slots(inputs) * pieces + inputs.group_count(0) * 2 * caps::<P>(inputs)
+            },
+            words: None,
+        }],
+        requires: Caps::NONE,
+        // Whether there are caps.
+        reads: &[2],
+        accepts: None,
+        examples: P::SWEEP_SINGLE_EXAMPLES,
+        stages: &[],
+    }];
     const INPUTS: &'static [PortDecl] = &[
         PortDecl::new::<CubicNurbsSegmentCache>("spine").grouped(),
         PortDecl::new::<P>("profile"),
@@ -655,17 +707,28 @@ fn caps<P: Profile>(inputs: &Inputs<'_>) -> usize {
 pub fn register_profile<P: Profile>(registry: &mut NodeRegistry) {
     let node = version(&SWEEP, P::NAME, |id| NodeDef {
         id,
+        inputs: Ports::<P>::SINGLE,
+        outputs: Ports::<P>::SINGLE_OUTPUTS,
+        version: 3,
+        cpu: sweep::<P>,
+        gpu: Ports::<P>::SINGLE_GPU,
+    });
+    registry.register_instance(&SWEEP, node);
+    let node = version(&SWEEP_BATCH, P::NAME, |id| NodeDef {
+        id,
         inputs: Ports::<P>::INPUTS,
         outputs: Ports::<P>::OUTPUTS,
         version: 2,
         cpu: sweep::<P>,
         gpu: Ports::<P>::GPU,
     });
-    registry.register_instance(&SWEEP, node);
+    registry.register_instance(&SWEEP_BATCH, node);
+    registry.hide(SWEEP_BATCH.id);
     register_surface::<P::Patch>(registry);
 }
 
-/// Every curve of the spine is swept on its own, into a group of patches.
+/// Every curve of the spine is swept on its own, into a group of patches:
+/// the single curve of [`SWEEP`] into one surface.
 fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let spine = inputs.get::<CubicNurbsSegmentCache>(0);
     let profile = inputs.get::<P>(1);
@@ -691,7 +754,7 @@ fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
 pub fn tube(registry: &NodeRegistry) -> Program {
     let mut b = ProgramBuilder::new("tube");
     let spine = b.param::<CubicNurbsSegmentCache>("spine", &[]);
-    let radius = b.param::<f32>("radius", &[0.2]);
+    let radius = b.param_one_of::<f32>("radius", 0.2);
     let tolerance = b.param_one_of::<f32>("tolerance", surface::TOLERANCE);
 
     let circle = b.node(&CIRCLE, &[radius]).expect("a radius is a f32")[0];
@@ -741,7 +804,7 @@ mod tests {
         let points: Vec<ControlPoint> = spine.iter().copied().map(ControlPoint::from).collect();
         let points = b.constant(&points);
         let knots = b.constant(&clamped_uniform_knots(spine.len()));
-        let radius = b.param::<f32>("radius", &[0.25]);
+        let radius = b.param_one_of::<f32>("radius", 0.25);
         let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let outputs = b
@@ -972,19 +1035,19 @@ mod tests {
     }
 
     #[test]
-    fn every_curve_is_swept_on_its_own() {
+    fn every_curve_of_a_batch_is_swept_on_its_own() {
         // Two curves in one list of points, told apart by their groups:
-        // a straight one along x, and the bent one far away from it.
+        // a straight one along x, and the bent one far away from it. The
+        // batches take them all at once.
         let mut points: Vec<ControlPoint> = (0..4).map(|i| ControlPoint::at(Vec3::X * i as f32)).collect();
         points.extend(BENT.map(|[x, y, z, w]| ControlPoint::new(Vec3::new(x, y + 10.0, z), w)));
 
         let mut b = ProgramBuilder::new("two curves");
         let points = b.param_grouped("points", ControlPoint::INFO, bytemuck::cast_slice(&points));
         let knots = b.constant::<f32>(&[]);
-        let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
-        let radius = b.constant::<f32>(&[0.25, 0.5]);
-        let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-        let surface = swept(&mut b, &registry(), spine, circle).unwrap();
+        let spine = b.node(&crate::curve::NURBS_BATCH, &[points, knots]).unwrap()[0];
+        let circle = b.constant(&[crate::primitive::Circle::new(0.25), crate::primitive::Circle::new(0.5)]);
+        let surface = swept_batch(&mut b, &registry(), spine, circle).unwrap();
         b.output("spine", spine);
         b.output("surface", surface);
 

@@ -7,7 +7,9 @@ use oneiroi_core::{
     types::{DataType, Field, FieldType, Layout, Scalar},
 };
 
-use crate::curve::{Curve, Piece, Profile, TubePatch, sweep_example};
+use crate::curve::{
+    Curve, Piece, Profile, TubePatch, cornered_curve, example_curve, sweep_example, sweep_single_example,
+};
 
 /// A circle around the origin. It is its radius and nothing else, every
 /// point on it is computed when it is asked for.
@@ -127,6 +129,16 @@ fn sweep_piece(
             crate::curve::sweep_example_along(&spine, &offsets, &[Circle::new(0.1)], 1, &[crate::curve::LATE])
         },
     ];
+
+    const SWEEP_SINGLE_EXAMPLES: &'static [fn() -> Vec<Vec<u32>>] = &[
+        || sweep_single_example(&example_curve(6), &[Circle::new(0.25)], 0, None),
+        || sweep_single_example(&example_curve(9), &[Circle::new(1.0)], 1, None),
+        || sweep_single_example::<Circle>(&example_curve(6), &[], 0, None),
+        || sweep_single_example(&[], &[Circle::new(1.0)], 0, None),
+        || sweep_single_example(&cornered_curve(0), &[Circle::new(0.1)], 0, None),
+        || sweep_single_example(&cornered_curve(1), &[Circle::new(0.1)], 1, Some(crate::curve::LATE)),
+        || sweep_single_example(&example_curve(9), &[Circle::new(0.3)], 0, Some(crate::curve::SPIKE)),
+    ];
 }
 
 /// A circle can be looked at as it is: a line around the origin of the
@@ -148,28 +160,29 @@ node! {
     pub static CIRCLE = "curve.circle" {
         label: "Circle",
         category: "Curve",
-        version: 1,
+        version: 2,
         inputs {
-            /// The radius, a circle for each.
-            port PortDecl::new::<f32>("radius").with_default(&[1.0f32]);
+            /// The radius.
+            port PortDecl::new::<f32>("radius").with_default(&[1.0f32]).one();
         }
         outputs {
-            /// The circles.
-            port PortDecl::new::<Circle>("circle"), "Circles";
+            /// The circle.
+            port PortDecl::new::<Circle>("circle").one();
         }
         cpu: circle,
         gpu: &[GpuKernel {
             wgsl: "fn circle(index: u32) -> Circle { return Circle(in_radius(index)); }",
             outputs: &[GpuOutput {
                 entry: "circle",
-                len: |inputs| inputs.len(0),
+                len: |inputs| inputs.len(0).min(1),
                 words: None,
             }],
             requires: Caps::NONE,
             reads: &[],
             accepts: None,
             examples: &[
-                || vec![bytemuck::cast_slice(&[0.25f32, 1.0, -2.0, 0.0]).to_vec()],
+                || vec![bytemuck::cast_slice(&[0.25f32]).to_vec()],
+                || vec![bytemuck::cast_slice(&[-2.0f32]).to_vec()],
                 || vec![Vec::new()],
             ],
             stages: &[],
@@ -178,6 +191,6 @@ node! {
 }
 
 fn circle(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let circles: Vec<_> = inputs.get(0).iter().map(|r| Circle::new(*r)).collect();
+    let circles: Vec<_> = inputs.get(0).iter().take(1).map(|r| Circle::new(*r)).collect();
     outputs.set(0, &circles);
 }

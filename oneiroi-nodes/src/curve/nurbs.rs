@@ -48,6 +48,8 @@ impl DataType for CubicNurbsSegmentCache {
 
     const NAME: &'static str = "cubic_nurbs_segment";
     const WGSL: &'static str = "CubicNurbsSegmentCache";
+    /// A curve is all of its segments.
+    const PARTS: bool = true;
     const SCALAR: Scalar = Scalar::F32;
     const LAYOUT: Layout = Layout::Struct(&[
         Field::new("monomial_basis", FieldType::Mat4),
