@@ -968,13 +968,13 @@ mod tests {
         let mut registry = NodeRegistry::new();
         crate::register(&mut registry);
         crate::register(&mut registry);
-        // 8 nodes of curves and the batches of 2 of them, frames of points,
+        // 9 nodes of curves and the batches of 2 of them, frames of points,
         // a curve of each of the 2 outlines, a mesh for each of the 2
         // surfaces, a sweep and its batch for each of the 2 profiles and 4
         // values. For each of the 4 shapes Instance on Points and
         // Transform, given the shape or instances of it, and Realize for
         // the 3 which can be copied.
-        assert_eq!(registry.iter().count(), 22 + 4 * 4 + 3);
+        assert_eq!(registry.iter().count(), 23 + 4 * 4 + 3);
         assert!(registry.get("curve.nurbs").is_some());
     }
 }

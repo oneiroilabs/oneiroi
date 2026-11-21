@@ -19,7 +19,7 @@ use crate::{
 /// Cubic Bézier pieces, each its four homogeneous control points, as the
 /// segments of one curve: every piece becomes a segment of its own, so
 /// where two of them meet at an angle the curve has a sharp corner.
-fn pieces_to_curve(pieces: &[[Vec4; 4]]) -> Vec<CubicNurbsSegmentCache> {
+pub(crate) fn pieces_to_curve(pieces: &[[Vec4; 4]]) -> Vec<CubicNurbsSegmentCache> {
     let Some(first) = pieces.first() else {
         return Vec::new();
     };
@@ -252,6 +252,7 @@ fn polyline_node(inputs: &Inputs<'_>, outputs: &mut Outputs) {
 pub fn register(registry: &mut NodeRegistry) {
     registry.register(&LINE);
     registry.register(&POLYLINE);
+    registry.register(&super::CURVE_2D);
     registry.register(&crate::primitive::RECTANGLE);
     register_outline::<Circle>(registry);
     register_outline::<Rectangle>(registry);

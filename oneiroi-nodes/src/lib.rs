@@ -59,6 +59,7 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         &curve::POLYLINE_META,
         &curve::TO_CURVE_META,
         &curve::TO_FRAMES_META,
+        &curve::CURVE_2D_META,
         &surface::MESH_META,
         &instance::INSTANCE_META,
         &instance::TRANSFORM_META,

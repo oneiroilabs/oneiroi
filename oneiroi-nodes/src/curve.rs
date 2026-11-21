@@ -3,6 +3,7 @@ use std::{iter, marker::PhantomData};
 
 use glam::Vec3;
 
+pub mod curve2d;
 mod nodes;
 pub mod nurbs;
 pub mod ops;
@@ -18,12 +19,14 @@ pub(crate) use profile::{
     LATE, SPIKE, cornered_curve, cornered_spine, example_curve, fractions, sweep_example, sweep_example_along,
     sweep_single_example,
 };
+pub use curve2d::{CURVE_2D, curve_through};
 pub use profile::{PROFILE, Profile};
 pub use shapes::{LINE, OUTLINE, Outline, POLYLINE, TO_CURVE, polyline, register_outline};
 pub(crate) use sweep::sweep_curve;
 pub use sweep::{Piece, SWEEP, SWEEP_BATCH, SweptPatch, TubePatch, kind, register_profile, swept, swept_batch, tube};
 #[cfg(feature = "meta")]
 pub use {
+    curve2d::CURVE_2D_META,
     nodes::{NURBS_META, SAMPLE_CURVE_META, TO_FRAMES_META, TRANSLATE_META},
     profile::PROFILE_META,
     shapes::{LINE_META, OUTLINE_META, POLYLINE_META, TO_CURVE_META},
