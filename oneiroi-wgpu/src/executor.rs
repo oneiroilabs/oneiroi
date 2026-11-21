@@ -137,6 +137,9 @@ pub struct GpuExecutor {
     ring_cursor: u32,
     /// In words, what a dynamic offset into the ring has to be a multiple of.
     ring_alignment: u32,
+    /// What the device allows, asked once: asking wgpu looks it up every
+    /// time, and it is needed for every input of every call.
+    limits: wgpu::Limits,
     readback: Option<wgpu::Buffer>,
     /// Work which was recorded and not handed over yet.
     encoder: Option<wgpu::CommandEncoder>,
@@ -199,8 +202,10 @@ impl GpuExecutor {
         let bindless = (Self::supports(&device) && !compute_disabled())
             .then(|| Self::bindless(&device, &ring))
             .flatten();
+        let limits = device.limits();
         Self {
-            ring_alignment: (device.limits().min_storage_buffer_offset_alignment / 4).max(1),
+            ring_alignment: (limits.min_storage_buffer_offset_alignment / 4).max(1),
+            limits,
             device,
             queue,
             caps,
@@ -512,7 +517,7 @@ impl GpuExecutor {
         let Some(bindless) = &self.bindless else {
             return false;
         };
-        let max_bytes = self.device.limits().max_storage_buffer_binding_size;
+        let max_bytes = self.limits.max_storage_buffer_binding_size;
         handle.page < bindless.max_pages
             && self
                 .pages
@@ -681,7 +686,7 @@ impl GpuExecutor {
         };
         let (kernel, call_words) = (pipeline.kernel, pipeline.call_words);
         let passes = passes(node, kernel);
-        let limits = self.device.limits();
+        let limits = &self.limits;
         let max_bytes = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
         let max_groups = limits.max_compute_workgroups_per_dimension as usize;
         let max_rows = (CALL_WINDOW as usize / call_words).min(max_groups);
@@ -962,7 +967,7 @@ impl Executor for GpuExecutor {
         }
 
         // A part longer than one dispatch can reach is copied in pieces.
-        let max_groups = self.device.limits().max_compute_workgroups_per_dimension;
+        let max_groups = self.limits.max_compute_workgroups_per_dimension;
         let longest = max_groups * 64;
         let mut calls = Vec::new();
         let mut offset = target.offset;
