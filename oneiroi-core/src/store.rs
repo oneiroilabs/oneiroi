@@ -301,6 +301,9 @@ struct Entry {
     /// Who needs the value to stay, like an instance whose parameter it
     /// is: it is never evicted while one of them lives.
     holders: Vec<Weak<()>>,
+    /// How many groups of [`Store::pin`] keep it. A pinned entry is out of
+    /// the line of eviction altogether, and not even looked at by it.
+    pins: u32,
     /// The entries which are a part of this one, and go with it. Some may
     /// be gone already, or be there twice.
     parts: Vec<ContentKey>,
@@ -319,6 +322,8 @@ pub struct Store {
     page_words: u32,
     used_words: u64,
     frame: u64,
+    /// The groups of [`Store::pin`], each with whoever keeps it.
+    pinned: Vec<(Weak<()>, Vec<ContentKey>)>,
 }
 
 impl Default for Store {
@@ -342,6 +347,7 @@ impl Store {
             page_words,
             used_words: 0,
             frame: 0,
+            pinned: Vec::new(),
         }
     }
 
@@ -405,6 +411,7 @@ impl Store {
                 resident: false,
                 alias_of: Some(parent),
                 holders: Vec::new(),
+                pins: 0,
                 parts: Vec::new(),
             },
         );
@@ -474,6 +481,7 @@ impl Store {
                 resident: true,
                 alias_of: None,
                 holders: Vec::new(),
+                pins: 0,
                 parts: Vec::new(),
             },
         );
@@ -487,6 +495,46 @@ impl Store {
             && !entry.holders.iter().any(|held| held.as_ptr() == Arc::as_ptr(holder))
         {
             entry.holders.push(Arc::downgrade(holder));
+        }
+    }
+
+    /// Keeps the values of `keys` for as long as `holder` lives, like
+    /// [`Store::hold`], but out of the line of eviction: however many there
+    /// are, evicting never looks at them, only at whether `holder` still
+    /// lives. For the many values which never change while a program is in
+    /// use, like the edge of its constant part. Keys not in the store are
+    /// left out.
+    pub fn pin(&mut self, keys: impl IntoIterator<Item = ContentKey>, holder: &Arc<()>) {
+        let keys: Vec<ContentKey> = keys
+            .into_iter()
+            .filter(|key| match self.entries.get_mut(key) {
+                Some(entry) => {
+                    entry.pins += 1;
+                    true
+                }
+                None => false,
+            })
+            .collect();
+        self.pinned.push((Arc::downgrade(holder), keys));
+    }
+
+    /// Puts what nobody pins anymore back in line, as the oldest there is.
+    fn unpin_dead(&mut self) {
+        let mut index = 0;
+        while index < self.pinned.len() {
+            if self.pinned[index].0.strong_count() > 0 {
+                index += 1;
+                continue;
+            }
+            let (_, keys) = self.pinned.swap_remove(index);
+            for key in keys {
+                if let Some(entry) = self.entries.get_mut(&key) {
+                    entry.pins -= 1;
+                    if entry.pins == 0 {
+                        self.used.push_front((entry.last_used, key));
+                    }
+                }
+            }
         }
     }
 
@@ -513,6 +561,7 @@ impl Store {
                 resident: false,
                 alias_of: None,
                 holders: Vec::new(),
+                pins: 0,
                 parts: Vec::new(),
             },
         );
@@ -635,6 +684,7 @@ impl Store {
                 resident: len == 0,
                 alias_of: None,
                 holders: Vec::new(),
+                pins: 0,
                 parts: Vec::new(),
             },
         );
@@ -735,6 +785,7 @@ impl Store {
     /// are in use. Entries touched in the current frame are never freed.
     /// Returns how many entries were evicted.
     pub fn evict(&mut self, budget_words: u64) -> usize {
+        self.unpin_dead();
         let mut evicted = 0;
         let mut held = Vec::new();
         while self.used_words > budget_words {
@@ -749,8 +800,8 @@ impl Store {
             let Some(entry) = self.entries.get_mut(&key) else {
                 continue;
             };
-            // It was used again since.
-            if entry.last_used != frame {
+            // It was used again since, or is out of line while pinned.
+            if entry.last_used != frame || entry.pins > 0 {
                 continue;
             }
             entry.holders.retain(|holder| holder.strong_count() > 0);

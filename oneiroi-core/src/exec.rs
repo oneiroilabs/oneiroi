@@ -7,6 +7,7 @@
 
 use std::{
     fmt,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -166,7 +167,7 @@ impl Executor for CpuExecutor {
 struct Keys {
     slots: Vec<ContentKey>,
     /// The keys inside each program this one calls, by operation index.
-    calls: Vec<(u32, Keys)>,
+    calls: Vec<(u32, Arc<Keys>)>,
 }
 
 impl Keys {
@@ -179,60 +180,106 @@ impl Keys {
     /// Derives the keys anew in the room these had, for one call after
     /// another of the same program.
     fn rederive(&mut self, programs: &ProgramSet, program: &Program, params: &[ContentKey]) {
-        let slots = &mut self.slots;
-        slots.clear();
-        slots.extend(program.slots.iter().map(|slot| match &slot.source {
+        self.slots.clear();
+        self.slots.extend(program.slots.iter().map(|slot| match &slot.source {
             SlotSource::Param(index) => params[*index as usize],
             SlotSource::Const { key, .. } => *key,
             // Filled in below, operations only read earlier slots.
             SlotSource::Op { .. } => ContentKey::UNSET,
         }));
         self.calls.clear();
+        for index in 0..program.ops.len() {
+            self.derive_op(programs, program, index);
+        }
+    }
 
+    /// The keys of one instance of the program of `statics`: those of its
+    /// constant part as they are, and the rest derived from `params`.
+    fn of_instance(statics: &Statics, programs: &ProgramSet, program: &Program, params: &[ContentKey]) -> Self {
+        let mut keys = Self {
+            slots: statics.keys.clone(),
+            calls: statics.calls.clone(),
+        };
+        for (index, slot) in program.params.iter().map(|param| param.slot).enumerate() {
+            keys.slots[slot.0 as usize] = params[index];
+        }
+        for op in &statics.dynamic_ops {
+            keys.derive_op(programs, program, *op as usize);
+        }
+        keys.calls.sort_unstable_by_key(|(op, _)| *op);
+        keys
+    }
+
+    /// The keys after the parameters `changed` changed to what `params`
+    /// says: only the operations which depend on one of them again.
+    fn update(
+        &mut self,
+        statics: &Statics,
+        programs: &ProgramSet,
+        program: &Program,
+        params: &[ContentKey],
+        changed: &[usize],
+    ) {
+        let mut ops: Vec<u32> = Vec::new();
+        for param in changed {
+            self.slots[program.params[*param].slot.0 as usize] = params[*param];
+            ops.extend(&statics.param_ops[*param]);
+        }
+        // Operations only read earlier slots, so in their order each sees
+        // the keys of what it reads already updated.
+        ops.sort_unstable();
+        ops.dedup();
+        for op in ops {
+            self.derive_op(programs, program, op as usize);
+        }
+    }
+
+    /// Derives the keys of the outputs of operation `index` from the keys of
+    /// its inputs, which are derived already.
+    fn derive_op(&mut self, programs: &ProgramSet, program: &Program, index: usize) {
         const ON_STACK: usize = 16;
+        let op = &program.ops[index];
         let mut stack = [ContentKey::UNSET; ON_STACK];
         let mut heap = Vec::new();
-        for (index, op) in program.ops.iter().enumerate() {
-            let inputs = match op.inputs.len() <= ON_STACK {
-                true => &mut stack[..op.inputs.len()],
-                false => {
-                    heap.resize(op.inputs.len(), ContentKey::UNSET);
-                    &mut heap[..]
-                }
-            };
-            for (input, slot) in inputs.iter_mut().zip(&op.inputs) {
-                *input = slots[slot.0 as usize];
+        let inputs = match op.inputs.len() <= ON_STACK {
+            true => &mut stack[..op.inputs.len()],
+            false => {
+                heap.resize(op.inputs.len(), ContentKey::UNSET);
+                &mut heap[..]
             }
-            let inputs = &*inputs;
+        };
+        for (input, slot) in inputs.iter_mut().zip(&op.inputs) {
+            *input = self.slots[slot.0 as usize];
+        }
+        let inputs = &*inputs;
+        let slots = &mut self.slots;
 
-            match op.kind {
-                OpKind::Node(node) => {
-                    for (output, slot) in op.outputs.iter().enumerate() {
-                        slots[slot.0 as usize] =
-                            ContentKey::derive_node(node.id, node.version, output as u32, inputs);
-                    }
+        match op.kind {
+            OpKind::Node(node) => {
+                for (output, slot) in op.outputs.iter().enumerate() {
+                    slots[slot.0 as usize] = ContentKey::derive_node(node.id, node.version, output as u32, inputs);
                 }
-                OpKind::Call(callee) => {
-                    let callee = programs.get(callee);
-                    let keys = Keys::derive(programs, callee, inputs);
-                    for (index, slot) in op.outputs.iter().enumerate() {
-                        let inner = callee.call_output_slot(index);
-                        slots[slot.0 as usize] = keys.slots[inner.0 as usize];
-                    }
-                    self.calls.push((index as u32, keys));
+            }
+            OpKind::Call(callee) => {
+                let callee = programs.get(callee);
+                let keys = Keys::derive(programs, callee, inputs);
+                for (output, slot) in op.outputs.iter().enumerate() {
+                    let inner = callee.call_output_slot(output);
+                    slots[slot.0 as usize] = keys.slots[inner.0 as usize];
                 }
-                OpKind::ForEach {
-                    callee,
-                    element,
-                    max,
-                } => {
-                    // What comes out depends on what goes in and on what
-                    // is done for each element, not on how many there are.
-                    let callee = programs.get(callee).hash;
-                    for (output, slot) in op.outputs.iter().enumerate() {
-                        slots[slot.0 as usize] =
-                            ContentKey::derive_for_each(callee, element as u32, max, output as u32, inputs);
-                    }
+                let keys = Arc::new(keys);
+                match self.calls.binary_search_by_key(&(index as u32), |(op, _)| *op) {
+                    Ok(at) => self.calls[at].1 = keys,
+                    Err(at) => self.calls.insert(at, (index as u32, keys)),
+                }
+            }
+            OpKind::ForEach { callee, element, max } => {
+                // What comes out depends on what goes in and on what is done
+                // for each element, not on how many there are.
+                let callee = programs.get(callee).hash;
+                for (output, slot) in op.outputs.iter().enumerate() {
+                    slots[slot.0 as usize] =
+                        ContentKey::derive_for_each(callee, element as u32, max, output as u32, inputs);
                 }
             }
         }
@@ -241,6 +288,122 @@ impl Keys {
     fn call(&self, op: u32) -> &Keys {
         let index = self.calls.partition_point(|(index, _)| *index < op);
         &self.calls[index].1
+    }
+}
+
+/// What of a program does not depend on its parameters, found once for
+/// every instance of it and every value they are set to.
+///
+/// Values a host does not expose are constants of the program, so most of
+/// a graph is usually constant. Its keys are derived here once, an edit of
+/// a parameter derives again only what depends on that parameter, and the
+/// edge of the constant part, which everything else reads of it, is
+/// pinned in the store for as long as the program is there: it is never
+/// computed twice, and planning does not even look at it anymore.
+struct Statics {
+    /// Whether each slot depends on a parameter.
+    dynamic: Vec<bool>,
+    /// The key of each slot which does not, unset for the others.
+    keys: Vec<ContentKey>,
+    /// The keys inside the calls which have only constant arguments.
+    calls: Vec<(u32, Arc<Keys>)>,
+    /// The operations which depend on some parameter, in their order.
+    dynamic_ops: Vec<u32>,
+    /// For each parameter, the operations which depend on it, in order.
+    param_ops: Vec<Vec<u32>>,
+    /// The outputs which depend on some parameter: the only ones planned
+    /// once the edge is pinned.
+    dynamic_outputs: Vec<usize>,
+    /// The constant slots the rest reads, and the constant outputs with
+    /// what comes along with them: all of the constant part that is ever
+    /// needed once it ran.
+    edge: Vec<SlotId>,
+    /// Lives as long as the program: what it pins stays for that long.
+    alive: Arc<()>,
+    /// Whether the edge is in the store and pinned there.
+    pinned: bool,
+}
+
+impl Statics {
+    fn new(programs: &ProgramSet, program: &Program) -> Self {
+        let params = program.params.len();
+        let words = params.div_ceil(64).max(1);
+        // The parameters each slot depends on, a bit for each.
+        let mut depends = vec![0u64; program.slots.len() * words];
+        for (index, param) in program.params.iter().enumerate() {
+            depends[param.slot.0 as usize * words + index / 64] |= 1 << (index % 64);
+        }
+        let mut param_ops = vec![Vec::new(); params];
+        let mut dynamic_ops = Vec::new();
+        let mut mask = vec![0u64; words];
+        for (index, op) in program.ops.iter().enumerate() {
+            mask.iter_mut().for_each(|word| *word = 0);
+            for input in &op.inputs {
+                let from = &depends[input.0 as usize * words..][..words];
+                mask.iter_mut().zip(from).for_each(|(word, from)| *word |= from);
+            }
+            for output in &op.outputs {
+                depends[output.0 as usize * words..][..words].copy_from_slice(&mask);
+            }
+            if mask.iter().any(|word| *word != 0) {
+                dynamic_ops.push(index as u32);
+                for (param, ops) in param_ops.iter_mut().enumerate() {
+                    if mask[param / 64] & (1 << (param % 64)) != 0 {
+                        ops.push(index as u32);
+                    }
+                }
+            }
+        }
+        let dynamic: Vec<bool> = depends.chunks(words).map(|slot| slot.iter().any(|word| *word != 0)).collect();
+
+        // The keys of the constant part, which need no parameter.
+        let mut keys = Keys {
+            slots: program
+                .slots
+                .iter()
+                .map(|slot| match &slot.source {
+                    SlotSource::Const { key, .. } => *key,
+                    _ => ContentKey::UNSET,
+                })
+                .collect(),
+            calls: Vec::new(),
+        };
+        let mut dynamic_op = dynamic_ops.iter().peekable();
+        for index in 0..program.ops.len() {
+            if dynamic_op.next_if(|op| **op == index as u32).is_none() {
+                keys.derive_op(programs, program, index);
+            }
+        }
+
+        // What of the constant part is read by what is not, and the
+        // constant outputs with the values they come along with.
+        let mut edge = Vec::new();
+        for op in &dynamic_ops {
+            edge.extend(program.ops[*op as usize].inputs.iter().filter(|slot| !dynamic[slot.0 as usize]));
+        }
+        for output in &program.outputs {
+            let slot = program.slot(output.slot);
+            let along = slot.prototype.map(|p| [p.elements, p.groups]).into_iter().flatten();
+            let along = [output.slot].into_iter().chain(slot.groups).chain(along).chain(slot.total);
+            edge.extend(along.filter(|slot| !dynamic[slot.0 as usize]));
+        }
+        edge.sort_unstable_by_key(|slot| slot.0);
+        edge.dedup();
+
+        let dynamic_outputs = (0..program.outputs.len())
+            .filter(|index| dynamic[program.outputs[*index].slot.0 as usize])
+            .collect();
+        Self {
+            dynamic,
+            keys: keys.slots,
+            calls: keys.calls,
+            dynamic_ops,
+            param_ops,
+            dynamic_outputs,
+            edge,
+            alive: Arc::new(()),
+            pinned: false,
+        }
     }
 }
 
@@ -261,6 +424,10 @@ struct Planner<'a> {
     defaults: bool,
     work: &'a mut Vec<Step>,
     scheduled: &'a mut KeySet,
+    /// For the program planned from the top: whether each slot depends on
+    /// a parameter, once its constant part is pinned. The constant slots are
+    /// there then, and are not even looked up.
+    constant: Option<&'a [bool]>,
 }
 
 impl Planner<'_> {
@@ -268,6 +435,9 @@ impl Planner<'_> {
     /// Nothing is planned for values which are stored already, so only the
     /// part of the graph behind a missing value is ever visited.
     fn ensure(&mut self, scope: &Scope<'_>, slot: SlotId) {
+        if scope.caller.is_none() && self.constant.is_some_and(|dynamic| !dynamic[slot.0 as usize]) {
+            return;
+        }
         let key = scope.keys.slots[slot.0 as usize];
         if self.scheduled.contains(&key) || self.store.touch(key).is_some() {
             return;
@@ -390,8 +560,11 @@ pub struct Instance {
     /// long as this lives.
     param_keys: Vec<ContentKey>,
     alive: std::sync::Arc<()>,
-    /// Outdated once a parameter changes.
+    /// Derived when it is first planned, and from then on again only where
+    /// a parameter changed.
     keys: Option<Keys>,
+    /// The parameters which changed since the keys were derived.
+    changed: Vec<usize>,
 }
 
 impl Instance {
@@ -408,6 +581,10 @@ pub struct Engine<E: Executor = CpuExecutor> {
     work: Vec<Step>,
     scheduled: KeySet,
     overflows: Vec<Overflow>,
+    /// The constant part of every program which was planned, by its id.
+    statics: Vec<Option<Statics>>,
+    /// The programs whose constant edge is pinned once what was planned ran.
+    to_pin: Vec<ProgramId>,
 }
 
 impl Default for Engine {
@@ -429,6 +606,8 @@ impl<E: Executor> Engine<E> {
             work: Vec::new(),
             scheduled: KeySet::default(),
             overflows: Vec::new(),
+            statics: Vec::new(),
+            to_pin: Vec::new(),
         }
     }
 
@@ -475,6 +654,7 @@ impl<E: Executor> Engine<E> {
             param_keys,
             alive: std::sync::Arc::new(()),
             keys: None,
+            changed: Vec::new(),
         }
     }
 
@@ -524,7 +704,9 @@ impl<E: Executor> Engine<E> {
         if key != old {
             self.store.release(old, &instance.alive);
             instance.param_keys[index] = key;
-            instance.keys = None;
+            if !instance.changed.contains(&index) {
+                instance.changed.push(index);
+            }
         }
         self.store.hold(key, &instance.alive);
         Ok(())
@@ -549,24 +731,49 @@ impl<E: Executor> Engine<E> {
     /// else, for example where a graphics device is at hand.
     pub fn plan<'a>(&mut self, instances: impl IntoIterator<Item = &'a mut Instance>) -> usize {
         let before = self.work.len();
+        self.forget_removed();
         for instance in instances {
-            let program = self.programs.get(instance.program);
-            let keys = instance
-                .keys
-                .get_or_insert_with(|| Keys::derive(&self.programs, program, &instance.param_keys));
+            let id = instance.program;
+            let index = id.0 as usize;
+            if self.statics.len() <= index {
+                self.statics.resize_with(index + 1, || None);
+            }
+            let program = self.programs.get(id);
+            let statics = self.statics[index].get_or_insert_with(|| Statics::new(&self.programs, program));
+            match &mut instance.keys {
+                None => instance.keys = Some(Keys::of_instance(statics, &self.programs, program, &instance.param_keys)),
+                Some(keys) => keys.update(statics, &self.programs, program, &instance.param_keys, &instance.changed),
+            }
+            instance.changed.clear();
+            let keys = instance.keys.as_ref().unwrap();
+            if !statics.pinned && !self.to_pin.contains(&id) {
+                self.to_pin.push(id);
+            }
             let scope = Scope {
                 program,
                 keys,
                 caller: None,
             };
+            // Once its edge is pinned, the constant part is there for sure.
+            let constant = statics.pinned.then_some(statics.dynamic.as_slice());
             let mut planner = Planner {
                 programs: &self.programs,
                 store: &mut self.store,
                 defaults: true,
                 work: &mut self.work,
                 scheduled: &mut self.scheduled,
+                constant,
             };
-            for output in &program.outputs {
+            // Once the edge is pinned, the constant outputs are there.
+            let all: Vec<usize>;
+            let outputs = match constant {
+                Some(_) => &statics.dynamic_outputs,
+                None => {
+                    all = (0..program.outputs.len()).collect();
+                    &all
+                }
+            };
+            for output in outputs.iter().map(|index| &program.outputs[*index]) {
                 planner.ensure(&scope, output.slot);
                 // What comes along with it is needed by whoever reads it.
                 let slot = program.slot(output.slot);
@@ -589,7 +796,36 @@ impl<E: Executor> Engine<E> {
         let steps = std::mem::take(&mut self.work);
         self.scheduled.clear();
         self.overflows.clear();
-        self.run(steps)
+        let ran = self.run(steps);
+        self.pin_edges();
+        ran
+    }
+
+    /// Pins the edge of the constant part of every program which ran for
+    /// the first time, now that it is in the store.
+    fn pin_edges(&mut self) {
+        for id in std::mem::take(&mut self.to_pin) {
+            let Some(Some(statics)) = self.statics.get_mut(id.0 as usize) else {
+                continue;
+            };
+            let keys: Vec<ContentKey> = statics.edge.iter().map(|slot| statics.keys[slot.0 as usize]).collect();
+            // Only once all of it is there: what was not planned yet is
+            // pinned the next time.
+            if keys.iter().all(|key| self.store.contains(*key)) {
+                self.store.pin(keys, &statics.alive);
+                statics.pinned = true;
+            }
+        }
+    }
+
+    /// Lets go of the constant part of programs which were removed, so what
+    /// they pinned can be evicted.
+    fn forget_removed(&mut self) {
+        for (index, statics) in self.statics.iter_mut().enumerate() {
+            if statics.is_some() && !self.programs.contains(ProgramId(index as u32)) {
+                *statics = None;
+            }
+        }
     }
 
     /// The calls for each element which had to leave elements out during
@@ -699,6 +935,7 @@ impl<E: Executor> Engine<E> {
                 defaults: false,
                 work: &mut steps,
                 scheduled: &mut scheduled,
+                constant: None,
             };
             for (parts, output) in parts.iter_mut().zip(&program.outputs) {
                 planner.ensure(&scope, output.slot);
@@ -802,6 +1039,7 @@ impl<E: Executor> Engine<E> {
     /// Ends the frame: results nobody asked for lately are dropped until
     /// the store fits into `budget_words`.
     pub fn end_frame(&mut self, budget_words: u64) {
+        self.forget_removed();
         self.store.evict(budget_words);
         self.store.end_frame();
     }
@@ -962,7 +1200,9 @@ mod tests {
 
         engine.end_frame(u64::MAX);
         engine.end_frame(0);
-        assert!(engine.store().is_empty());
+        // Only the constant `2` stays, which never changes while the
+        // program is there.
+        assert_eq!(engine.store().len(), 1);
         assert_eq!(engine.read::<f32>(&instance, "out"), None);
 
         assert_eq!(engine.evaluate([&mut instance]), 4);
@@ -970,6 +1210,83 @@ mod tests {
             engine.read::<f32>(&instance, "out"),
             Some(&[12.5, 24.5, 36.5][..])
         );
+    }
+
+    /// Constants into a chain, the end of which a parameter changes, and a
+    /// constant output of their own.
+    fn mostly_constant() -> crate::program::Program {
+        let mut b = ProgramBuilder::new("mostly constant");
+        let values = b.constant::<f32>(&[1., 2., 3.]);
+        let two = b.constant::<f32>(&[2.]);
+        let doubled = b.node(&SCALE, &[values, two]).unwrap()[0];
+        let shifted = b.node(&OFFSET, &[doubled, two]).unwrap()[0];
+        let scale = b.param::<f32>("scale", &[10.]);
+        let offset = b.param::<f32>("offset", &[0.5]);
+        let scaled = b.node(&SCALE, &[shifted, scale]).unwrap()[0];
+        let moved = b.node(&OFFSET, &[scaled, offset]).unwrap()[0];
+        b.output("moved", moved);
+        b.output("constant", doubled);
+        b.finish()
+    }
+
+    #[test]
+    fn only_what_depends_on_a_parameter_derives_its_keys_again() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(mostly_constant());
+        let mut instance = engine.instantiate(id);
+        let full = |engine: &Engine, instance: &Instance| {
+            let program = engine.programs().get(id);
+            Keys::derive(engine.programs(), program, &instance.param_keys).slots
+        };
+        engine.evaluate([&mut instance]);
+        assert_eq!(instance.keys.as_ref().unwrap().slots, full(&engine, &instance));
+        // Edit after edit, the keys are what deriving all of them gives.
+        for (scale, offset) in [(3.0f32, None), (3.0, Some(1.0f32)), (4.0, Some(2.0))] {
+            engine.set_param(&mut instance, "scale", &[scale]).unwrap();
+            if let Some(offset) = offset {
+                engine.set_param(&mut instance, "offset", &[offset]).unwrap();
+            }
+            engine.evaluate([&mut instance]);
+            assert_eq!(instance.keys.as_ref().unwrap().slots, full(&engine, &instance));
+        }
+        assert_eq!(engine.read::<f32>(&instance, "moved"), Some(&[18.0, 26.0, 34.0][..]));
+        // The parameter `offset` is read by the last node only.
+        let statics = engine.statics[id.0 as usize].as_ref().unwrap();
+        assert_eq!(statics.param_ops.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(statics.dynamic_ops, [2, 3]);
+    }
+
+    #[test]
+    fn the_edge_of_the_constant_part_stays_for_as_long_as_the_program() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(mostly_constant());
+        let mut instance = engine.instantiate(id);
+        assert_eq!(engine.evaluate([&mut instance]), 4);
+        // What the constant part ends in stays, what only it read goes:
+        // `doubled` is an output and read by `shifted`, which is read by
+        // what depends on `scale`. The values and the `2` are not needed
+        // anymore once they ran. What was used in a frame stays for it.
+        engine.end_frame(0);
+        engine.end_frame(0);
+        let edge = engine.statics[id.0 as usize].as_ref().unwrap().edge.len();
+        assert_eq!(edge, 2);
+        assert_eq!(engine.store().len(), edge);
+        assert_eq!(engine.read::<f32>(&instance, "constant"), Some(&[2.0, 4.0, 6.0][..]));
+
+        // An edit runs what depends on it, and nothing of the rest, even
+        // with everything else evicted every frame.
+        for scale in [3.0f32, 4.0, 5.0] {
+            engine.set_param(&mut instance, "scale", &[scale]).unwrap();
+            assert_eq!(engine.evaluate([&mut instance]), 2);
+            engine.end_frame(0);
+        }
+
+        // Without the program and its instance, nothing keeps it anymore.
+        drop(instance);
+        engine.programs_mut().retain([]);
+        engine.end_frame(0);
+        engine.end_frame(0);
+        assert!(engine.store().is_empty());
     }
 
     #[test]
