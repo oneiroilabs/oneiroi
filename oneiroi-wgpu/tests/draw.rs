@@ -9,6 +9,7 @@ use oneiroi_core::{
     exec::{Engine, Instance},
     node::NodeRegistry,
     program::{ProgramBuilder, SlotId},
+    shader::LodColors,
 };
 use oneiroi_nodes::{
     curve::{ControlPoint, NURBS, SweptPatch, TubePatch, nurbs::clamped_uniform_knots, swept},
@@ -297,13 +298,13 @@ impl Scene {
     }
 
     /// As fine as it appears, with steps of `pixels` on screen.
-    fn auto(&self, pixels: f32, debug: bool) -> DrawView {
+    fn auto(&self, pixels: f32, colors: LodColors) -> DrawView {
         DrawView {
             auto: Some(AutoDetail {
                 pixels,
                 max_level: 6,
                 viewport: (SIZE as f32, SIZE as f32),
-                debug,
+                colors,
                 count: true,
             }),
             ..self.view(1, 1)
@@ -576,14 +577,14 @@ fn detail_follows_the_size_on_screen() {
         for (name, mut stage) in stages(&scene) {
             // Small steps look like the fine picture up to its outline,
             // without a gap anywhere between the patches.
-            let fine = scene.drawn(&mut stage, scene.auto(3.0, false));
+            let fine = scene.drawn(&mut stage, scene.auto(3.0, LodColors::Shaded));
             let off = different(&fine, &near);
             assert!(off * 10 < lit, "{name}: {off} of {lit} pixels differ");
             assert_eq!(holes(&fine, &near), 0, "{name}");
 
             // Steps as long as the whole picture leave as few as there
             // can be: one per edge, and four around a closed profile.
-            let coarse = scene.drawn(&mut stage, scene.auto(4096.0, false));
+            let coarse = scene.drawn(&mut stage, scene.auto(4096.0, LodColors::Shaded));
             let least = scene.drawn(&mut fixed, scene.view(1, if circle { 4 } else { 1 }));
             assert!(different(&coarse, &least) * 40 < lit, "{name}");
             assert!(different(&coarse, &near) > lit / 10, "{name}");
@@ -628,7 +629,7 @@ fn there_are_no_cracks_between_patches() {
 
         for (name, mut stage) in stages(&scene) {
             for pixels in [3.0, 6.0, 10.0, 17.0, 30.0, 60.0] {
-                let drawn = scene.drawn(&mut stage, scene.auto(pixels, true));
+                let drawn = scene.drawn(&mut stage, scene.auto(pixels, LodColors::Detail));
                 assert_eq!(open_in_the_middle(&drawn), 0, "{name} at {pixels}");
             }
         }
@@ -643,9 +644,9 @@ fn what_is_far_away_is_drawn_coarser() {
     for (name, mut stage) in stages(&scene) {
         // Coloured by how fine each patch is drawn: red is fine.
         scene.camera.frame(Vec3::ZERO, 5.0);
-        let near = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, true)));
+        let near = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, LodColors::Detail)));
         scene.camera.frame(Vec3::ZERO, 40.0);
-        let far = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, true)));
+        let far = red_and_blue(&scene.drawn(&mut stage, scene.auto(8.0, LodColors::Detail)));
 
         assert!(near.0 > near.1, "{name}: near is fine, {near:?}");
         assert!(far.1 > far.0, "{name}: far is coarse, {far:?}");
@@ -665,8 +666,8 @@ fn both_ways_draw_the_same_picture() {
     scene.camera.yaw_pitch_delta(0.9, 0.2);
     scene.camera.frame(Vec3::new(1.0, 0.0, 0.0), 4.0);
     for pixels in [4.0, 12.0, 40.0] {
-        let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, false));
-        let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, false));
+        let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, LodColors::Shaded));
+        let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, LodColors::Shaded));
         let lit = covered(&pulled);
         assert!(lit > 500);
         let off = different(&pulled, &meshed);
@@ -682,14 +683,14 @@ fn what_is_out_of_view_is_not_drawn() {
     for (name, mut stage) in stages(&scene) {
         // The camera looks at something far to the side of the tube.
         scene.camera.frame(Vec3::new(0.0, 60.0, 0.0), 7.0);
-        let away = scene.drawn(&mut stage, scene.auto(8.0, false));
+        let away = scene.drawn(&mut stage, scene.auto(8.0, LodColors::Shaded));
         assert_eq!(covered(&away), 0, "{name}");
 
         // Half of it in view is half of the fine picture.
         scene.camera.frame(Vec3::new(2.0, 0.0, 0.0), 3.0);
         let mut fixed = DrawStage::new(&scene.device, FORMAT);
         let reference = scene.drawn(&mut fixed, scene.view(64, 64));
-        let partly = scene.drawn(&mut stage, scene.auto(3.0, false));
+        let partly = scene.drawn(&mut stage, scene.auto(3.0, LodColors::Shaded));
         let lit = covered(&reference);
         assert!(lit > 500);
         assert!(different(&partly, &reference) * 40 < lit, "{name}");
@@ -699,7 +700,7 @@ fn what_is_out_of_view_is_not_drawn() {
 /// Prepares view `index` of `stage` with what the scene shows and counts
 /// its triangles once they arrived.
 fn counted(scene: &mut Scene, stage: &mut DrawStage, pixels: f32) -> u32 {
-    let view = scene.auto(pixels, false);
+    let view = scene.auto(pixels, LodColors::Shaded);
     scene.drawn(stage, view);
     scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     stage.triangles(&scene.device, 0).expect("they were counted")
@@ -738,10 +739,10 @@ fn several_views_draw_the_same_patches() {
     for (name, mut stage) in stages(&scene) {
         // Every view alone, as a reference.
         let front = scene.camera;
-        let front_view = scene.auto(6.0, false);
+        let front_view = scene.auto(6.0, LodColors::Shaded);
         let alone_front = scene.drawn(&mut stage, front_view);
         scene.camera.yaw_pitch_delta(1.4, 0.6);
-        let side_view = scene.auto(6.0, false);
+        let side_view = scene.auto(6.0, LodColors::Shaded);
         let alone_side = scene.drawn(&mut stage, side_view);
         assert!(different(&alone_front, &alone_side) > 200, "{name}");
 
@@ -794,8 +795,8 @@ fn many_patches_are_drawn_alike_both_ways() {
         // where many small ones share a mesh shader.
         for (distance, pixels) in [(4.0, 4.0), (9.0, 8.0), (40.0, 6.0)] {
             scene.camera.frame(Vec3::ZERO, distance);
-            let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, false));
-            let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, false));
+            let pulled = scene.drawn(&mut stages[0].1, scene.auto(pixels, LodColors::Shaded));
+            let meshed = scene.drawn(&mut stages[1].1, scene.auto(pixels, LodColors::Shaded));
             let lit = covered(&pulled);
             assert!(lit > 100, "{lit}");
             let off = different(&pulled, &meshed);
@@ -905,7 +906,7 @@ fn instances_look_like_their_copies() {
         return;
     };
     for (name, mut stage) in stages(&scene) {
-        let view = scene.auto(4.0, false);
+        let view = scene.auto(4.0, LodColors::Shaded);
         let instances = scene.instances(&mut stage, view, 0.0);
         let copies = scene.output(&mut stage, "copies", view);
         let lit = covered(&copies);
@@ -922,7 +923,7 @@ fn instances_out_of_view_are_left_out() {
         return;
     };
     for (name, mut stage) in stages(&scene) {
-        let all = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        let all = scene.instances(&mut stage, scene.auto(4.0, LodColors::Shaded), 0.0);
         scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let triangles = stage.triangles(&scene.device, 0).unwrap();
         assert!(covered(&all) > 300 && triangles > 0, "{name}");
@@ -930,24 +931,24 @@ fn instances_out_of_view_are_left_out() {
         // Only the instance at one end is in view.
         let camera = scene.camera;
         scene.camera.frame(Vec3::new(-3.0, -3.0, 0.0), 1.5);
-        let one = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        let one = scene.instances(&mut stage, scene.auto(4.0, LodColors::Shaded), 0.0);
         scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(covered(&one) > 0, "{name}");
 
         // None of them.
         scene.camera.frame(Vec3::new(0.0, 60.0, 0.0), 7.0);
-        let none = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        let none = scene.instances(&mut stage, scene.auto(4.0, LodColors::Shaded), 0.0);
         scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(covered(&none), 0, "{name}");
         // Counting comes after the culling, and finds nothing left.
         let _ = stage.triangles(&scene.device, 0);
-        let _ = scene.instances(&mut stage, scene.auto(4.0, false), 0.0);
+        let _ = scene.instances(&mut stage, scene.auto(4.0, LodColors::Shaded), 0.0);
         scene.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert_eq!(stage.triangles(&scene.device, 0), Some(0), "{name}");
 
         // All in view, but each smaller than asked for.
         scene.camera = camera;
-        let tiny = scene.instances(&mut stage, scene.auto(4.0, false), 10_000.0);
+        let tiny = scene.instances(&mut stage, scene.auto(4.0, LodColors::Shaded), 10_000.0);
         assert_eq!(covered(&tiny), 0, "{name}");
     }
 }
@@ -989,5 +990,49 @@ fn values_drawn_together_hide_each_other() {
         let together = picture(&scene.device, &scene.queue, |encoder, target| stage.render_all(encoder, target, None));
         // Only where the tube is open at its ends can the curve be seen.
         assert!(different(&together, &surface) < covered(&surface) / 50, "{name}");
+    }
+}
+
+/// How many hues are drawn, in steps of a degree, of the pixels which have
+/// a colour at all: lit, and not grey.
+fn hues(pixels: &[[u8; 4]]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for pixel in pixels.iter().filter(|pixel| **pixel != BACKGROUND) {
+        let [r, g, b] = [pixel[0], pixel[1], pixel[2]].map(|channel| channel as f32 / 255.0);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        if max - min < 0.1 {
+            continue;
+        }
+        let delta = max - min;
+        let hue = if max == r {
+            ((g - b) / delta).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / delta + 2.0
+        } else {
+            (r - g) / delta + 4.0
+        };
+        seen.insert((hue * 60.0) as u32);
+    }
+    seen.len()
+}
+
+#[test]
+fn every_meshlet_gets_a_colour_of_its_own() {
+    let Some(mut scene) = scene(false) else {
+        return;
+    };
+    scene.camera.frame(Vec3::ZERO, 5.0);
+    for (name, mut stage) in stages(&scene) {
+        let shaded = hues(&scene.drawn(&mut stage, scene.auto(3.0, LodColors::Shaded)));
+        assert!(shaded <= 2, "{name}: shaded, the surface is one colour, not {shaded}");
+        // Fine, a large patch is cut into blocks, a meshlet each; coarse,
+        // several small patches share one. Without mesh shaders every
+        // patch gets a colour of its own however fine it is.
+        let fine = hues(&scene.drawn(&mut stage, scene.auto(3.0, LodColors::Meshlets)));
+        let coarse = hues(&scene.drawn(&mut stage, scene.auto(200.0, LodColors::Meshlets)));
+        assert!(fine > 8, "{name}: {fine} colours");
+        if name == "mesh shaders" {
+            assert!(fine > coarse, "{name}: {fine} colours fine, {coarse} coarse");
+        }
     }
 }

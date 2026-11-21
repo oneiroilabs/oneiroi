@@ -11,7 +11,7 @@ use iced::{
     Event, Rectangle, mouse,
     widget::shader::{self, Action, Pipeline, Primitive},
 };
-use oneiroi_core::node::Topology;
+use oneiroi_core::{node::Topology, shader::LodColors};
 use oneiroi_wgpu::{
     AutoDetail, DetailBudget, DrawStage, DrawView, Instanced, MeshData, MeshPreview, orbit::OrbitCamera,
 };
@@ -48,8 +48,9 @@ pub struct Preview {
     pub frame: u64,
     /// How finely surfaces are drawn.
     pub detail: Detail,
-    /// Colours every patch by how fine it is drawn.
-    pub show_detail: bool,
+    /// How surfaces are coloured: by how fine a patch is drawn, or by the
+    /// meshlet it is drawn in.
+    pub colors: LodColors,
 }
 
 pub struct CameraState {
@@ -171,7 +172,7 @@ impl<Message> shader::Program<Message> for Preview {
             camera,
             frame,
             detail: self.detail,
-            show_detail: self.show_detail,
+            colors: self.colors,
         }
     }
 }
@@ -183,7 +184,7 @@ pub struct Shot {
     /// A request to aim the camera which nobody answered yet.
     frame: Option<u64>,
     detail: Detail,
-    show_detail: bool,
+    colors: LodColors,
 }
 
 impl std::fmt::Debug for Shot {
@@ -286,7 +287,7 @@ impl Primitive for Shot {
                 },
                 max_level: MAX_LEVEL,
                 viewport: (pipeline.bounds.2, pipeline.bounds.3),
-                debug: self.show_detail,
+                colors: self.colors,
                 count: true,
             }),
         };

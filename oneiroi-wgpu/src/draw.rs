@@ -13,7 +13,7 @@ use oneiroi_core::{
     node::{Drawable, Topology},
     shader::{
         self, CULL_COUNT, CULL_DRAW, CULL_TASKS, CULL_WORDS, CullArgs, DrawArgs, FOLD, InstanceArgs, LodArgs,
-        LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError,
+        LodColors, LodMethod, LodShader, MAX_LOD_LEVEL, ShaderError,
     },
     store::Handle,
 };
@@ -219,8 +219,9 @@ pub struct AutoDetail {
     pub max_level: u32,
     /// The size in pixels of the area which is drawn into.
     pub viewport: (f32, f32),
-    /// Colours every patch by how fine it is drawn.
-    pub debug: bool,
+    /// How the surfaces are coloured: by how fine they are drawn, or by
+    /// what they are drawn in.
+    pub colors: LodColors,
     /// Counts the triangles this makes, see [`DrawStage::triangles`].
     pub count: bool,
 }
@@ -806,7 +807,7 @@ impl DrawStage {
                     pixels: auto.pixels,
                     offset: handle.offset,
                     max_level,
-                    debug: auto.debug as u32,
+                    debug: auto.colors.word(),
                     patches: instances,
                     _padding: 0,
                 };

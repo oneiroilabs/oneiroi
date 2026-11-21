@@ -1066,12 +1066,36 @@ pub struct LodArgs {
     /// Patches never get finer than `2^max_level` steps along a side.
     /// At most [`MAX_LOD_LEVEL`].
     pub max_level: u32,
-    /// Anything but zero colours every patch by how fine it is drawn,
-    /// from blue for coarse to red for fine.
+    /// How surfaces are coloured, see [`LodColors`].
     pub debug: u32,
     /// How many patches there are.
     pub patches: u32,
     pub _padding: u32,
+}
+
+/// How a surface drawn as fine as it appears is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LodColors {
+    /// In its own colour, lit.
+    #[default]
+    Shaded,
+    /// By how fine each patch is drawn, from blue for coarse to red for fine.
+    Detail,
+    /// A colour for every meshlet: what one mesh shader makes, a block of
+    /// a large patch or several small patches. Drawn without mesh shaders,
+    /// there are no meshlets, and every patch gets a colour instead.
+    Meshlets,
+}
+
+impl LodColors {
+    /// What the shader is told in `debug`.
+    pub fn word(self) -> u32 {
+        match self {
+            Self::Shaded => 0,
+            Self::Detail => 1,
+            Self::Meshlets => 2,
+        }
+    }
 }
 
 const LOD_COMMON: &str = "// Workgroups which go beyond what one dimension can count go on in the
@@ -1100,6 +1124,10 @@ struct VertexOutput {
     @location(0) normal: vec3<f32>,
     // How fine the patch is drawn, from 0 to 1.
     @location(1) detail: f32,
+    // What it was drawn as a part of: the meshlet of a mesh shader, or
+    // the patch when vertices are pulled. Only for the colours of
+    // `LOD_MESHLETS`.
+    @location(2) @interpolate(flat) group: u32,
 }
 
 // How many steps each edge of a patch gets. They are not whole numbers:
@@ -1173,6 +1201,21 @@ fn lod_uv(lod: Lod, levels: vec2<u32>, index: vec2<u32>) -> vec2<f32> {
     );
 }
 
+// A hash which scatters neighbouring numbers, so neighbouring meshlets get
+// hues far apart (PCG).
+fn lod_hash(value: u32) -> u32 {
+    let state = value * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// A bright colour of a hue picked by `hash`.
+fn lod_hue(hash: u32) -> vec3<f32> {
+    let hue = f32(hash & 0xffffu) / 65535.0;
+    let rgb = clamp(abs(fract(vec3<f32>(hue) + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    return mix(rgb, vec3<f32>(1.0), 0.2);
+}
+
 fn lod_detail(lod: Lod) -> f32 {
     let inside = lod_inside(lod);
     return log2(max(inside.x, inside.y)) / f32(max(args.max_level, 1u));
@@ -1184,8 +1227,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // just because it faces the wrong way.
     let diffuse = abs(dot(normalize(input.normal), normalize(args.light.xyz)));
     var color = args.color.rgb;
-    if (args.debug != 0u) {
+    if (args.debug == 1u) {
         color = mix(vec3<f32>(0.0, 0.2, 1.0), vec3<f32>(1.0, 0.2, 0.0), input.detail);
+    } else if (args.debug == 2u) {
+        color = lod_hue(lod_hash(input.group));
     }
     return vec4<f32>(color * (0.2 + 0.8 * diffuse), 1.0);
 }
@@ -1284,16 +1329,19 @@ fn vs_main(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance
     let index = vec2<u32>(cell / cells, cell % cells) + corners[vertex % 6u];
 
     if (!piece_present(instance)) {
-        return VertexOutput(vec4<f32>(0.0), vec3<f32>(0.0), 0.0);
+        return VertexOutput(vec4<f32>(0.0), vec3<f32>(0.0), 0.0, 0u);
     }
     let piece = element(instance);
     let lod = lod_of(piece);
     let uv = lod_uv(lod, vec2<u32>(args.max_level), index);
     let point = surface_point(piece, uv);
+    // Without mesh shaders there are no meshlets: a patch is drawn on its
+    // own, and is what is coloured.
     return VertexOutput(
         args.view_projection * vec4<f32>(point.position, 1.0),
         point.normal,
         lod_detail(lod),
+        instance,
     );
 }
 ";
@@ -1509,6 +1557,9 @@ fn ms_main(
             args.view_projection * vec4<f32>(point.position, 1.0),
             point.normal,
             lod_detail(lod),
+            // A meshlet: this mesh shader of the task shader which starts at
+            // the patch `first`. A task shader starts at most 1024.
+            payload.first * 1024u + group.x,
         );
     }
     for (var triangle = lane; triangle < triangles; triangle += LANES) {

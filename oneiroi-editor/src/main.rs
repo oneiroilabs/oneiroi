@@ -11,6 +11,7 @@ use iced_nodegraph::{
     default_node_style, edge, node, node_header, pin,
 };
 use oneiroi_core::node::Card;
+use oneiroi_core::shader::LodColors;
 use oneiroi_editor::curve_edit::CurveEdit;
 use oneiroi_editor::gizmo_view::GizmoOverlay;
 use oneiroi_editor::document::{CurveDrawing, Document, Fields, PaletteEntry, Side, Target, parse_word};
@@ -28,6 +29,13 @@ const DETAIL: [(&str, Detail); 5] = [
     ("coarse", Detail::Pixels(16.0)),
     ("coarsest", Detail::Pixels(32.0)),
     ("20k triangles", Detail::Triangles(20_000)),
+];
+
+/// How the preview can colour surfaces, by what the editor calls it.
+const COLORS: [(&str, LodColors); 3] = [
+    ("shaded", LodColors::Shaded),
+    ("detail", LodColors::Detail),
+    ("meshlets", LodColors::Meshlets),
 ];
 
 /// Where a graph is saved to and loaded from, next to where the editor runs.
@@ -68,7 +76,8 @@ enum Message {
     Reset(u32, String),
     Frame,
     Detail(usize),
-    ShowDetail(bool),
+    /// How surfaces are coloured, by the name of one of [`COLORS`].
+    Colors(String),
     Save,
     Load,
     /// Whether the inspector shows the notes of the ports to edit.
@@ -123,7 +132,7 @@ struct Editor {
     note: Option<String>,
     /// Which of [`DETAIL`] the preview uses.
     detail: usize,
-    show_detail: bool,
+    colors: LodColors,
     edit_notes: bool,
     /// The documentation shown in tooltips, parsed, by its markdown. Made
     /// anew after every update, since a view can only borrow it.
@@ -168,7 +177,7 @@ impl Editor {
             frame: 0,
             note: None,
             detail: 1,
-            show_detail: false,
+            colors: LodColors::Shaded,
             edit_notes: false,
             docs: HashMap::new(),
         }
@@ -321,7 +330,11 @@ impl Editor {
                 // A budget needs some frames to find its detail.
                 self.document.session().lock().unwrap().settling = 30;
             }
-            Message::ShowDetail(show) => self.show_detail = show,
+            Message::Colors(name) => {
+                if let Some((_, colors)) = COLORS.iter().find(|(known, _)| *known == name) {
+                    self.colors = *colors;
+                }
+            }
             Message::Save => {
                 self.note = Some(match std::fs::write(FILE, self.document.to_json()) {
                     Ok(()) => format!("saved to {FILE}"),
@@ -473,7 +486,7 @@ impl Editor {
             session: self.document.session(),
             frame: self.frame,
             detail: DETAIL[self.detail].1,
-            show_detail: self.show_detail,
+            colors: self.colors,
         })
         .width(Fill)
         .height(Fill);
@@ -506,11 +519,14 @@ impl Editor {
                 false => button.on_press(Message::Detail(index)),
             });
         }
+        // Coloured by how fine a patch is drawn, or by what it is drawn in.
+        let names: Vec<String> = COLORS.iter().map(|(name, _)| name.to_string()).collect();
+        let picked = COLORS.iter().find(|(_, colors)| *colors == self.colors).map(|(name, _)| name.to_string());
         let detail = detail.push(
-            checkbox(self.show_detail)
-                .label("colours")
+            pick_list(picked, names, |name: &String| name.clone())
                 .text_size(11)
-                .on_toggle(Message::ShowDetail),
+                .padding([1, 6])
+                .on_select(Message::Colors),
         );
 
         let preview = column![preview, detail].spacing(4);
