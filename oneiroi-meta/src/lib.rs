@@ -5,10 +5,17 @@
 //! runs. Everything is looked up by the ids which are there already: the
 //! name of a type or trait, the id of a node, the name of a port.
 //!
+//! What an editor draws of the inputs of a node in its viewport, and how
+//! dragging changes them, is described here as well: see [`gizmo`].
+//!
 //! Documentation is markdown. Its first paragraph is a summary, short
 //! enough for a tooltip, and the rest goes into detail.
 
 use std::collections::HashMap;
+
+pub mod gizmo;
+
+use gizmo::GizmoMeta;
 
 /// The hues of the Tailwind palette. Types are drawn in the shade 300 of
 /// their hue, a pastel. Similar types take neighbouring hues.
@@ -179,6 +186,7 @@ pub struct MetaRegistry {
     types: HashMap<&'static str, TypeMeta>,
     traits: HashMap<&'static str, TraitMeta>,
     nodes: HashMap<&'static str, NodeMeta>,
+    gizmos: HashMap<&'static str, GizmoMeta>,
 }
 
 impl MetaRegistry {
@@ -196,6 +204,15 @@ impl MetaRegistry {
 
     pub fn add_node(&mut self, meta: NodeMeta) {
         self.nodes.insert(meta.id, meta);
+    }
+
+    pub fn add_gizmo(&mut self, gizmo: GizmoMeta) {
+        self.gizmos.insert(gizmo.node, gizmo);
+    }
+
+    /// The gizmo of the node `id`, if it has one.
+    pub fn gizmo(&self, id: &str) -> Option<&GizmoMeta> {
+        self.gizmos.get(id)
     }
 
     pub fn ty(&self, name: &str) -> Option<&TypeMeta> {

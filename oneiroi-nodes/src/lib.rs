@@ -23,6 +23,8 @@ pub mod primitive;
 pub mod property;
 pub mod surface;
 pub mod value;
+#[cfg(feature = "meta")]
+pub mod gizmo;
 
 /// Makes every node of this crate known to `registry`.
 pub fn register(registry: &mut NodeRegistry) {
@@ -87,4 +89,5 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
     meta.add_trait(surface::SURFACE_META);
     meta.add_trait(instance::PLACEABLE_META);
     instance::describe(meta);
+    gizmo::describe(meta);
 }
