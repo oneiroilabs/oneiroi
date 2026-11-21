@@ -565,6 +565,10 @@ pub struct Instance {
     keys: Option<Keys>,
     /// The parameters which changed since the keys were derived.
     changed: Vec<usize>,
+    /// The outputs it holds in the store, once all of them were there:
+    /// until a parameter changes they stay, and planning it again is
+    /// skipped altogether. Empty while it is not settled.
+    held: Vec<ContentKey>,
 }
 
 impl Instance {
@@ -655,6 +659,7 @@ impl<E: Executor> Engine<E> {
             alive: std::sync::Arc::new(()),
             keys: None,
             changed: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -733,6 +738,14 @@ impl<E: Executor> Engine<E> {
         let before = self.work.len();
         self.forget_removed();
         for instance in instances {
+            // Nothing changed, and its outputs are held: there is nothing
+            // to plan, and nothing to keep from being evicted.
+            if !instance.held.is_empty() && instance.changed.is_empty() {
+                continue;
+            }
+            for key in instance.held.drain(..) {
+                self.store.release(key, &instance.alive);
+            }
             let id = instance.program;
             let index = id.0 as usize;
             if self.statics.len() <= index {
@@ -773,15 +786,30 @@ impl<E: Executor> Engine<E> {
                     &all
                 }
             };
+            let planned = planner.work.len();
+            let mut wanted = Vec::new();
             for output in outputs.iter().map(|index| &program.outputs[*index]) {
-                planner.ensure(&scope, output.slot);
                 // What comes along with it is needed by whoever reads it.
                 let slot = program.slot(output.slot);
                 let along = slot.prototype.map(|p| [p.elements, p.groups]);
                 let along = along.into_iter().flatten().chain(slot.total);
-                for slot in slot.groups.into_iter().chain(along) {
+                for slot in [output.slot].into_iter().chain(slot.groups).chain(along) {
                     planner.ensure(&scope, slot);
+                    wanted.push(keys.slots[slot.0 as usize]);
                 }
+            }
+            // All of it is there, and the constant part is pinned: it is
+            // settled until a parameter changes.
+            let settled = constant.is_some()
+                && planner.work.len() == planned
+                && wanted.iter().all(|key| self.store.contains(*key));
+            if settled {
+                for key in &wanted {
+                    self.store.hold(*key, &instance.alive);
+                }
+                // An instance without outputs which change has nothing to
+                // hold, and is planned again every time, which costs nothing.
+                instance.held = wanted;
             }
         }
         self.work.len() - before
@@ -1358,6 +1386,45 @@ mod tests {
         engine.end_frame(0);
         engine.end_frame(0);
         assert!(engine.store().is_empty());
+    }
+
+    #[test]
+    fn an_instance_which_did_not_change_is_not_planned_and_keeps_its_outputs() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(mostly_constant());
+        let mut instance = engine.instantiate(id);
+        let mut other = engine.instantiate(id);
+        engine.set_param(&mut other, "scale", &[3.0f32]).unwrap();
+        engine.evaluate([&mut instance, &mut other]);
+        // Once all of its outputs are there it settles, and holds them.
+        assert_eq!(engine.evaluate([&mut instance, &mut other]), 0);
+        assert_eq!(instance.held.len(), 1);
+        for _ in 0..3 {
+            engine.end_frame(0);
+        }
+        // Nothing is planned for it, and nothing it made is evicted, frame
+        // after frame.
+        for _ in 0..3 {
+            assert_eq!(engine.plan([&mut instance, &mut other]), 0);
+            engine.flush();
+            engine.end_frame(0);
+        }
+        assert_eq!(engine.read::<f32>(&instance, "moved"), Some(&[40.5, 60.5, 80.5][..]));
+
+        // An edit lets go of what it held, which then goes like anything.
+        engine.set_param(&mut instance, "scale", &[1.0f32]).unwrap();
+        assert_eq!(engine.evaluate([&mut instance]), 2);
+        assert!(instance.held.is_empty());
+        assert_eq!(engine.read::<f32>(&instance, "moved"), Some(&[4.5, 6.5, 8.5][..]));
+        engine.evaluate([&mut instance]);
+        assert_eq!(instance.held.len(), 1);
+
+        // Without the instances, nothing holds anything anymore.
+        let edge = engine.statics[id.0 as usize].as_ref().unwrap().edge.len();
+        drop((instance, other));
+        engine.end_frame(0);
+        engine.end_frame(0);
+        assert_eq!(engine.store().len(), edge);
     }
 
     #[test]

@@ -301,6 +301,9 @@ struct Entry {
     /// Who needs the value to stay, like an instance whose parameter it
     /// is: it is never evicted while one of them lives.
     holders: Vec<Weak<()>>,
+    /// Whether it was found held while evicting, and is out of the line of
+    /// eviction until nobody holds it anymore, see [`Store::held`].
+    out_of_line: bool,
     /// How many groups of [`Store::pin`] keep it. A pinned entry is out of
     /// the line of eviction altogether, and not even looked at by it.
     pins: u32,
@@ -324,6 +327,10 @@ pub struct Store {
     frame: u64,
     /// The groups of [`Store::pin`], each with whoever keeps it.
     pinned: Vec<(Weak<()>, Vec<ContentKey>)>,
+    /// The entries out of line while they are held, each with a holder.
+    /// Evicting only looks at whether the holders live, not at the
+    /// entries. Some are outdated, they are cleared out as it grows.
+    held: Vec<(Weak<()>, ContentKey)>,
 }
 
 impl Default for Store {
@@ -348,6 +355,7 @@ impl Store {
             used_words: 0,
             frame: 0,
             pinned: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -411,6 +419,7 @@ impl Store {
                 resident: false,
                 alias_of: Some(parent),
                 holders: Vec::new(),
+                out_of_line: false,
                 pins: 0,
                 parts: Vec::new(),
             },
@@ -481,6 +490,7 @@ impl Store {
                 resident: true,
                 alias_of: None,
                 holders: Vec::new(),
+                out_of_line: false,
                 pins: 0,
                 parts: Vec::new(),
             },
@@ -543,6 +553,40 @@ impl Store {
     pub fn release(&mut self, key: ContentKey, holder: &Arc<()>) {
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.holders.retain(|held| held.as_ptr() != Arc::as_ptr(holder));
+            if entry.holders.is_empty() && entry.out_of_line {
+                entry.out_of_line = false;
+                self.used.push_front((entry.last_used, key));
+            }
+        }
+    }
+
+    /// Puts what nobody holds anymore back in line, as the oldest there
+    /// is. Only the holders which died are looked at.
+    fn return_released(&mut self) {
+        let mut index = 0;
+        while index < self.held.len() {
+            if self.held[index].0.strong_count() > 0 {
+                index += 1;
+                continue;
+            }
+            let (_, key) = self.held.swap_remove(index);
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.holders.retain(|holder| holder.strong_count() > 0);
+                if entry.holders.is_empty() && entry.out_of_line {
+                    entry.out_of_line = false;
+                    self.used.push_front((entry.last_used, key));
+                }
+            }
+        }
+        // Holders which live and let go of what they held leave their
+        // records behind. Clearing them out costs as much as they grew.
+        if self.held.len() > 2 * self.entries.len() + 64 {
+            let entries = &self.entries;
+            self.held.retain(|(holder, key)| {
+                entries.get(key).is_some_and(|entry| {
+                    entry.out_of_line && entry.holders.iter().any(|held| held.ptr_eq(holder))
+                })
+            });
         }
     }
 
@@ -561,6 +605,7 @@ impl Store {
                 resident: false,
                 alias_of: None,
                 holders: Vec::new(),
+                out_of_line: false,
                 pins: 0,
                 parts: Vec::new(),
             },
@@ -684,6 +729,7 @@ impl Store {
                 resident: len == 0,
                 alias_of: None,
                 holders: Vec::new(),
+                out_of_line: false,
                 pins: 0,
                 parts: Vec::new(),
             },
@@ -760,6 +806,7 @@ impl Store {
                         resident: len == 0,
                         alias_of: None,
                         holders: Vec::new(),
+                        out_of_line: false,
                         pins: 0,
                         parts: Vec::new(),
                     },
@@ -864,8 +911,8 @@ impl Store {
     /// Returns how many entries were evicted.
     pub fn evict(&mut self, budget_words: u64) -> usize {
         self.unpin_dead();
+        self.return_released();
         let mut evicted = 0;
-        let mut held = Vec::new();
         while self.used_words > budget_words {
             let Some(&(frame, key)) = self.used.front() else {
                 break;
@@ -884,14 +931,14 @@ impl Store {
             }
             entry.holders.retain(|holder| holder.strong_count() > 0);
             if !entry.holders.is_empty() {
-                held.push((frame, key));
+                // Out of line until nobody holds it anymore.
+                if !entry.out_of_line {
+                    entry.out_of_line = true;
+                    self.held.extend(entry.holders.iter().map(|holder| (holder.clone(), key)));
+                }
                 continue;
             }
             evicted += self.remove_entry(key);
-        }
-        // What is held stays first in line, for when nobody holds it anymore.
-        for used in held.into_iter().rev() {
-            self.used.push_front(used);
         }
         evicted
     }
@@ -939,6 +986,31 @@ mod tests {
 
     fn key(n: u32) -> ContentKey {
         ContentKey::of_data(&u32::INFO, &[n])
+    }
+
+    #[test]
+    fn what_is_held_is_out_of_line_until_nobody_holds_it() {
+        let mut store = Store::new();
+        let (a, b) = (Arc::new(()), Arc::new(()));
+        store.insert(key(1), &[1]);
+        store.insert(key(2), &[2]);
+        store.hold(key(1), &a);
+        store.hold(key(2), &b);
+        store.end_frame();
+        assert_eq!(store.evict(0), 0);
+        // Out of line, evicting looks at nothing of them.
+        assert!(store.used.is_empty());
+        assert_eq!(store.held.len(), 2);
+
+        // Let go of, or with its holder gone, it is first in line.
+        store.release(key(1), &a);
+        drop(b);
+        assert_eq!(store.evict(0), 2);
+        assert!(store.is_empty());
+        // A record of a holder which lives is cleared once it is gone.
+        drop(a);
+        store.evict(0);
+        assert!(store.held.is_empty());
     }
 
     #[test]
