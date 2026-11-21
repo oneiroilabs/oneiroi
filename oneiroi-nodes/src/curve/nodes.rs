@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(engine.evaluate([&mut a, &mut b]), 3 + 2);
 
         let mut moved = points();
-        moved[2][1] = 4.0;
+        moved[2].position.y = 4.0;
         engine.set_param(&mut a, "points", &moved).unwrap();
         assert_eq!(engine.evaluate([&mut a, &mut b]), 3);
     }
