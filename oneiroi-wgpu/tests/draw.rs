@@ -81,12 +81,12 @@ fn registry() -> NodeRegistry {
 /// A square with sharp corners as a NURBS curve, counter-clockwise.
 fn square(b: &mut ProgramBuilder) -> SlotId {
     let corners = [(0.3, -0.3), (0.3, 0.3), (-0.3, 0.3), (-0.3, -0.3), (0.3, -0.3)];
-    let mut points = vec![[0.3, -0.3, 0., 1.]];
+    let mut points = vec![ControlPoint::at(Vec3::new(0.3, -0.3, 0.))];
     for pair in corners.windows(2) {
         let (from, to) = (Vec2::from(pair[0]), Vec2::from(pair[1]));
         for step in 1..=3 {
             let point = from.lerp(to, step as f32 / 3.0);
-            points.push([point.x, point.y, 0., 1.]);
+            points.push(ControlPoint::at(point.extend(0.)));
         }
     }
     let mut knots = vec![0.0; 4];

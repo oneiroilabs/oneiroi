@@ -11,7 +11,7 @@ use oneiroi_graph::{
     Note, Value,
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SWEEP, nurbs::clamped_uniform_knots, swept},
+    curve::{ControlPoint, NURBS, SWEEP, nurbs::clamped_uniform_knots, swept},
     primitive::CIRCLE,
     surface,
 };
@@ -105,7 +105,7 @@ fn a_graph_runs_like_the_program_written_by_hand() {
     let lowered = lower(&graph, &mut engine);
 
     let mut b = ProgramBuilder::new("by hand");
-    let points = b.constant(&POINTS);
+    let points = b.constant(&POINTS.map(ControlPoint::from));
     let knots = b.constant(&clamped_uniform_knots(5));
     let radius = b.param::<f32>("radius", &[0.25]);
     let tolerance = b.constant::<f32>(&[0.01]);

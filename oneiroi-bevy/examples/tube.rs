@@ -69,12 +69,12 @@ fn tube_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
 /// curve whose knots repeat, which gives it straight edges and corners.
 fn beam_along_curve(oneiroi: &mut Oneiroi) -> ProgramId {
     let corners = [(0.2, -0.2), (0.2, 0.2), (-0.2, 0.2), (-0.2, -0.2), (0.2, -0.2)];
-    let mut square = vec![[0.2, -0.2, 0.0, 1.0]];
+    let mut square = vec![ControlPoint::from([0.2, -0.2, 0.0, 1.0])];
     for pair in corners.windows(2) {
         let (from, to) = (Vec2::from(pair[0]), Vec2::from(pair[1]));
         for step in 1..=3 {
             let point = from.lerp(to, step as f32 / 3.0);
-            square.push([point.x, point.y, 0.0, 1.0]);
+            square.push(ControlPoint::from([point.x, point.y, 0.0, 1.0]));
         }
     }
     let mut square_knots = vec![0.0; 4];

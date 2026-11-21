@@ -215,7 +215,7 @@ fn edge_cases_match_the_cpu() {
     assert!(frames(&mut gpu, &mut on_gpu).is_empty());
 
     // A straight line has no curvature to derive a frame from.
-    let line: Vec<_> = (0..6).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
+    let line: Vec<_> = (0..6).map(|i| ControlPoint::at(glam::Vec3::X * i as f32)).collect();
     gpu.set_param(&mut on_gpu, "points", &line).unwrap();
     cpu.set_param(&mut on_cpu, "points", &line).unwrap();
     gpu.set_param(&mut on_gpu, "samples", &[5u32]).unwrap();
