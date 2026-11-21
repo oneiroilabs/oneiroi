@@ -14,6 +14,7 @@
 # Design
 
 - [One item per node](./design/one-item-per-node.md)
+- [Gizmos](./design/gizmos.md)
 
 # Roadmap
 
