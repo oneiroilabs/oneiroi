@@ -580,3 +580,49 @@ fn a_scaled_sweep_runs_on_the_gpu() {
     let kinds: Vec<_> = patches.iter().map(TubePatch::kind).collect();
     assert_eq!(kinds, [0, 3, 0, 0, 1, 3]);
 }
+
+/// A curve of constant points, sampled, and moved by the only parameter: its
+/// constant part runs on the GPU when it is folded.
+#[test]
+fn a_program_folds_on_the_gpu_as_on_the_cpu() {
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let build = || {
+        let mut b = ProgramBuilder::new("folded on the device");
+        let points = b.constant(&points(9));
+        let knots = b.constant::<f32>(&[]);
+        let curve = b.node(&NURBS, &[points, knots]).unwrap()[0];
+        let samples = b.constant::<u32>(&[16]);
+        let frames = sample(&mut b, curve, samples);
+        let offset = b.param_one_of::<glam::Vec3>("offset", glam::Vec3::ZERO);
+        let moved = b.node(&oneiroi_nodes::curve::TRANSLATE, &[curve, offset]).unwrap()[0];
+        b.output("frames", frames);
+        b.output("moved", moved);
+        b.finish()
+    };
+    let mut cpu = Engine::default();
+    let on_cpu = cpu.add_program(build());
+    let on_gpu = gpu.add_program(build());
+    let folded = gpu.fold(on_gpu);
+    // NURBS and Sample Curve are folded away, only Translate is left.
+    assert_eq!(gpu.programs().get(folded).ops.len(), 1);
+
+    let (mut a, mut b) = (cpu.instantiate(on_cpu), gpu.instantiate(folded));
+    for offset in [glam::Vec3::ZERO, glam::Vec3::new(1.0, 2.0, 3.0)] {
+        cpu.set_param(&mut a, "offset", &[offset]).unwrap();
+        gpu.set_param(&mut b, "offset", &[offset]).unwrap();
+        cpu.evaluate([&mut a]);
+        gpu.evaluate([&mut b]);
+        use oneiroi_nodes::curve::nurbs::CubicNurbsSegmentCache as Segment;
+        let frames = numbers::<_, EvaluatedFrame>(&mut gpu, &b, "frames");
+        assert_close(&frames, &numbers::<_, EvaluatedFrame>(&mut cpu, &a, "frames"));
+        let moved = numbers::<_, Segment>(&mut gpu, &b, "moved");
+        assert_close(&moved, &numbers::<_, Segment>(&mut cpu, &a, "moved"));
+    }
+}
+
+/// The output `name` of `instance` as plain numbers.
+fn numbers<E: Executor, T: oneiroi_core::types::DataType>(engine: &mut Engine<E>, instance: &Instance, name: &str) -> Vec<f32> {
+    bytemuck::cast_slice(engine.fetch::<T>(instance, name).unwrap()).to_vec()
+}

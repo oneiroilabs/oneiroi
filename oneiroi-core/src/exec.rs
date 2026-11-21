@@ -818,6 +818,77 @@ impl<E: Executor> Engine<E> {
         }
     }
 
+    /// The program `id` with its constant part folded: run once, here, and
+    /// what the rest reads of it put into the new program as constants.
+    /// Only what depends on a parameter is left to run.
+    ///
+    /// For a host which loads a graph and never edits it, as a step of its
+    /// own after loading. The folded program has the same parameters and
+    /// outputs, and gives the same results under the same keys: its
+    /// constants keep the keys they were derived under, so whatever the
+    /// program shares with others is still shared.
+    pub fn fold(&mut self, id: ProgramId) -> ProgramId {
+        let index = id.0 as usize;
+        if self.statics.len() <= index {
+            self.statics.resize_with(index + 1, || None);
+        }
+        let program = self.programs.get(id);
+        let statics = self.statics[index].get_or_insert_with(|| Statics::new(&self.programs, program));
+        let mut keep = vec![false; program.ops.len()];
+        for op in &statics.dynamic_ops {
+            keep[*op as usize] = true;
+        }
+        // What of the constant part is still needed, and is not a constant
+        // already: those values are run for.
+        let needed: Vec<SlotId> = program
+            .needed(&keep)
+            .iter()
+            .enumerate()
+            .filter(|(index, needed)| {
+                **needed
+                    && !statics.dynamic[*index]
+                    && matches!(program.slots[*index].source, SlotSource::Op { .. })
+            })
+            .map(|(index, _)| SlotId(index as u32))
+            .collect();
+
+        let keys = Keys {
+            slots: statics.keys.clone(),
+            calls: statics.calls.clone(),
+        };
+        let scope = Scope {
+            program,
+            keys: &keys,
+            caller: None,
+        };
+        let mut planner = Planner {
+            programs: &self.programs,
+            store: &mut self.store,
+            defaults: true,
+            work: &mut self.work,
+            scheduled: &mut self.scheduled,
+            constant: None,
+        };
+        for slot in &needed {
+            planner.ensure(&scope, *slot);
+        }
+        let values: Vec<(SlotId, ContentKey)> =
+            needed.iter().map(|slot| (*slot, keys.slots[slot.0 as usize])).collect();
+        self.flush();
+        let wanted: Vec<ContentKey> = values.iter().map(|(_, key)| *key).collect();
+        self.executor.download(&mut self.store, &wanted);
+        let values = values
+            .into_iter()
+            .map(|(slot, key)| {
+                let handle = self.store.get(key).expect("the constant part ran");
+                (slot, (key, self.store.words(handle).into()))
+            })
+            .collect();
+
+        let folded = self.programs.get(id).folded(&keep, &values);
+        self.add_program(folded)
+    }
+
     /// Lets go of the constant part of programs which were removed, so what
     /// they pinned can be evicted.
     fn forget_removed(&mut self) {
@@ -1287,6 +1358,57 @@ mod tests {
         engine.end_frame(0);
         engine.end_frame(0);
         assert!(engine.store().is_empty());
+    }
+
+    #[test]
+    fn a_folded_program_runs_only_what_depends_on_a_parameter() {
+        let mut engine = Engine::default();
+        let id = engine.add_program(mostly_constant());
+        let folded = engine.fold(id);
+        let program = engine.programs().get(folded);
+        assert_eq!(program.ops.len(), 2);
+        assert_eq!(program.params.len(), 2);
+        // The constant output is a constant now, of what it was computed to.
+        let constant = program.slot(program.outputs[program.output_index("constant").unwrap()].slot);
+        assert!(matches!(&constant.source, SlotSource::Const { words, .. } if words.len() == 3));
+
+        // The same results under the same keys, edit after edit.
+        let (mut a, mut b) = (engine.instantiate(id), engine.instantiate(folded));
+        for (scale, offset) in [(10.0f32, 0.5f32), (3.0, 0.5), (3.0, 1.0)] {
+            for instance in [&mut a, &mut b] {
+                engine.set_param(instance, "scale", &[scale]).unwrap();
+                engine.set_param(instance, "offset", &[offset]).unwrap();
+            }
+            engine.evaluate([&mut a]);
+            // Everything the folded one needs was made for the other one.
+            assert_eq!(engine.evaluate([&mut b]), 0);
+            for output in ["moved", "constant"] {
+                assert_eq!(engine.output_key(&a, output), engine.output_key(&b, output));
+                assert_eq!(engine.read::<f32>(&a, output), engine.read::<f32>(&b, output));
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_with_only_constants_folds_into_its_result() {
+        let mut engine = Engine::default();
+        let inner = engine.add_program(program());
+        let mut b = ProgramBuilder::new("outer");
+        let values = b.constant::<f32>(&[1., 2., 3.]);
+        let called = b.call(engine.programs(), inner, &[Some(values), None, None]).unwrap();
+        let by = b.param::<f32>("by", &[2.]);
+        let scaled = b.node(&SCALE, &[called[0], by]).unwrap()[0];
+        b.output("scaled", scaled);
+        let outer = engine.add_program(b.finish());
+
+        let folded = engine.fold(outer);
+        let program = engine.programs().get(folded);
+        assert_eq!(program.ops.len(), 1);
+        assert!(matches!(program.ops[0].kind, OpKind::Node(_)));
+        let mut instance = engine.instantiate(folded);
+        engine.set_param(&mut instance, "by", &[0.5f32]).unwrap();
+        engine.evaluate([&mut instance]);
+        assert_eq!(engine.read::<f32>(&instance, "scaled"), Some(&[6.25, 12.25, 18.25][..]));
     }
 
     #[test]
