@@ -11,6 +11,10 @@
 
 # Cookbook
 
+# Design
+
+- [One item per node](./design/one-item-per-node.md)
+
 # Roadmap
 
 # Contributing
