@@ -4,7 +4,7 @@
 
 use iced::Color;
 use iced_nodegraph::{PinBrackets, PinFill};
-use oneiroi_core::node::Card;
+use oneiroi_core::node::{Card, Items};
 use oneiroi_nodes::meta::Hue;
 
 use crate::document::{Document, PinType, PortView};
@@ -60,12 +60,23 @@ pub struct PinLook {
     pub fill: PinFill,
 }
 
-/// Nothing for one, `[ ]` for a list, `{ }` for a list of groups.
-pub fn brackets(card: Card) -> PinBrackets {
-    match card {
-        Card::One => PinBrackets::None,
-        Card::Many => PinBrackets::Square,
-        Card::Grouped => PinBrackets::Curly,
+/// How many items a pin carries: a whole shape is one, however many
+/// elements it is made of. See [`Card::items`].
+pub fn items(card: Card, ty: &PinType) -> Items {
+    match ty {
+        PinType::Exact(ty) => card.items(ty),
+        // Any type of a trait is seen as a shape.
+        PinType::Trait(_) => card.items_of(true),
+        PinType::Unknown => card.items_of(false),
+    }
+}
+
+/// Nothing for one, `[ ]` for a list, `{ }` for a list of lists.
+pub fn brackets(items: Items) -> PinBrackets {
+    match items {
+        Items::One => PinBrackets::None,
+        Items::Many => PinBrackets::Square,
+        Items::Nested => PinBrackets::Curly,
     }
 }
 
@@ -81,17 +92,17 @@ pub fn fill(ty: &PinType) -> PinFill {
 pub fn pin_look(document: &Document, port: &PortView) -> PinLook {
     PinLook {
         color: color(document.hue(&port.ty)),
-        brackets: brackets(port.card),
+        brackets: brackets(items(port.card, &port.ty)),
         fill: fill(&port.ty),
     }
 }
 
 /// How many a pin carries, in words.
-pub fn count(card: Card) -> &'static str {
-    match card {
-        Card::One => "one",
-        Card::Many => "a list",
-        Card::Grouped => "a list of groups",
+pub fn count(items: Items) -> &'static str {
+    match items {
+        Items::One => "one",
+        Items::Many => "a list",
+        Items::Nested => "a list of lists",
     }
 }
 
@@ -99,7 +110,7 @@ pub fn count(card: Card) -> &'static str {
 /// carries, how the node uses it, and what what it carries is.
 pub fn port_tip(document: &Document, port: &PortView) -> String {
     let (ty, ty_doc) = document.type_text(&port.ty);
-    let mut tip = format!("**{}** · {}, {}", port.label, ty, count(port.card));
+    let mut tip = format!("**{}** · {}, {}", port.label, ty, count(items(port.card, &port.ty)));
     if !port.doc.trim().is_empty() {
         tip += "\n\n";
         tip += port.doc.trim();

@@ -433,7 +433,7 @@ impl Editor {
         .spacing(8)
         .align_y(Center);
         let legend = text(
-            "●  one     [●]  a list     {●}  a list of groups     filled: exactly this type     ring: any type of a trait     dotted link: instances copied",
+            "●  one     [●]  a list     {●}  a list of lists     filled: exactly this type     ring: any type of a trait     dotted link: instances copied",
         )
         .size(11)
         .color(Color::from_rgb(0.6, 0.6, 0.65));
