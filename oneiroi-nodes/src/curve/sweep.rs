@@ -350,10 +350,13 @@ pub(crate) fn miters(spine: &[CubicNurbsSegmentCache]) -> (bool, Vec<[[f32; 4]; 
     let (Some(first), Some(last)) = (spine.first(), spine.last()) else {
         return (false, Vec::new());
     };
-    let start = first.evaluate(0.0).0;
-    let gap = start.distance(last.evaluate(1.0).0);
-    let closed = spine.len() > 1 && gap <= 1e-5 * (1.0 + last.cumulative_length());
-    let tangent = |segment: &CubicNurbsSegmentCache, u: f32| segment.evaluate(u).2;
+    // The tangents where each segment starts and ends, each evaluated once.
+    let ends = |segment: &CubicNurbsSegmentCache| {
+        let ((start, _, from), (end, _, to)) = (segment.evaluate(0.0), segment.evaluate(1.0));
+        ((start, from), (end, to))
+    };
+    let (((start, first_from), (_, first_to)), (_, (end, last_to))) = (ends(first), ends(last));
+    let closed = spine.len() > 1 && start.distance(end) <= 1e-5 * (1.0 + last.cumulative_length());
     let between = |from: Vec3, to: Vec3| {
         let turn = from.dot(to);
         match turn > 1.0 - 1e-4 || turn < -1.0 + 1e-4 {
@@ -361,26 +364,25 @@ pub(crate) fn miters(spine: &[CubicNurbsSegmentCache]) -> (bool, Vec<[[f32; 4]; 
             false => (from + to).normalize().extend(0.0).to_array(),
         }
     };
-    let count = spine.len();
-    let cuts = (0..count)
-        .map(|index| {
-            let before = match index {
-                0 if closed => Some(count - 1),
-                0 => None,
-                _ => Some(index - 1),
-            };
-            let after = match index + 1 == count {
-                true if closed => Some(0),
-                true => None,
-                false => Some(index + 1),
-            };
-            let segment = &spine[index];
-            [
-                before.map_or([0.0; 4], |before| between(tangent(&spine[before], 1.0), tangent(segment, 0.0))),
-                after.map_or([0.0; 4], |after| between(tangent(segment, 1.0), tangent(&spine[after], 0.0))),
-            ]
-        })
-        .collect();
+    let mut cuts = Vec::with_capacity(spine.len());
+    // How the one before ends, and how this one starts and ends.
+    let mut before = closed.then_some(last_to);
+    let (mut from, mut to) = (first_from, first_to);
+    for index in 0..spine.len() {
+        let next = spine.get(index + 1).map(ends);
+        let after = match next {
+            Some(((_, next_from), _)) => Some(next_from),
+            None => closed.then_some(first_from),
+        };
+        cuts.push([
+            before.map_or([0.0; 4], |before| between(before, from)),
+            after.map_or([0.0; 4], |after| between(to, after)),
+        ]);
+        before = Some(to);
+        if let Some(((_, next_from), (_, next_to))) = next {
+            (from, to) = (next_from, next_to);
+        }
+    }
     (closed, cuts)
 }
 
@@ -475,12 +477,14 @@ pub(crate) fn sweep_curve<P: Profile>(
     let pieces = P::pieces(profile.len());
     let (closed, cuts) = miters(spine);
     let total = spine.last().map_or(0.0, |last| last.cumulative_length()).max(f32::MIN_POSITIVE);
-    let mut patches = Vec::with_capacity(spine.len() * pieces + 2 * pieces);
+    let mut patches = Vec::with_capacity((spine.len() * slots + 2) * pieces);
+    // Where a segment is cut, as `u` and as how far along the spine: right
+    // at the joints of the scale, which the scale turns at.
+    let mut cuts_at: Vec<(f32, f32)> = Vec::with_capacity(slots + 1);
     for ((segment, along), cuts) in spine.iter().zip(fractions(spine)).zip(&cuts) {
         let before = segment.cumulative_length() - segment.length();
-        // Where it is cut, as `u` and as how far along the spine: right at
-        // the joint of the scale, which the scale turns at.
-        let mut cuts_at = vec![(0.0, along[0])];
+        cuts_at.clear();
+        cuts_at.push((0.0, along[0]));
         cuts_at.extend(
             scaling
                 .joints()
@@ -489,12 +493,8 @@ pub(crate) fn sweep_curve<P: Profile>(
         );
         cuts_at.push((1.0, along[1]));
         let last = cuts_at.len() - 2;
-        let empty = Piece {
-            scale: [0.0; 4],
-            ..Piece::whole(*segment, [along[1]; 2], kind::NONE, [[0.0; 4]; 2])
-        };
-        let spans: Vec<_> = cuts_at.windows(2).map(|cut| ([cut[0].0, cut[1].0], [cut[0].1, cut[1].1])).collect();
-        for (index, (span, along)) in spans.iter().copied().enumerate() {
+        for (index, cut) in cuts_at.windows(2).enumerate() {
+            let (span, along) = ([cut[0].0, cut[1].0], [cut[0].1, cut[1].1]);
             let piece = Piece {
                 segment: *segment,
                 span,
@@ -508,7 +508,11 @@ pub(crate) fn sweep_curve<P: Profile>(
                 patches.push(P::patch(&piece, profile, at));
             }
         }
-        for _ in spans.len()..slots {
+        let empty = Piece {
+            scale: [0.0; 4],
+            ..Piece::whole(*segment, [along[1]; 2], kind::NONE, [[0.0; 4]; 2])
+        };
+        for _ in cuts_at.len() - 1..slots {
             for at in 0..pieces {
                 patches.push(P::patch(&empty, profile, at));
             }
