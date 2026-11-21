@@ -9,6 +9,7 @@ use oneiroi_core::{
     types::DataType,
 };
 use oneiroi_nodes::{
+    curve::nurbs::CubicNurbsSegmentCache,
     curve::{ControlPoint, NURBS, NURBS_BATCH, SAMPLE_CURVE, SAMPLE_CURVE_BATCH, TRANSLATE, swept, swept_batch},
     instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
@@ -74,6 +75,10 @@ pub struct Scene {
     pub graphs: Vec<Program>,
     /// Of which graph each instance is, by its index, and its parameters.
     pub instances: Vec<(usize, Params)>,
+    /// Parameters which follow outputs of other instances, see
+    /// [`Engine::link`](oneiroi_core::exec::Engine::link):
+    /// `(instance, parameter, instance it follows, output)`.
+    pub links: Vec<(usize, &'static str, usize, &'static str)>,
 }
 
 impl Work {
@@ -83,6 +88,7 @@ impl Work {
             Work::One { build, setup, .. } => Scene {
                 graphs: vec![build(registry, programs, size)],
                 instances: vec![(0, setup(size))],
+                links: Vec::new(),
             },
             Work::Scene { build, .. } => build(registry, programs, size),
         }
@@ -395,7 +401,58 @@ pub const SCENARIOS: &[Scenario] = &[
             edit: |size, n| (0..size.curves as usize).map(|index| (index, offset(index as u32, n))).collect(),
         },
     },
+    Scenario {
+        name: "scene, linked",
+        about: "Rails of the curves of `scene, a few move`, each followed by a tube along it, of which 4 rails move with every edit. A size is the rails × the graphs of tubes",
+        sizes: SCENES,
+        quick: SCENES_QUICK,
+        work: Work::Scene {
+            build: linked,
+            edit: |size, n| {
+                let rails = size.curves as usize;
+                (0..MOVED.min(rails))
+                    .map(|k| {
+                        let index = (n as usize * 7 + k * rails / MOVED) % rails;
+                        (index, offset(index as u32, n))
+                    })
+                    .collect()
+            },
+        },
+    },
 ];
+
+/// `size.curves` rails, the first instances, each followed by a tube of
+/// one of `size.points` graphs.
+fn linked(registry: &NodeRegistry, programs: &mut ProgramSet, size: Size) -> Scene {
+    let mut scene = scene(registry, programs, size);
+    let mut rail = ProgramBuilder::new("rail");
+    let points = rail.param::<ControlPoint>("points", &[]);
+    let knots = rail.constant::<f32>(&[]);
+    let curve = rail.node(&NURBS, &[points, knots]).unwrap()[0];
+    let offset = rail.param_one_of::<Vec3>("offset", Vec3::ZERO);
+    let moved = rail.node(&TRANSLATE, &[curve, offset]).unwrap()[0];
+    rail.output("curve", moved);
+
+    let tubes = (0..size.points).map(|index| {
+        let mut b = ProgramBuilder::new(format!("tube {index}"));
+        let spine = b.param::<CubicNurbsSegmentCache>("spine", &[]);
+        let radius = b.constant::<f32>(&[0.05 + index as f32 * 1e-3]);
+        let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+        let surface = swept(&mut b, registry, spine, circle).unwrap();
+        b.output("surface", surface);
+        b.finish()
+    });
+    scene.graphs = std::iter::once(rail.finish()).chain(tubes).collect();
+    let count = scene.instances.len();
+    for (graph, _) in &mut scene.instances {
+        *graph = 0;
+    }
+    for index in 0..count {
+        scene.instances.push((1 + index % size.points as usize, Vec::new()));
+        scene.links.push((count + index, "spine", index, "curve"));
+    }
+    scene
+}
 
 /// For the scenes, as many instances × as many graphs.
 const SCENES: &[Size] = &[
@@ -428,7 +485,11 @@ fn scene(registry: &NodeRegistry, _: &mut ProgramSet, size: Size) -> Scene {
             ((index % size.points) as usize, params)
         })
         .collect();
-    Scene { graphs, instances }
+    Scene {
+        graphs,
+        instances,
+        links: Vec::new(),
+    }
 }
 
 /// Where instance `index` of a scene is, on a grid.

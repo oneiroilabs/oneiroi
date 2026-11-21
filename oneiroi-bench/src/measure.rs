@@ -249,6 +249,19 @@ pub fn prepare<E: Measured>(engine: &mut Engine<E>, scenario: &Scenario, size: S
             instance
         })
         .collect();
+    for (target, param, source, output) in scene.links {
+        let (target, source) = match target < source {
+            true => {
+                let (before, after) = instances.split_at_mut(source);
+                (&mut before[target], &after[0])
+            }
+            false => {
+                let (before, after) = instances.split_at_mut(target);
+                (&mut after[0], &before[source])
+            }
+        };
+        engine.link(target, param, source, output).unwrap_or_else(|error| panic!("{error}"));
+    }
     engine.evaluate(instances.iter_mut());
     engine.executor_mut().wait();
     engine.end_frame(0);
