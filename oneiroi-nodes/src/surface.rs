@@ -8,7 +8,7 @@ use oneiroi_core::{
         Drawable, GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl, Topology,
     },
     program::{BuildError, ProgramBuilder, SlotId},
-    types::{DataType, PortDefault},
+    types::DataType,
 };
 
 use rayon::prelude::*;
@@ -46,7 +46,7 @@ pub trait Surface: DataType + Send + Sync {
 
 /// A sphere around the patches in `words`, found by looking at a few
 /// points of each of them.
-fn bounds<S: Surface>(words: &[u32]) -> Option<([f32; 3], f32)> {
+fn bounds<S: Surface>(words: &[u32]) -> Option<(Vec3, f32)> {
     const STEPS: usize = 4;
 
     let patches: &[S] = bytemuck::try_cast_slice(words).ok()?;
@@ -62,7 +62,7 @@ fn bounds<S: Surface>(words: &[u32]) -> Option<([f32; 3], f32)> {
     let (min, max) = points.fold((Vec3::MAX, Vec3::MIN), |(min, max), point| {
         (min.min(point), max.max(point))
     });
-    (min.x <= max.x).then(|| (((min + max) * 0.5).to_array(), (max - min).length() * 0.5))
+    (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
 }
 
 /// How far the triangles of a mesh may be from the surface it is made of,
@@ -89,7 +89,7 @@ generic_node! {
             port GenericPort::implementing("surface", SURFACE).grouped(), "Surfaces";
             /// How far a triangle may be from the surface at most. Smaller makes more triangles.
             port GenericPort::exact::<f32>("tolerance")
-                .with_default(PortDefault::F32(&[TOLERANCE]))
+                .with_default(&[TOLERANCE])
                 .one();
         }
         outputs {
@@ -123,7 +123,7 @@ impl<S: Surface> Ports<S> {
     const INPUTS: &'static [PortDecl] = &[
         PortDecl::new::<S>("surface").grouped(),
         PortDecl::new::<f32>("tolerance")
-            .with_default(PortDefault::F32(&[TOLERANCE]))
+            .with_default(&[TOLERANCE])
             .one(),
     ];
 }

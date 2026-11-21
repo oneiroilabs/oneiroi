@@ -11,7 +11,7 @@ use oneiroi_core::{
     program::{ProgramBuilder, SlotId},
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SweptPatch, TubePatch, nurbs::clamped_uniform_knots, swept},
+    curve::{ControlPoint, NURBS, SweptPatch, TubePatch, nurbs::clamped_uniform_knots, swept},
     primitive::CIRCLE,
     surface,
 };
@@ -128,7 +128,8 @@ fn program_scaled(
     scale: &[Vec3],
 ) -> oneiroi_core::program::Program {
     let mut b = ProgramBuilder::new("surface");
-    let points = b.constant::<[f32; 4]>(spine);
+    let points: Vec<ControlPoint> = spine.iter().copied().map(ControlPoint::from).collect();
+    let points = b.constant(&points);
     let knots = b.constant(&clamped_uniform_knots(spine.len()));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let profile = if circle {
@@ -614,7 +615,7 @@ fn there_are_no_cracks_between_patches() {
         let curve = oneiroi_nodes::curve::nurbs::CubicNurbs::new(
             [[-2., -1., 0., 1.], [-1., 1., 0., 1.], [0., -1., 1., 1.], [1., 1., 0., 1.], [2., -1., 0., 1.]]
                 .into_iter()
-                .map(glam::Vec4::from_array)
+                .map(|point| ControlPoint::from(point).homogeneous())
                 .collect(),
             clamped_uniform_knots(5),
         );
@@ -813,14 +814,14 @@ fn instances_scene() -> Option<Scene> {
     let (device, queue) = device()?;
     let registry = registry();
     let mut b = ProgramBuilder::new("instances");
-    let points = b.constant::<[f32; 4]>(&BENT);
+    let points = b.constant(&BENT.map(ControlPoint::from));
     let knots = b.constant(&clamped_uniform_knots(BENT.len()));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let radius = b.constant::<f32>(&[0.3]);
     let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
     let tube = swept(&mut b, &registry, spine, circle).unwrap();
 
-    let line = b.constant::<[f32; 4]>(&[[-3., -3., 0., 1.], [-1., -1., 0., 1.], [1., 1., 0., 1.], [3., 3., 0., 1.]]);
+    let line = b.constant(&[[-3., -3., 0., 1.], [-1., -1., 0., 1.], [1., 1., 0., 1.], [3., 3., 0., 1.]].map(ControlPoint::from));
     let knots = b.constant(&clamped_uniform_knots(4));
     let line = b.node(&NURBS, &[line, knots]).unwrap()[0];
     let count = b.constant(&[3u32]);
@@ -873,7 +874,7 @@ impl Scene {
             .iter()
             .map(|range| {
                 let (center, radius) = (drawable.bounds)(&shape[range.start * words..range.end * words]).unwrap();
-                [center[0], center[1], center[2], radius]
+                center.extend(radius).to_array()
             })
             .collect();
         let slots = ranges.iter().map(|range| range.len() as u32).max().unwrap();

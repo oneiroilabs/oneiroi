@@ -9,7 +9,7 @@ use oneiroi_core::{
     types::DataType,
 };
 use oneiroi_nodes::{
-    curve::{NURBS, SAMPLE_CURVE, TRANSLATE, swept},
+    curve::{ControlPoint, NURBS, SAMPLE_CURVE, TRANSLATE, swept},
     instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
     surface,
@@ -135,7 +135,7 @@ pub const SCENARIOS: &[Scenario] = &[
         build: |registry, _| {
             let mut b = ProgramBuilder::new("sweep square");
             let spine = curves(&mut b);
-            let square = b.param_grouped("square", <[f32; 4]>::INFO, &[]);
+            let square = b.param_grouped("square", ControlPoint::INFO, &[]);
             let knots = b.constant(&square_knots());
             let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
             let surface = swept(&mut b, registry, spine, profile).unwrap();
@@ -310,7 +310,7 @@ fn words<T: Pod>(values: &[T]) -> Vec<u32> {
 
 /// The curves every scenario starts from, out of the parameter `points`.
 fn curves(b: &mut ProgramBuilder) -> SlotId {
-    let points = b.param_grouped("points", <[f32; 4]>::INFO, &[]);
+    let points = b.param_grouped("points", ControlPoint::INFO, &[]);
     let knots = b.constant::<f32>(&[]);
     b.node(&NURBS, &[points, knots]).unwrap()[0]
 }
@@ -326,7 +326,7 @@ fn each_curve(b: &mut ProgramBuilder, programs: &mut ProgramSet) -> SlotId {
     inner.output("segments", moved);
     let inner = programs.add(inner.finish());
 
-    let points = b.param_grouped("points", <[f32; 4]>::INFO, &[]);
+    let points = b.param_grouped("points", ControlPoint::INFO, &[]);
     let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
     b.for_each(programs, inner, &[Some(points), Some(offset)], 0, 1 << 16)
         .unwrap()[0]
@@ -341,10 +341,10 @@ fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
     let t = b.constant::<f32>(&[]);
     let frames = b.node(&SAMPLE_CURVE, &[spine, count, spacing, t]).unwrap()[0];
 
-    let around: Vec<[f32; 4]> = (0..=12)
+    let around: Vec<ControlPoint> = (0..=12)
         .map(|i| {
             let angle = i as f32 / 12.0 * std::f32::consts::TAU;
-            [0.45 * angle.cos(), 0.45 * angle.sin(), 0.0, 1.0]
+            ControlPoint::at(Vec3::new(angle.cos(), angle.sin(), 0.0) * 0.45)
         })
         .collect();
     let ring = b.constant(&around);
@@ -360,21 +360,20 @@ fn rings_on_curves(b: &mut ProgramBuilder, registry: &NodeRegistry) -> SlotId {
 /// The control points of every curve, with the first one of the first
 /// curve moved by `shift`. Every curve bends in every direction, and they
 /// lie next to each other.
-fn control_points(size: Size, shift: f32) -> Vec<[f32; 4]> {
+fn control_points(size: Size, shift: f32) -> Vec<ControlPoint> {
     let mut points = Vec::with_capacity((size.curves * size.points) as usize);
     for curve in 0..size.curves {
         let phase = curve as f32 * 0.37;
         for i in 0..size.points {
             let t = i as f32;
-            points.push([
+            points.push(ControlPoint::at(Vec3::new(
                 (t * 0.9 + phase).sin() * 2.0 + curve as f32 * 5.0,
                 t * 0.7,
                 (t * 1.3 + phase).cos(),
-                1.0,
-            ]);
+            )));
         }
     }
-    points[0][0] += shift;
+    points[0].position.x += shift;
     points
 }
 
@@ -405,14 +404,14 @@ fn places(n: u32) -> Vec<f32> {
 }
 
 /// A square with sharp corners as a NURBS curve, counter-clockwise.
-fn square(scale: f32) -> Vec<[f32; 4]> {
+fn square(scale: f32) -> Vec<ControlPoint> {
     let corners = [(0.1, -0.1), (0.1, 0.1), (-0.1, 0.1), (-0.1, -0.1), (0.1, -0.1)];
-    let mut points = vec![[0.1 * scale, -0.1 * scale, 0.0, 1.0]];
+    let mut points = vec![ControlPoint::at(Vec3::new(0.1, -0.1, 0.0) * scale)];
     for pair in corners.windows(2) {
         let (a, b) = (Vec2::from(pair[0]), Vec2::from(pair[1]));
         for step in 1..=3 {
             let point = a.lerp(b, step as f32 / 3.0) * scale;
-            points.push([point.x, point.y, 0.0, 1.0]);
+            points.push(ControlPoint::at(point.extend(0.0)));
         }
     }
     points

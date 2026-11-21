@@ -222,7 +222,7 @@ fn build_mesh(engine: &Engine, instance: &Instance) -> Option<Mesh> {
 #[cfg(test)]
 mod tests {
     use oneiroi_core::program::ProgramBuilder;
-    use oneiroi_nodes::curve::{NURBS, nurbs::clamped_uniform_knots};
+    use oneiroi_nodes::curve::{ControlPoint, NURBS, nurbs::clamped_uniform_knots};
 
     use super::*;
 
@@ -231,12 +231,7 @@ mod tests {
         let tube = oneiroi.add_program(oneiroi_nodes::curve::tube(oneiroi.registry()));
 
         let mut b = ProgramBuilder::new("test");
-        let points = b.constant::<[f32; 4]>(&[
-            [0., 0., 0., 1.],
-            [1., 2., 0., 1.],
-            [2., 0., 1., 1.],
-            [3., 2., 0., 1.],
-        ]);
+        let points = b.constant(&[[0., 0., 0., 1.], [1., 2., 0., 1.], [2., 0., 1., 1.], [3., 2., 0., 1.]].map(ControlPoint::from));
         let knots = b.constant(&clamped_uniform_knots(4));
         let radius = b.param::<f32>("radius", &[0.25]);
         let tolerance = b.constant::<f32>(&[0.01]);

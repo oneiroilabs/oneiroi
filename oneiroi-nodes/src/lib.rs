@@ -70,7 +70,7 @@ pub fn describe(meta: &mut oneiroi_meta::MetaRegistry) {
         u32::META,
         Vec2::META,
         Vec3::META,
-        <[f32; 4]>::META,
+        curve::ControlPoint::META,
         CubicNurbsSegmentCache::META,
         EvaluatedFrame::META,
         primitive::Circle::META,

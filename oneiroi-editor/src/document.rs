@@ -321,7 +321,7 @@ impl Session {
             let spheres = ranges
                 .iter()
                 .map(|range| match (drawable.bounds)(&words[at(range.start)..at(range.end)]) {
-                    Some((center, radius)) => [center[0], center[1], center[2], radius],
+                    Some((center, radius)) => center.extend(radius).to_array(),
                     None => [0.0, 0.0, 0.0, -1.0],
                 })
                 .collect();
@@ -374,7 +374,7 @@ impl Session {
                     .filter_map(|drawn| match drawn.shape {
                         None => {
                             let (center, radius) = (drawn.drawable.bounds)(self.engine.fetch_key::<u32>(drawn.key)?)?;
-                            Some((Vec3::from(center), radius))
+                            Some((center, radius))
                         }
                         Some((elements, groups)) => self.instances_bounds(drawn.key, &drawn.drawable, elements, groups),
                     })

@@ -10,7 +10,7 @@ mod profile;
 pub mod shapes;
 mod sweep;
 
-pub use nodes::{EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
+pub use nodes::{ControlPoint, EvaluatedFrame, NURBS, SAMPLE_CURVE, TRANSLATE, register};
 pub(crate) use nodes::example_curves;
 pub(crate) use profile::{LATE, SPIKE, cornered_spine, fractions, sweep_example, sweep_example_along};
 pub use profile::{PROFILE, Profile};

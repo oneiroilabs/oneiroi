@@ -716,7 +716,7 @@ mod tests {
     use oneiroi_core::types::DataType;
 
     use super::*;
-    use crate::curve::{NURBS, nurbs::clamped_uniform_knots};
+    use crate::curve::{ControlPoint, NURBS, nurbs::clamped_uniform_knots};
 
     const BENT: [[f32; 4]; 5] = [
         [0., 0., 0., 1.],
@@ -738,7 +738,8 @@ mod tests {
         let tube = engine.add_program(tube(&registry()));
 
         let mut b = ProgramBuilder::new("test");
-        let points = b.constant(spine);
+        let points: Vec<ControlPoint> = spine.iter().copied().map(ControlPoint::from).collect();
+        let points = b.constant(&points);
         let knots = b.constant(&clamped_uniform_knots(spine.len()));
         let radius = b.param::<f32>("radius", &[0.25]);
         let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
@@ -762,15 +763,15 @@ mod tests {
     }
 
     /// A square with sharp corners as a NURBS curve, counter-clockwise.
-    fn square() -> (Vec<[f32; 4]>, Vec<f32>) {
+    fn square() -> (Vec<ControlPoint>, Vec<f32>) {
         // Small enough to fit through the bends of the spine.
         let corners = [(0.2, -0.2), (0.2, 0.2), (-0.2, 0.2), (-0.2, -0.2), (0.2, -0.2)];
-        let mut points = vec![[0.2, -0.2, 0., 1.]];
+        let mut points = vec![ControlPoint::at(Vec3::new(0.2, -0.2, 0.))];
         for pair in corners.windows(2) {
             let (a, b) = (Vec2::from(pair[0]), Vec2::from(pair[1]));
             for step in 1..=3 {
                 let point = a.lerp(b, step as f32 / 3.0);
-                points.push([point.x, point.y, 0., 1.]);
+                points.push(ControlPoint::at(point.extend(0.)));
             }
         }
         let mut knots = vec![0.0; 4];
@@ -900,7 +901,7 @@ mod tests {
     fn a_surface_is_small() {
         let registry = registry();
         let mut b = ProgramBuilder::new("surface");
-        let points = b.constant(&BENT);
+        let points = b.constant(&BENT.map(ControlPoint::from));
         let knots = b.constant(&clamped_uniform_knots(5));
         let radius = b.constant::<f32>(&[0.25]);
         let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
@@ -929,7 +930,7 @@ mod tests {
         let (square_points, square_knots) = square();
 
         let mut b = ProgramBuilder::new("beam");
-        let points = b.constant(&BENT);
+        let points = b.constant(&BENT.map(ControlPoint::from));
         let knots = b.constant(&clamped_uniform_knots(5));
         let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let points = b.constant(&square_points);
@@ -974,11 +975,11 @@ mod tests {
     fn every_curve_is_swept_on_its_own() {
         // Two curves in one list of points, told apart by their groups:
         // a straight one along x, and the bent one far away from it.
-        let mut points: Vec<[f32; 4]> = (0..4).map(|i| [i as f32, 0., 0., 1.]).collect();
-        points.extend(BENT.iter().map(|[x, y, z, w]| [*x, y + 10.0, *z, *w]));
+        let mut points: Vec<ControlPoint> = (0..4).map(|i| ControlPoint::at(Vec3::X * i as f32)).collect();
+        points.extend(BENT.map(|[x, y, z, w]| ControlPoint::new(Vec3::new(x, y + 10.0, z), w)));
 
         let mut b = ProgramBuilder::new("two curves");
-        let points = b.param_grouped("points", <[f32; 4]>::INFO, bytemuck::cast_slice(&points));
+        let points = b.param_grouped("points", ControlPoint::INFO, bytemuck::cast_slice(&points));
         let knots = b.constant::<f32>(&[]);
         let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
         let radius = b.constant::<f32>(&[0.25, 0.5]);
@@ -1031,7 +1032,7 @@ mod tests {
         let corner = [Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 1.5, 0.5), Vec3::new(0.0, 2.0, 0.0)];
         let open = polyline(&corner, false);
         let (square_points, square_knots) = square();
-        let points: Vec<_> = square_points.iter().map(|p| Vec4::from_array(*p)).collect();
+        let points: Vec<_> = square_points.iter().map(|p| p.homogeneous()).collect();
         let square = crate::curve::nurbs::extract_segments(&points, &square_knots);
 
         // A tube and a bar around two corners: each side of a corner reaches

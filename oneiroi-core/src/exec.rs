@@ -809,6 +809,8 @@ impl<E: Executor> Engine<E> {
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec3;
+
     use super::*;
     use crate::{
         node::PortDecl,
@@ -1454,7 +1456,7 @@ mod tests {
                         let groups = groups.clone();
                         groups.into_iter().enumerate().map(move |(group, range)| InstanceRow {
                             transform: Similarity {
-                                offset: [*offset, 0.0, 0.0],
+                                offset: Vec3::new(*offset, 0.0, 0.0),
                                 ..Similarity::IDENTITY
                             },
                             group: group as u32,
@@ -1482,7 +1484,7 @@ mod tests {
                     .iter()
                     .map(|row| InstanceRow {
                         transform: Similarity {
-                            offset: [row.transform.offset[0] + by, 0.0, 0.0],
+                            offset: Vec3::new(row.transform.offset.x + by, 0.0, 0.0),
                             ..row.transform
                         },
                         ..*row

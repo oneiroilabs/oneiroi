@@ -508,7 +508,7 @@ fn broken_graphs_say_where_they_are_broken() {
     broken.set(nodes.curve, "points", Value::F32(vec![1.0; 7])).unwrap();
     assert_eq!(
         error(&broken).2,
-        LowerErrorKind::Value { expected: "vec4" }
+        LowerErrorKind::Value { expected: "control_point" }
     );
 
     // A port of a single value takes no list.

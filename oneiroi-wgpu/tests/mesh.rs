@@ -6,7 +6,7 @@
 use glam::Vec3;
 use oneiroi_core::{exec::Engine, node::NodeRegistry, program::ProgramBuilder};
 use oneiroi_nodes::{
-    curve::{NURBS, nurbs::clamped_uniform_knots, tube},
+    curve::{ControlPoint, NURBS, nurbs::clamped_uniform_knots, tube},
     surface::MESH,
 };
 use oneiroi_wgpu::{MeshData, MeshPreview, orbit::OrbitCamera};
@@ -33,13 +33,16 @@ fn tube_mesh() -> (Vec<Vec3>, Vec<Vec3>, Vec<u32>) {
     let tube = engine.add_program(tube(&registry));
 
     let mut b = ProgramBuilder::new("test");
-    let points = b.constant::<[f32; 4]>(&[
-        [-2., -1., 0., 1.],
-        [-1., 1., 0., 1.],
-        [0., -1., 1., 1.],
-        [1., 1., 0., 1.],
-        [2., -1., 0., 1.],
-    ]);
+    let points = b.constant(
+        &[
+            [-2., -1., 0., 1.],
+            [-1., 1., 0., 1.],
+            [0., -1., 1., 1.],
+            [1., 1., 0., 1.],
+            [2., -1., 0., 1.],
+        ]
+        .map(ControlPoint::from),
+    );
     let knots = b.constant(&clamped_uniform_knots(5));
     let spine = b.node(&NURBS, &[points, knots]).unwrap()[0];
     let outputs = b.call(engine.programs(), tube, &[Some(spine), None, None]).unwrap();

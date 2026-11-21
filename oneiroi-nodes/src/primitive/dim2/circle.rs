@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
     node::{Caps, Drawable, GpuKernel, GpuOutput, Inputs, Outputs, PortDecl, Topology},
-    types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
+    types::{DataType, Field, FieldType, Layout, Scalar},
 };
 
 use crate::curve::{Curve, Piece, Profile, TubePatch, sweep_example};
@@ -138,7 +138,7 @@ pub const CIRCLE_LINE: Drawable = Drawable {
     bounds: |words| {
         let circles: &[Circle] = bytemuck::try_cast_slice(words).ok()?;
         let radius = circles.iter().map(|circle| circle.radius.abs()).reduce(f32::max)?;
-        Some(([0.0; 3], radius))
+        Some((glam::Vec3::ZERO, radius))
     },
 };
 
@@ -151,7 +151,7 @@ node! {
         version: 1,
         inputs {
             /// The radius, a circle for each.
-            port PortDecl::new::<f32>("radius").with_default(PortDefault::F32(&[1.0]));
+            port PortDecl::new::<f32>("radius").with_default(&[1.0f32]);
         }
         outputs {
             /// The circles.

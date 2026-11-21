@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use oneiroi_core::{
     node::{Inputs, Outputs, PortDecl},
-    types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
+    types::{DataType, Field, FieldType, Layout, Scalar},
 };
 
 /// A rectangle around the origin, flat in the plane of `x` and `y`: its
@@ -11,7 +11,7 @@ use oneiroi_core::{
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct Rectangle {
-    size: [f32; 2],
+    size: Vec2,
     corner_radius: f32,
     _padding: f32,
 }
@@ -22,7 +22,7 @@ impl Rectangle {
     pub fn new(width: f32, height: f32, corner_radius: f32) -> Self {
         let size = Vec2::new(width, height).max(Vec2::ZERO);
         Self {
-            size: size.to_array(),
+            size,
             corner_radius: corner_radius.clamp(0.0, size.min_element() * 0.5),
             _padding: 0.0,
         }
@@ -30,7 +30,7 @@ impl Rectangle {
 
     /// Its width along `x` and its height along `y`.
     pub fn size(&self) -> Vec2 {
-        Vec2::from_array(self.size)
+        self.size
     }
 
     pub fn corner_radius(&self) -> f32 {
@@ -67,12 +67,12 @@ node! {
         inputs {
             /// How wide it is along `x`, a rectangle for each. The shorter of the
             /// widths and heights repeats its last value.
-            port PortDecl::new::<f32>("width").with_default(PortDefault::F32(&[1.0]));
+            port PortDecl::new::<f32>("width").with_default(&[1.0f32]);
             /// How high it is along `y`.
-            port PortDecl::new::<f32>("height").with_default(PortDefault::F32(&[1.0]));
+            port PortDecl::new::<f32>("height").with_default(&[1.0f32]);
             /// The radius of its corners, `0` for sharp ones. At most half its
             /// shorter side.
-            port PortDecl::new::<f32>("corner_radius").with_default(PortDefault::F32(&[0.0])).one();
+            port PortDecl::new::<f32>("corner_radius").with_default(&[0.0f32]).one();
         }
         outputs {
             /// The rectangles.

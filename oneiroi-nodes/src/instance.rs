@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use glam::{Mat3, Quat, Vec3};
 use oneiroi_core::{
     node::{Caps, Drawable, GenericPort, GpuKernel, GpuOutput, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
-    types::{DataType, InstanceRow, InstanceTotal, PortDefault, Similarity, TypeInfo},
+    types::{DataType, InstanceRow, InstanceTotal, Similarity, TypeInfo},
 };
 use rayon::prelude::*;
 
@@ -58,7 +58,7 @@ impl Placement {
         Self {
             rotation: Mat3::from_quat(transform.rotation()),
             scale: transform.scale,
-            offset: transform.offset(),
+            offset: transform.offset,
         }
     }
 
@@ -331,7 +331,7 @@ generic_node! {
             /// its own.
             port GenericPort::implementing("shape", PLACEABLE).grouped();
             /// How large the copies are, the same for all of them.
-            port GenericPort::exact::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one();
+            port GenericPort::exact::<f32>("scale").with_default(&[1.0f32]).one();
             /// How the copies are turned: as the frame is (`frame`), upright with
             /// their `x` where the curve heads and their `y` up, like the posts of
             /// a fence along a path (`upright`), or not at all (`position`).
@@ -356,11 +356,11 @@ generic_node! {
             /// What is put somewhere else, a shape or instances.
             port GenericPort::implementing("shape", PLACEABLE).grouped();
             /// How far it is moved.
-            port GenericPort::exact::<Vec3>("translate").with_default(PortDefault::F32(&[0.0; 3])).one();
+            port GenericPort::exact::<Vec3>("translate").with_default(&[Vec3::ZERO]).one();
             /// How far it is turned, in degrees: around x, then y, then z.
-            port GenericPort::exact::<Vec3>("rotate").with_default(PortDefault::F32(&[0.0; 3])).one();
+            port GenericPort::exact::<Vec3>("rotate").with_default(&[Vec3::ZERO]).one();
             /// How large it gets, the same in every direction.
-            port GenericPort::exact::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one();
+            port GenericPort::exact::<f32>("scale").with_default(&[1.0f32]).one();
         }
         outputs {
             /// Where it is now, an instance per group of the shape.
@@ -617,28 +617,28 @@ impl<S: Shape> Ports<S> {
     const INSTANCE: &'static [PortDecl] = &[
         PortDecl::new::<EvaluatedFrame>("points"),
         PortDecl::new::<S>("shape").grouped(),
-        PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<f32>("scale").with_default(&[1.0f32]).one(),
         PortDecl::new::<u32>("align").choices(ALIGNS),
     ];
     const INSTANCE_INSTANCES: &'static [PortDecl] = &[
         PortDecl::new::<EvaluatedFrame>("points"),
         PortDecl::of("shape", S::INSTANCES).grouped(),
-        PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<f32>("scale").with_default(&[1.0f32]).one(),
         PortDecl::new::<u32>("align").choices(ALIGNS),
     ];
     const INSTANCE_OUT: &'static [PortDecl] = &[PortDecl::of("instances", S::INSTANCES).grouped().instances_of(1)];
 
     const TRANSFORM: &'static [PortDecl] = &[
         PortDecl::new::<S>("shape").grouped(),
-        PortDecl::new::<Vec3>("translate").with_default(PortDefault::F32(&[0.0; 3])).one(),
-        PortDecl::new::<Vec3>("rotate").with_default(PortDefault::F32(&[0.0; 3])).one(),
-        PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<Vec3>("translate").with_default(&[Vec3::ZERO]).one(),
+        PortDecl::new::<Vec3>("rotate").with_default(&[Vec3::ZERO]).one(),
+        PortDecl::new::<f32>("scale").with_default(&[1.0f32]).one(),
     ];
     const TRANSFORM_INSTANCES: &'static [PortDecl] = &[
         PortDecl::of("shape", S::INSTANCES).grouped(),
-        PortDecl::new::<Vec3>("translate").with_default(PortDefault::F32(&[0.0; 3])).one(),
-        PortDecl::new::<Vec3>("rotate").with_default(PortDefault::F32(&[0.0; 3])).one(),
-        PortDecl::new::<f32>("scale").with_default(PortDefault::F32(&[1.0])).one(),
+        PortDecl::new::<Vec3>("translate").with_default(&[Vec3::ZERO]).one(),
+        PortDecl::new::<Vec3>("rotate").with_default(&[Vec3::ZERO]).one(),
+        PortDecl::new::<f32>("scale").with_default(&[1.0f32]).one(),
     ];
     const TRANSFORM_OUT: &'static [PortDecl] = &[PortDecl::of("instances", S::INSTANCES).grouped().instances_of(0)];
     const TRANSFORM_INSTANCES_OUT: &'static [PortDecl] =
@@ -890,7 +890,7 @@ impl<P: Placeable> Ports<P> {
                         block.iter().map(move |row| InstanceRow {
                             first: point * elements + row.first,
                             transform: Similarity {
-                                offset: [point as f32 * 2.0, 0.0, 0.0],
+                                offset: Vec3::new(point as f32 * 2.0, 0.0, 0.0),
                                 ..row.transform
                             },
                             ..*row
@@ -993,7 +993,7 @@ mod tests {
     ];
 
     fn bent() -> Vec<CubicNurbsSegmentCache> {
-        let points: Vec<_> = BENT.iter().map(|p| glam::Vec4::from_array(*p)).collect();
+        let points: Vec<_> = BENT.map(|p| crate::curve::ControlPoint::from(p).homogeneous()).into();
         crate::curve::nurbs::extract_segments(&points, &clamped_uniform_knots(points.len()))
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
     fn every_point_gets_every_group_of_the_shape() {
         let registry = registry();
         let mut b = ProgramBuilder::new("instances");
-        let spine = b.constant(&BENT);
+        let spine = b.constant(&BENT.map(crate::curve::ControlPoint::from));
         let knots = b.constant::<f32>(&[]);
         let spine = b.node(&NURBS, &[spine, knots]).unwrap()[0];
         let count = b.constant(&[4u32]);

@@ -34,7 +34,7 @@ impl PortDecl {
         Self {
             name,
             ty: T::INFO,
-            default: PortDefault::Empty,
+            default: PortDefault::EMPTY,
             card: Card::Many,
             groups: Groups::Own,
             prototype: None,
@@ -47,7 +47,7 @@ impl PortDecl {
         Self {
             name,
             ty,
-            default: PortDefault::Empty,
+            default: PortDefault::EMPTY,
             card: Card::Many,
             groups: Groups::Own,
             prototype: None,
@@ -62,8 +62,16 @@ impl PortDecl {
         self
     }
 
-    pub const fn with_default(mut self, default: PortDefault) -> Self {
-        self.default = default;
+    /// What the input has while nothing is linked to it. A default of
+    /// another type than the port's does not compile:
+    ///
+    /// ```compile_fail
+    /// # use oneiroi_core::node::PortDecl;
+    /// const OFFSET: PortDecl = PortDecl::new::<glam::Vec3>("offset").with_default(&[1.0f32]);
+    /// ```
+    pub const fn with_default<T: DataType>(mut self, values: &'static [T]) -> Self {
+        self.default = PortDefault::of(values);
+        assert!(self.default.fits(&self.ty), "a default must be of the type of its port");
         self
     }
 
@@ -79,8 +87,8 @@ impl PortDecl {
     pub const fn choices(mut self, choices: &'static [&'static str]) -> Self {
         self.card = Card::One;
         self.choices = choices;
-        if matches!(self.default, PortDefault::Empty) {
-            self.default = PortDefault::U32(&[0]);
+        if self.default.is_empty() {
+            self.default = PortDefault::of::<u32>(&[0]);
         }
         self
     }
@@ -570,7 +578,7 @@ impl GenericPort {
         Self {
             name,
             ty: PortType::Exact(T::INFO),
-            default: PortDefault::Empty,
+            default: PortDefault::EMPTY,
             card: Card::Many,
             choices: &[],
         }
@@ -580,14 +588,19 @@ impl GenericPort {
         Self {
             name,
             ty: PortType::Trait(tr),
-            default: PortDefault::Empty,
+            default: PortDefault::EMPTY,
             card: Card::Many,
             choices: &[],
         }
     }
 
-    pub const fn with_default(mut self, default: PortDefault) -> Self {
-        self.default = default;
+    /// See [`PortDecl::with_default`]. A port of a trait takes a default
+    /// of any type, which only versions of that type use.
+    pub const fn with_default<T: DataType>(mut self, values: &'static [T]) -> Self {
+        self.default = PortDefault::of(values);
+        if let PortType::Exact(ty) = &self.ty {
+            assert!(self.default.fits(ty), "a default must be of the type of its port");
+        }
         self
     }
 
@@ -605,8 +618,8 @@ impl GenericPort {
     pub const fn choices(mut self, choices: &'static [&'static str]) -> Self {
         self.card = Card::One;
         self.choices = choices;
-        if matches!(self.default, PortDefault::Empty) {
-            self.default = PortDefault::U32(&[0]);
+        if self.default.is_empty() {
+            self.default = PortDefault::of::<u32>(&[0]);
         }
         self
     }
@@ -650,7 +663,7 @@ pub struct Drawable {
     pub wgsl: &'static str,
     /// Center and radius of a sphere around all of `words`, which are
     /// elements of the type. `None` if there is nothing to be around.
-    pub bounds: fn(words: &[u32]) -> Option<([f32; 3], f32)>,
+    pub bounds: fn(words: &[u32]) -> Option<(glam::Vec3, f32)>,
 }
 
 struct Generic {
@@ -891,6 +904,15 @@ mod tests {
         cpu: |inputs, outputs| outputs.set(0, &[inputs.choice(0) as u32]),
         gpu: &[],
     };
+
+    #[test]
+    fn a_default_is_the_words_of_its_elements() {
+        const END: PortDecl = PortDecl::new::<glam::Vec3>("end").with_default(&[glam::Vec3::new(1.0, 2.0, 3.0)]);
+        let words: Vec<u32> = [1.0f32, 2.0, 3.0].map(f32::to_bits).into();
+        assert_eq!(END.default.words(), words);
+        assert!(END.default.fits(&glam::Vec3::INFO) && !END.default.fits(&f32::INFO));
+        assert!(PortDefault::EMPTY.fits(&f32::INFO));
+    }
 
     #[test]
     fn a_choice_starts_at_the_first_and_ends_at_the_last() {

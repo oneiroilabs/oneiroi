@@ -8,7 +8,7 @@ use oneiroi_core::{
     program::{ProgramBuilder, ProgramId},
 };
 use oneiroi_core::program::SlotId;
-use oneiroi_nodes::curve::{EvaluatedFrame, NURBS, SAMPLE_CURVE, nurbs::clamped_uniform_knots};
+use oneiroi_nodes::curve::{ControlPoint, EvaluatedFrame, NURBS, SAMPLE_CURVE, nurbs::clamped_uniform_knots};
 use oneiroi_wgpu::{GpuExecutor, GpuStats};
 
 /// Nodes on the GPU, nodes on the CPU, compute passes and downloads.
@@ -38,11 +38,11 @@ fn gpu() -> Option<Engine<GpuExecutor>> {
 }
 
 /// A curve which bends in every direction.
-fn points(count: usize) -> Vec<[f32; 4]> {
+fn points(count: usize) -> Vec<ControlPoint> {
     (0..count)
         .map(|i| {
             let t = i as f32;
-            [(t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos(), 1.0]
+            ControlPoint::at(glam::Vec3::new((t * 0.9).sin() * 2.0, t * 0.7, (t * 1.3).cos()))
         })
         .collect()
 }
@@ -289,7 +289,7 @@ mod staying_on_the_gpu {
         engine.add_program(b.finish())
     }
 
-    fn reference(points: Option<&[[f32; 4]]>) -> (Vec<Vec3>, Vec<f32>) {
+    fn reference(points: Option<&[ControlPoint]>) -> (Vec<Vec3>, Vec<f32>) {
         let mut cpu = Engine::default();
         let program = chain(&mut cpu, &ON_CPU);
         let mut instance = cpu.instantiate(program);
@@ -404,7 +404,7 @@ mod staying_on_the_gpu {
         for count in 0..6 {
             let moved: Vec<_> = points(9)
                 .into_iter()
-                .map(|[x, y, z, w]| [x + count as f32, y, z, w])
+                .map(|point| ControlPoint::at(point.position + glam::Vec3::X * count as f32))
                 .collect();
             let mut other = gpu.instantiate(program);
             gpu.set_param(&mut other, "points", &moved).unwrap();
@@ -442,8 +442,8 @@ mod for_each {
         let one = one_curve(engine);
         let mut b = ProgramBuilder::new("each curve");
         let mut both = points(9);
-        both.extend(points(7).iter().map(|[x, y, z, w]| [x + 5.0, *y, *z, *w]));
-        let points = b.param_grouped("points", <[f32; 4]>::INFO, bytemuck::cast_slice(&both));
+        both.extend(points(7).iter().map(|point| ControlPoint::at(point.position + glam::Vec3::X * 5.0)));
+        let points = b.param_grouped("points", ControlPoint::INFO, bytemuck::cast_slice(&both));
         let knots = b.constant::<f32>(&[]);
         let samples = b.constant::<u32>(&[16]);
         let segments = b.node(&NURBS, &[points, knots]).unwrap()[0];

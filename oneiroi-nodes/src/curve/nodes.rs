@@ -9,7 +9,7 @@ use oneiroi_core::{
         Caps, Drawable, GpuKernel, GpuOutput, GpuStage, Inputs, NodeRegistry, Outputs, PortDecl,
         Topology,
     },
-    types::{DataType, Field, FieldType, Layout, PortDefault, Scalar},
+    types::{DataType, Field, FieldType, Layout, Scalar},
 };
 
 use rayon::prelude::*;
@@ -20,13 +20,13 @@ use super::nurbs::{CubicNurbsSegmentCache, MovingFrame, NurbsPiece, clamped_unif
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
 pub struct EvaluatedFrame {
-    position: [f32; 3],
+    position: Vec3,
     _padding0: f32,
-    tangent: [f32; 3],
+    tangent: Vec3,
     _padding1: f32,
-    normal: [f32; 3],
+    normal: Vec3,
     _padding2: f32,
-    binormal: [f32; 3],
+    binormal: Vec3,
     _padding3: f32,
 }
 
@@ -55,13 +55,72 @@ describe_type! {
     EvaluatedFrame { label: "Frame", hue: Yellow }
 }
 
+/// A control point of a curve: where it is, and how strongly it pulls
+/// the curve towards itself.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
+pub struct ControlPoint {
+    pub position: Vec3,
+    /// The larger, the closer the curve comes to the point. `1` unless
+    /// the curve is a circle or another conic.
+    pub weight: f32,
+}
+
+impl ControlPoint {
+    pub const fn new(position: Vec3, weight: f32) -> Self {
+        Self { position, weight }
+    }
+
+    /// A point of weight `1`.
+    pub const fn at(position: Vec3) -> Self {
+        Self::new(position, 1.0)
+    }
+
+    /// The point in homogeneous coordinates, which the curve is made of:
+    /// its position scaled by its weight, and the weight.
+    pub fn homogeneous(self) -> Vec4 {
+        (self.position * self.weight).extend(self.weight)
+    }
+}
+
+impl From<Vec3> for ControlPoint {
+    fn from(position: Vec3) -> Self {
+        Self::at(position)
+    }
+}
+
+/// `x`, `y` and `z` of the position, and the weight.
+impl From<[f32; 4]> for ControlPoint {
+    fn from([x, y, z, weight]: [f32; 4]) -> Self {
+        Self::new(Vec3::new(x, y, z), weight)
+    }
+}
+
+impl DataType for ControlPoint {
+    type ConfigurationOptions = ();
+
+    const NAME: &'static str = "control_point";
+    const WGSL: &'static str = "ControlPoint";
+    const SCALAR: Scalar = Scalar::F32;
+    const LAYOUT: Layout = Layout::Struct(&[
+        Field::new("position", FieldType::Vec3),
+        Field::new("weight", FieldType::F32),
+    ]);
+}
+
+describe_type! {
+    /// A control point of a curve: its `position`, and its `weight`, the
+    /// larger the closer the curve comes to it.
+    ControlPoint { label: "Control point", hue: Purple }
+}
+
 impl From<MovingFrame> for EvaluatedFrame {
     fn from(frame: MovingFrame) -> Self {
         Self {
-            position: frame.position.to_array(),
-            tangent: frame.tangent.to_array(),
-            normal: frame.normal.to_array(),
-            binormal: frame.binormal.to_array(),
+            position: frame.position,
+            tangent: frame.tangent,
+            normal: frame.normal,
+            binormal: frame.binormal,
             ..Self::zeroed()
         }
     }
@@ -70,10 +129,10 @@ impl From<MovingFrame> for EvaluatedFrame {
 impl From<EvaluatedFrame> for MovingFrame {
     fn from(frame: EvaluatedFrame) -> Self {
         Self {
-            position: frame.position.into(),
-            tangent: frame.tangent.into(),
-            normal: frame.normal.into(),
-            binormal: frame.binormal.into(),
+            position: frame.position,
+            tangent: frame.tangent,
+            normal: frame.normal,
+            binormal: frame.binormal,
         }
     }
 }
@@ -88,10 +147,10 @@ node! {
         category: "Curve",
         version: 2,
         inputs {
-            /// The control points, a group per curve. `w` is the weight of a point:
-            /// the larger it is, the closer the curve comes to the point. Use `1` for
-            /// all of them unless the curve has to be a circle or another conic.
-            port PortDecl::new::<[f32; 4]>("points").grouped(), "Control points";
+            /// The control points, a group per curve. The larger the weight of a
+            /// point, the closer the curve comes to it. Use `1` for all of them
+            /// unless the curve has to be a circle or another conic.
+            port PortDecl::new::<ControlPoint>("points").grouped(), "Control points";
             /// Where on the curve each control point pulls, a group per curve. A curve
             /// takes the group with its index, or the last group if there are fewer.
             ///
@@ -142,7 +201,7 @@ node! {
                 || nurbs_example(&[40], &[]),
                 || nurbs_example(&[200, 3, 120], &[]),
                 || {
-                    let line: Vec<[f32; 4]> = (0..6).map(|i| [i as f32, 0.0, 0.0, 1.0]).collect();
+                    let line: Vec<ControlPoint> = (0..6).map(|i| ControlPoint::at(Vec3::X * i as f32)).collect();
                     vec![bytemuck::cast_slice(&line).to_vec(), Vec::new(), Vec::new(), Vec::new()]
                 },
             ],
@@ -204,6 +263,7 @@ const MAX_GPU_SEGMENTS: usize = 4096;
 /// with a group of `knots` each or none at all.
 fn nurbs_example(points: &[usize], knots: &[&[f32]]) -> Vec<Vec<u32>> {
     let (points, offsets) = example_points(points);
+    let points: Vec<ControlPoint> = points.iter().map(|p| ControlPoint::new(p.truncate() / p.w, p.w)).collect();
     let mut knot_offsets = vec![0];
     let mut all = Vec::new();
     for group in knots {
@@ -282,12 +342,12 @@ fn segment_counts<'a>(inputs: &'a Inputs<'_>) -> impl Iterator<Item = usize> + '
 }
 
 fn nurbs(inputs: &Inputs<'_>, outputs: &mut Outputs) {
-    let points = inputs.get::<[f32; 4]>(0);
+    let points = inputs.get::<ControlPoint>(0);
     let knots = inputs.get::<f32>(1);
     let knot_groups = inputs.groups(1);
 
     let (segments, offsets) = per_group(inputs.groups(0), |group, curve| {
-        let points: Vec<_> = points[curve].iter().map(|p| Vec4::from_array(*p)).collect();
+        let points: Vec<_> = points[curve].iter().map(|point| point.homogeneous()).collect();
         let knots = curve_knots(points.len(), knots, &knot_groups, group);
         extract_segments(&points, &knots)
     });
@@ -314,10 +374,10 @@ node! {
             /// The curves to put frames on.
             port PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(), "Curves";
             /// How many frames each curve gets, from its start to its end. Used only without `t` and `spacing`.
-            port PortDecl::new::<u32>("count").with_default(PortDefault::U32(&[32])).one();
+            port PortDecl::new::<u32>("count").with_default(&[32u32]).one();
             /// The distance between two frames along the curve, from its start. A
             /// longer curve gets more frames. `0` turns it off.
-            port PortDecl::new::<f32>("spacing").with_default(PortDefault::F32(&[0.0])).one();
+            port PortDecl::new::<f32>("spacing").with_default(&[0.0f32]).one();
             /// Where the frames are, as fractions of the length of each curve: `0` is
             /// its start, `1` its end. The same for every curve.
             port PortDecl::new::<f32>("t"), "Positions";
@@ -470,7 +530,7 @@ node! {
             /// The curves to move.
             port PortDecl::new::<CubicNurbsSegmentCache>("segments").grouped(), "Curves";
             /// How far to move them, the same for every curve.
-            port PortDecl::new::<Vec3>("offset").with_default(PortDefault::F32(&[0.0; 3])).one();
+            port PortDecl::new::<Vec3>("offset").with_default(&[Vec3::ZERO]).one();
         }
         outputs {
             /// The moved curves, grouped like the ones which came in.
@@ -504,20 +564,20 @@ fn translate(index: u32) -> CubicNurbsSegmentCache {
             reads: &[],
             accepts: None,
             examples: &[
-                || translate_example(&[9, 5], [1.0, -2.0, 0.5]),
-                || translate_example(&[6], [0.0; 3]),
-                || translate_example(&[], [3.0, 0.0, 0.0]),
+                || translate_example(&[9, 5], Vec3::new(1.0, -2.0, 0.5)),
+                || translate_example(&[6], Vec3::ZERO),
+                || translate_example(&[], Vec3::X * 3.0),
             ],
             stages: &[],
         }],
     }
 }
 
-fn translate_example(points: &[usize], offset: [f32; 3]) -> Vec<Vec<u32>> {
+fn translate_example(points: &[usize], offset: Vec3) -> Vec<Vec<u32>> {
     let (segments, offsets) = example_curves(points);
     vec![
         bytemuck::cast_slice(&segments).to_vec(),
-        bytemuck::cast_slice(&offset).to_vec(),
+        bytemuck::cast_slice(&[offset]).to_vec(),
         offsets,
     ]
 }
@@ -534,7 +594,7 @@ fn translate(inputs: &Inputs<'_>, outputs: &mut Outputs) {
 
 /// A sphere around the segments in `words`, found by looking at a few
 /// points of each of them.
-fn curve_bounds(words: &[u32]) -> Option<([f32; 3], f32)> {
+fn curve_bounds(words: &[u32]) -> Option<(Vec3, f32)> {
     const STEPS: usize = 8;
 
     let segments: &[CubicNurbsSegmentCache] = bytemuck::try_cast_slice(words).ok()?;
@@ -544,7 +604,7 @@ fn curve_bounds(words: &[u32]) -> Option<([f32; 3], f32)> {
     let (min, max) = points.fold((Vec3::MAX, Vec3::MIN), |(min, max), point| {
         (min.min(point), max.max(point))
     });
-    (min.x <= max.x).then(|| (((min + max) * 0.5).to_array(), (max - min).length() * 0.5))
+    (min.x <= max.x).then(|| ((min + max) * 0.5, (max - min).length() * 0.5))
 }
 
 pub fn register(registry: &mut NodeRegistry) {
@@ -573,8 +633,8 @@ mod tests {
     use super::*;
     use crate::curve::nurbs::{CubicNurbs, clamped_uniform_knots};
 
-    fn points() -> Vec<[f32; 4]> {
-        vec![
+    fn points() -> Vec<ControlPoint> {
+        [
             [0.0, 0.0, 0.0, 1.],
             [1.0, 2.0, 0.5, 1.],
             [2.0, -1.0, 1.0, 1.],
@@ -582,6 +642,8 @@ mod tests {
             [4.0, 0.0, -1.0, 1.],
             [5.0, 2.0, 0.0, 1.],
         ]
+        .map(ControlPoint::from)
+        .into()
     }
 
     /// The control points are exposed, the knots are fixed. Frames by
@@ -605,7 +667,7 @@ mod tests {
 
     fn curve() -> CubicNurbs {
         CubicNurbs::new(
-            points().into_iter().map(Vec4::from_array).collect(),
+            points().into_iter().map(ControlPoint::homogeneous).collect(),
             clamped_uniform_knots(6),
         )
     }

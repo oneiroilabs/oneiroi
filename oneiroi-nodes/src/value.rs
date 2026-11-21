@@ -3,7 +3,7 @@
 use glam::Vec3;
 use oneiroi_core::{
     node::{Caps, GpuKernel, GpuOutput, Inputs, NodeRegistry, Outputs, PortDecl},
-    types::{DataType, PortDefault},
+    types::DataType,
 };
 
 fn pass<T: DataType>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
@@ -18,7 +18,7 @@ node! {
         version: 1,
         inputs {
             /// The numbers.
-            port PortDecl::new::<f32>("values").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("values").with_default(&[0.0f32]);
         }
         outputs {
             /// The same numbers.
@@ -38,7 +38,7 @@ node! {
         version: 1,
         inputs {
             /// The vectors.
-            port PortDecl::new::<Vec3>("values").with_default(PortDefault::F32(&[0.0; 3]));
+            port PortDecl::new::<Vec3>("values").with_default(&[Vec3::ZERO]);
         }
         outputs {
             /// The same vectors.
@@ -75,9 +75,9 @@ node! {
         version: 1,
         inputs {
             /// The numbers on the left.
-            port PortDecl::new::<f32>("a").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("a").with_default(&[0.0f32]);
             /// The numbers on the right.
-            port PortDecl::new::<f32>("b").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("b").with_default(&[0.0f32]);
             /// What is done with each pair.
             port PortDecl::new::<u32>("operation").choices(OPERATIONS);
         }
@@ -146,11 +146,11 @@ node! {
         version: 1,
         inputs {
             /// How far along `x`.
-            port PortDecl::new::<f32>("x").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("x").with_default(&[0.0f32]);
             /// How far along `y`, which is up.
-            port PortDecl::new::<f32>("y").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("y").with_default(&[0.0f32]);
             /// How far along `z`.
-            port PortDecl::new::<f32>("z").with_default(PortDefault::F32(&[0.0]));
+            port PortDecl::new::<f32>("z").with_default(&[0.0f32]);
         }
         outputs {
             /// The vectors, as many as the longest list has.
@@ -214,11 +214,6 @@ describe_type! {
 describe_type! {
     /// Three numbers `x`, `y` and `z`: a point or a direction in space.
     Vec3 { label: "Vector", hue: Violet }
-}
-
-describe_type! {
-    /// A point in space with a weight `w`, like the control points of a curve.
-    [f32; 4] { label: "Weighted point", hue: Purple }
 }
 
 pub fn register(registry: &mut NodeRegistry) {

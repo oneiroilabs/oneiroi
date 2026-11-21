@@ -236,21 +236,21 @@ data_type!([f32; 4], "vec4", "vec4<f32>", F32, Vec4);
 pub struct Similarity {
     /// A unit quaternion, `x`, `y`, `z` and then `w`.
     pub rotation: [f32; 4],
-    pub offset: [f32; 3],
+    pub offset: Vec3,
     pub scale: f32,
 }
 
 impl Similarity {
     pub const IDENTITY: Self = Self {
         rotation: [0.0, 0.0, 0.0, 1.0],
-        offset: [0.0; 3],
+        offset: Vec3::ZERO,
         scale: 1.0,
     };
 
     pub fn new(rotation: Quat, scale: f32, offset: Vec3) -> Self {
         Self {
             rotation: rotation.normalize().to_array(),
-            offset: offset.to_array(),
+            offset,
             scale,
         }
     }
@@ -259,13 +259,9 @@ impl Similarity {
         Quat::from_array(self.rotation)
     }
 
-    pub fn offset(&self) -> Vec3 {
-        Vec3::from_array(self.offset)
-    }
-
     /// Where `point` goes.
     pub fn point(&self, point: Vec3) -> Vec3 {
-        self.rotation() * point * self.scale + self.offset()
+        self.rotation() * point * self.scale + self.offset
     }
 
     /// Where a direction goes: only turned.
@@ -278,7 +274,7 @@ impl Similarity {
         let rotation = self.rotation() * inner.rotation();
         Similarity {
             rotation: rotation.normalize().to_array(),
-            offset: self.point(inner.offset()).to_array(),
+            offset: self.point(inner.offset),
             scale: self.scale * inner.scale,
         }
     }
@@ -371,21 +367,58 @@ impl DataType for InstanceRow {
     ]);
 }
 
-/// The value an input has while nothing is connected to it.
+/// The value an input has while nothing is connected to it: elements of
+/// its type, as the words they are stored as.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PortDefault {
-    /// No elements at all.
-    Empty,
-    F32(&'static [f32]),
-    U32(&'static [u32]),
+pub struct PortDefault {
+    /// The name of the type of the elements, or none for no elements.
+    ty: Option<&'static str>,
+    words: &'static [u32],
 }
 
 impl PortDefault {
-    pub fn words(&self) -> &'static [u32] {
-        match self {
-            Self::Empty => &[],
-            Self::F32(values) => bytemuck::cast_slice(values),
-            Self::U32(values) => values,
+    /// No elements at all.
+    pub const EMPTY: Self = Self { ty: None, words: &[] };
+
+    /// The elements `values`.
+    pub const fn of<T: DataType>(values: &'static [T]) -> Self {
+        let info = T::INFO;
+        assert!(align_of::<T>() == 4, "a default must be made of aligned words");
+        // SAFETY: `T` is `Pod`, made of whole words and aligned like them,
+        // which `T::INFO` and the line above make sure of.
+        let words = unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u32>(), values.len() * info.words as usize) };
+        Self { ty: Some(info.name), words }
+    }
+
+    pub const fn words(&self) -> &'static [u32] {
+        self.words
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Whether the elements are of type `ty`. No elements are of every type.
+    pub const fn fits(&self, ty: &TypeInfo) -> bool {
+        match self.ty {
+            None => true,
+            Some(name) => same(name, ty.name),
         }
     }
+}
+
+/// Whether two names are the same, in a constant.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < a.len() {
+        if a[index] != b[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }

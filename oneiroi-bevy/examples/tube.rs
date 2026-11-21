@@ -15,7 +15,7 @@ use bevy::{
 use oneiroi_bevy::{Oneiroi, OneiroiInstance, OneiroiPlugin};
 use oneiroi_core::program::{ProgramBuilder, ProgramId};
 use oneiroi_nodes::{
-    curve::{NURBS, nurbs::clamped_uniform_knots, swept, tube},
+    curve::{ControlPoint, NURBS, nurbs::clamped_uniform_knots, swept, tube},
     surface,
 };
 
@@ -27,17 +27,18 @@ fn main() {
         .run();
 }
 
-fn points(time: f32) -> Vec<[f32; 4]> {
+fn points(time: f32) -> Vec<ControlPoint> {
     (0..8)
         .map(|i| {
             let along = i as f32;
             let side = if i % 2 == 0 { -1.0 } else { 1.0 };
-            [
+            // Bevy has a glam of its own, so the position is plain numbers.
+            ControlPoint::from([
                 side * (0.6 + 0.4 * (time + along).sin()),
                 along,
                 0.5 * (time * 0.7 + along * 1.3).cos(),
                 1.0,
-            ]
+            ])
         })
         .collect()
 }

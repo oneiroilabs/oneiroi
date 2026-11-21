@@ -28,11 +28,17 @@ fn nurbs_knot(curve: u32, k: u32) -> f32 {
 // The first control point of a span, which it is computed relative to,
 // as `span_origin`.
 fn nurbs_origin(curve: u32, span: u32) -> vec3<f32> {
-    let first = in_points(in_points_start(curve) + span - 3u);
+    let first = nurbs_point(in_points_start(curve) + span - 3u);
     if (first.w != 0.0) {
         return first.xyz / first.w;
     }
     return vec3<f32>(0.0);
+}
+
+// A control point in homogeneous coordinates.
+fn nurbs_point(index: u32) -> vec4<f32> {
+    let point = in_points(index);
+    return vec4<f32>(point.position * point.weight, point.weight);
 }
 
 fn nurbs_moved(point: vec4<f32>, origin: vec3<f32>) -> vec4<f32> {
@@ -42,10 +48,10 @@ fn nurbs_moved(point: vec4<f32>, origin: vec3<f32>) -> vec4<f32> {
 fn nurbs_blossom(curve: u32, span: u32, at: vec3<f32>, origin: vec3<f32>) -> vec4<f32> {
     let first = in_points_start(curve) + span - 3u;
     var d = array<vec4<f32>, 4>(
-        nurbs_moved(in_points(first), origin),
-        nurbs_moved(in_points(first + 1u), origin),
-        nurbs_moved(in_points(first + 2u), origin),
-        nurbs_moved(in_points(first + 3u), origin),
+        nurbs_moved(nurbs_point(first), origin),
+        nurbs_moved(nurbs_point(first + 1u), origin),
+        nurbs_moved(nurbs_point(first + 2u), origin),
+        nurbs_moved(nurbs_point(first + 3u), origin),
     );
     for (var level = 1u; level <= 3u; level++) {
         for (var j = 3u; j >= level; j--) {

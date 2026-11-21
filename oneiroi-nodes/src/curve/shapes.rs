@@ -7,7 +7,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 use glam::{Vec2, Vec3, Vec4};
 use oneiroi_core::{
     node::{GenericPort, Inputs, NodeDef, NodeRegistry, Outputs, PortDecl},
-    types::{DataType, PortDefault},
+    types::DataType,
 };
 
 use super::nurbs::{CubicNurbsSegmentCache, extract_segments};
@@ -207,9 +207,9 @@ node! {
         inputs {
             /// Where each line starts. The shorter of the starts and ends repeats its
             /// last one.
-            port PortDecl::new::<Vec3>("start").with_default(PortDefault::F32(&[0.0; 3]));
+            port PortDecl::new::<Vec3>("start").with_default(&[Vec3::ZERO]);
             /// Where each line ends.
-            port PortDecl::new::<Vec3>("end").with_default(PortDefault::F32(&[1.0, 0.0, 0.0]));
+            port PortDecl::new::<Vec3>("end").with_default(&[Vec3::X]);
         }
         outputs {
             /// The lines, a curve for each.
