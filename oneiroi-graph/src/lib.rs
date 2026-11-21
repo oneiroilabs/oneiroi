@@ -107,6 +107,35 @@ pub enum Input {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         each: bool,
     },
+    /// A node only this input sees, which is no node of the graph: like a
+    /// curve drawn right at an input which takes one. What its first output
+    /// gives is what the input gets.
+    Inline(Inline),
+}
+
+/// A node made right at an input, see [`Input::Inline`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Inline {
+    /// The id of a node from the registry.
+    pub node: String,
+    /// Its inputs by name. An input left out has the default of its port.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, Value>,
+}
+
+impl Inline {
+    pub fn new(node: impl Into<String>) -> Self {
+        Self {
+            node: node.into(),
+            inputs: BTreeMap::new(),
+        }
+    }
+
+    /// The same node with input `port` at `value`.
+    pub fn with(mut self, port: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.inputs.insert(port.into(), value.into());
+        self
+    }
 }
 
 /// How many elements a graph runs for at most, when it runs for each one.
@@ -413,6 +442,11 @@ impl Graph {
     /// Gives an input a fixed value.
     pub fn set(&mut self, node: NodeId, port: &str, value: impl Into<Value>) -> Result<(), EditError> {
         self.input(node, port, Input::Value(value.into()))
+    }
+
+    /// Gives an input a node of its own, see [`Input::Inline`].
+    pub fn set_inline(&mut self, node: NodeId, port: &str, inline: Inline) -> Result<(), EditError> {
+        self.input(node, port, Input::Inline(inline))
     }
 
     /// Makes an input the parameter of the graph called `name`: links it

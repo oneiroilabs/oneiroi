@@ -2,13 +2,15 @@
 
 use oneiroi_core::node::Card;
 
-use crate::{Graph, GraphParam, NodeId, NodeKind, Value};
+use crate::{Graph, GraphParam, Inline, NodeId, NodeKind, Value};
 
 /// What an input of a node in [`fence`] gets.
 enum Arg {
     Link(NodeId, &'static str),
     F32(Vec<f32>),
     U32(u32),
+    /// A node right at the input.
+    Inline(Inline),
 }
 
 fn link(node: NodeId, output: &'static str) -> Arg {
@@ -28,6 +30,7 @@ fn add(graph: &mut Graph, id: &str, position: [f32; 2], inputs: Vec<(&str, Arg)>
             Arg::Link(from, output) => graph.connect(from, output, node, port),
             Arg::F32(values) => graph.set(node, port, Value::F32(values)),
             Arg::U32(value) => graph.set(node, port, value),
+            Arg::Inline(inline) => graph.set_inline(node, port, inline),
         };
         debug_assert!(done.is_ok(), "{id}.{port}: {done:?}");
     }
@@ -47,15 +50,15 @@ fn vectors(graph: &mut Graph, position: [f32; 2], x: Arg, y: Arg) -> NodeId {
     add(graph, "value.combine_xyz", position, vec![("x", x), ("y", y), ("z", f32s(&[0.0]))])
 }
 
-/// How big a profile is along a sweep: a polyline through `(x, y)`.
-fn scale(graph: &mut Graph, position: [f32; 2], points: &[(f32, f32)]) -> NodeId {
-    let points: Vec<f32> = points.iter().flat_map(|(x, y)| [*x, *y, 0.0]).collect();
-    add(graph, "curve.polyline", position, vec![("points", Arg::F32(points))])
-}
-
-/// Down to a point, from `base` times the profile.
-fn spike(base: f32) -> [(f32, f32); 2] {
-    [(0.0, base), (1.0, 0.0)]
+/// How big a profile is along a sweep, drawn right at the sweep: a straight
+/// Curve 2D from `base` times the profile at the start down to a point.
+fn spike(base: f32) -> Arg {
+    let linear = 1u32;
+    Arg::Inline(
+        Inline::new("curve.curve_2d")
+            .with("points", Value::F32(vec![0.0, base, 1.0, 0.0]))
+            .with("interpolation", linear),
+    )
 }
 
 /// A picket fence: rails, a band of rings, and pickets of a frame with a
@@ -148,12 +151,11 @@ pub fn fence() -> Graph {
     let rod = add(g, "curve.line", [250., 1200.], vec![("start", link(rod_from, "vectors")), ("end", link(rod_to, "vectors"))]);
     let rod = add(g, "curve.sweep", [500., 1200.], vec![("spine", link(rod, "curve")), ("profile", link(square_bar, "rectangle"))]);
     let spear = add(g, "curve.line", [250., 1320.], vec![("start", link(rod_to, "vectors")), ("end", link(tip, "vectors"))]);
-    let pointed = scale(g, [250., 1440.], &spike(2.5));
     let spear = add(
         g,
         "curve.sweep",
         [500., 1320.],
-        vec![("spine", link(spear, "curve")), ("profile", link(square_bar, "rectangle")), ("scale", link(pointed, "curve"))],
+        vec![("spine", link(spear, "curve")), ("profile", link(square_bar, "rectangle")), ("scale", spike(2.5))],
     );
 
     // Every part of a picket on every point.
@@ -200,12 +202,11 @@ pub fn fence() -> Graph {
     let cap = add(g, "curve.line", [250., 2340.], vec![("start", link(post_top, "vectors")), ("end", link(cap_top, "vectors"))]);
     let post_bar = add(g, "curve.rectangle", [250., 2460.], vec![("width", f32s(&[0.09])), ("height", f32s(&[0.09]))]);
     let post = add(g, "curve.sweep", [500., 2220.], vec![("spine", link(post, "curve")), ("profile", link(post_bar, "rectangle"))]);
-    let pointed = scale(g, [250., 2580.], &spike(1.0));
     let cap = add(
         g,
         "curve.sweep",
         [500., 2340.],
-        vec![("spine", link(cap, "curve")), ("profile", link(post_bar, "rectangle")), ("scale", link(pointed, "curve"))],
+        vec![("spine", link(cap, "curve")), ("profile", link(post_bar, "rectangle")), ("scale", spike(1.0))],
     );
     let at_ends = |g: &mut Graph, y: f32, shape: NodeId| {
         add(
@@ -248,6 +249,7 @@ impl Arg {
             Arg::Link(node, output) => Arg::Link(*node, output),
             Arg::F32(values) => Arg::F32(values.clone()),
             Arg::U32(value) => Arg::U32(*value),
+            Arg::Inline(inline) => Arg::Inline(inline.clone()),
         }
     }
 }

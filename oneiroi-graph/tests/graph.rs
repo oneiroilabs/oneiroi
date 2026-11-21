@@ -7,7 +7,7 @@ use oneiroi_core::{
     program::{BuildError, ProgramBuilder, ProgramId},
 };
 use oneiroi_graph::{
-    About, Context, EditError, FormatError, Graph, Input, Library, LibraryError, LowerErrorKind, NodeId,
+    About, Context, EditError, FormatError, Graph, Inline, Input, Library, LibraryError, LowerErrorKind, NodeId,
     Note, Value,
 };
 use oneiroi_nodes::{
@@ -944,4 +944,38 @@ fn the_fence_stands() {
     engine.set_param(&mut instance, "length", &[8.0f32]).unwrap();
     engine.evaluate([&mut instance]);
     assert_eq!(rows(&engine, &instance, "frames"), 19);
+}
+
+#[test]
+fn a_curve_drawn_at_an_input_is_the_node_it_would_be_linked_to() {
+    let spike = Inline::new("curve.curve_2d").with("points", Value::F32(vec![0.0, 1.0, 1.0, 0.2]));
+    let (mut graph, nodes) = tube();
+    graph.set_inline(nodes.sweep, "scale", spike.clone()).unwrap();
+    graph.add_output("surface", nodes.sweep, "surface").unwrap();
+    assert_eq!(Graph::from_json(&graph.to_json()).unwrap(), graph);
+
+    // The same curve as a node of the graph, linked.
+    let (mut linked, nodes) = tube();
+    let curve = linked.add("curve.curve_2d");
+    linked.set(curve, "points", spike.inputs["points"].clone()).unwrap();
+    linked.connect(curve, "curve", nodes.sweep, "scale").unwrap();
+    linked.add_output("surface", nodes.sweep, "surface").unwrap();
+
+    let mut engine = Engine::default();
+    let (a, b) = (lower(&graph, &mut engine), lower(&linked, &mut engine));
+    let (mut a, mut b) = (engine.instantiate(a), engine.instantiate(b));
+    engine.evaluate([&mut a, &mut b]);
+    assert_eq!(engine.output_key(&a, "surface"), engine.output_key(&b, "surface"));
+    // It is a spike now, not a tube: the end of it is thinner.
+    let (mut plain, _) = tube();
+    plain.add_output("surface", nodes.sweep, "surface").unwrap();
+    let plain = lower(&plain, &mut engine);
+    let mut plain = engine.instantiate(plain);
+    engine.evaluate([&mut plain]);
+    assert_ne!(engine.output_key(&a, "surface"), engine.output_key(&plain, "surface"));
+
+    // A node nobody knows is said to be one where it is used.
+    let (mut broken, nodes) = tube();
+    broken.set_inline(nodes.sweep, "scale", Inline::new("curve.nope")).unwrap();
+    assert_eq!(error(&broken).2, LowerErrorKind::UnknownNode("curve.nope".into()));
 }

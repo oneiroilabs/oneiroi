@@ -11,7 +11,7 @@ use oneiroi_core::{
     types::{Scalar, TypeInfo},
 };
 
-use crate::{Graph, Input, NodeId, NodeKind, Value};
+use crate::{Graph, Inline, Input, NodeId, NodeKind, Value};
 
 /// What the ids and names inside a graph are looked up in.
 #[derive(Clone, Copy)]
@@ -338,6 +338,9 @@ impl<'a> Lowerer<'a> {
                     let ty = exact(LowerErrorKind::NeedsLink)?;
                     Some(self.builder.constant_words(ty, words(value, &ty)?))
                 }
+                Some(Input::Inline(inline)) => {
+                    Some(self.inline(inline, port).map_err(|kind| at(Some(&port.name), kind))?)
+                }
                 Some(Input::Link {
                     node,
                     output,
@@ -414,6 +417,33 @@ impl<'a> Lowerer<'a> {
         self.done
             .insert(id, target.outputs().into_iter().zip(outputs).collect());
         Ok(())
+    }
+
+    /// The first output of the node `inline` makes for `port`, as the port
+    /// takes it.
+    fn inline(&mut self, inline: &Inline, port: &Port) -> Result<SlotId, LowerErrorKind> {
+        let node = self
+            .context
+            .registry
+            .get(&inline.node)
+            .ok_or_else(|| LowerErrorKind::UnknownNode(inline.node.clone()))?;
+        if inline.inputs.keys().any(|name| !node.inputs.iter().any(|input| input.name == name)) {
+            return Err(LowerErrorKind::UnknownInput);
+        }
+        let mut inputs = Vec::with_capacity(node.inputs.len());
+        for input in node.inputs {
+            let words = match inline.inputs.get(input.name) {
+                Some(value) => value.words(&input.ty).ok_or(LowerErrorKind::Value { expected: input.ty.name })?,
+                None => input.default.words(),
+            };
+            if input.card == Card::One && words.len() != input.ty.words as usize {
+                return Err(LowerErrorKind::NotOne);
+            }
+            inputs.push(self.builder.constant_words(input.ty, words));
+        }
+        let made = self.builder.node(node, &inputs).map_err(LowerErrorKind::Build)?;
+        let first = *made.first().ok_or_else(|| LowerErrorKind::UnknownNode(inline.node.clone()))?;
+        self.realized(first, port).map_err(LowerErrorKind::Build)
     }
 
     /// `slot` as `port` takes it: a value of a type the port does not take
