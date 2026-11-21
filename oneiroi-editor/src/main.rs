@@ -659,7 +659,7 @@ impl Editor {
         );
         let mut rows = column![row![title, space::horizontal(), notes].align_y(Center)].spacing(6);
         if let Some(kind @ (NodeKind::Input | NodeKind::Output)) = self.kind(node) {
-            return container(scrollable(self.ports_of_graph(node, &kind, rows))).height(260).into();
+            return container(scrollable(self.ports_of_graph(node, &kind, rows).padding(iced::Padding::ZERO.right(14)))).height(260).into();
         }
         for port in &view.inputs {
             let key = (node, port.name.clone());
@@ -749,7 +749,7 @@ impl Editor {
                 rows = rows.push(self.note_fields(node, Side::Output, port));
             }
         }
-        container(scrollable(rows)).height(260).into()
+        container(scrollable(rows.padding(iced::Padding::ZERO.right(14)))).height(260).into()
     }
 
     /// The parameters or the outputs of the graph, as the input or output
