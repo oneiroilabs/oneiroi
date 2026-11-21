@@ -155,5 +155,29 @@ runs fewer nodes than before.
    benchmark measures this.
 2. **Show flattening.** Draw a list of lists going into a list differently on
    the link, and offer an explicit Flatten node.
-3. **A ramp for the scale of a sweep**, instead of a curve whose `x` and `y`
-   mean "along" and "scale".
+
+## Curves drawn at an input
+
+The scale of a sweep is a curve whose `x` is how far along the spine and whose
+`y` is how big the profile is there.
+
+**Curve 2D** draws such a curve:
+- **Points:** you drag the points in a small editor, click to add one and right
+  click to take one out. They are taken from left to right.
+- **Interpolation:** how it gets from point to point.
+  - `smooth` goes through every point without overshooting between two of
+    them (the slopes of Fritsch and Carlson).
+  - `linear` goes straight.
+  - `nurbs` is pulled by the points as the control points of a NURBS curve.
+- **Result:** one NURBS curve like any other, so it fits wherever a curve goes.
+
+A curve can also be drawn **right at an input** which takes one, without a
+node in the graph:
+- **Graph:** such an input holds an *inline node* (`Input::Inline`), a node
+  only it sees, with values for the inputs of that node.
+- **Lowering:** the inline node is built like any other node, and its first
+  output goes into the input. A curve drawn inline and the same Curve 2D node
+  linked give the same result, under the same key.
+- **Editor:** the inspector shows the curve editor wherever a curve is drawn,
+  and a "draw a curve" button on a free input which takes one.
+- **Fence:** the pointed scales of the spears and the caps are drawn this way.
