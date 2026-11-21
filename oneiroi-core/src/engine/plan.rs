@@ -2,14 +2,18 @@
 
 use std::sync::{Arc, atomic::Ordering};
 
-use crate::engine::{
-    Engine,
-    Executor,
-    Instance,
-    Step,
-    constant::Statics,
-    keys::Keys,
-    planner::{Planner, Scope},
+use crate::{
+    engine::{
+        Engine,
+        Executor,
+        Instance,
+        Step,
+        constant::Statics,
+        keys::Keys,
+        planner::{Planner, Scope},
+    },
+    key::ContentKey,
+    program::ProgramId,
 };
 
 impl<E: Executor> Engine<E> {
@@ -85,13 +89,31 @@ impl<E: Executor> Engine<E> {
         for key in instance.held.drain(..) {
             self.store.release(key, &instance.alive);
         }
-        let id = instance.program;
+        self.derive_keys(instance);
+        let planned = self.work.len();
+        let wanted = self.ensure_outputs(instance);
+        self.settle(instance, planned, wanted);
+        self.publish(instance);
+    }
+
+    /// The constant part of program `id`, found the first time it is asked
+    /// for.
+    fn statics(&mut self, id: ProgramId) -> &Statics {
         let index = id.0 as usize;
         if self.statics.len() <= index {
             self.statics.resize_with(index + 1, || None);
         }
         let program = self.programs.get(id);
-        let statics = self.statics[index].get_or_insert_with(|| Statics::new(&self.programs, program));
+        self.statics[index].get_or_insert_with(|| Statics::new(&self.programs, program))
+    }
+
+    /// The keys of `instance` for the parameters it has now: all of them the
+    /// first time, then only what depends on a parameter which changed.
+    fn derive_keys(&mut self, instance: &mut Instance) {
+        let id = instance.program;
+        self.statics(id);
+        let statics = self.statics[id.0 as usize].as_ref().unwrap();
+        let program = self.programs.get(id);
         match &mut instance.keys {
             None => {
                 let keys = Keys::of_instance(statics, &self.programs, program, &instance.param_keys);
@@ -108,10 +130,17 @@ impl<E: Executor> Engine<E> {
             Some(_) => {}
         }
         instance.changed.clear();
-        let keys = instance.keys.as_ref().unwrap();
         if !statics.pinned && !self.to_pin.contains(&id) {
             self.to_pin.push(id);
         }
+    }
+
+    /// Plans whatever the outputs of `instance` need which is not there,
+    /// and returns their keys, with those of what comes along with them.
+    fn ensure_outputs(&mut self, instance: &Instance) -> Vec<ContentKey> {
+        let program = self.programs.get(instance.program);
+        let statics = self.statics[instance.program.0 as usize].as_ref().unwrap();
+        let keys = instance.keys.as_ref().unwrap();
         // Once its edge is pinned, the constant part is there for sure.
         let constant = statics.pinned.then_some(statics.dynamic.as_slice());
         let scope = Scope {
@@ -137,7 +166,6 @@ impl<E: Executor> Engine<E> {
                 &all
             }
         };
-        let planned = planner.work.len();
         let mut wanted = Vec::new();
         for output in outputs.iter().map(|index| &program.outputs[*index]) {
             // What comes along with it is needed by whoever reads it.
@@ -149,11 +177,16 @@ impl<E: Executor> Engine<E> {
                 wanted.push(keys.slots[slot.0 as usize]);
             }
         }
-        // All of it is there, and the constant part is pinned: it is
-        // settled until a parameter changes.
-        let settled = constant.is_some()
-            && planner.work.len() == planned
-            && wanted.iter().all(|key| self.store.contains(*key));
+        wanted
+    }
+
+    /// Holds the outputs of `instance` once all of them are there and its
+    /// constant part is pinned: until a parameter changes, planning it is
+    /// skipped. `planned` is how much work there was before its outputs.
+    fn settle(&mut self, instance: &mut Instance, planned: usize, wanted: Vec<ContentKey>) {
+        let pinned = self.statics[instance.program.0 as usize].as_ref().unwrap().pinned;
+        let settled =
+            pinned && self.work.len() == planned && wanted.iter().all(|key| self.store.contains(*key));
         if settled {
             for key in &wanted {
                 self.store.hold(*key, &instance.alive);
@@ -162,7 +195,6 @@ impl<E: Executor> Engine<E> {
             // hold, and is planned again every time, which costs nothing.
             instance.held = wanted;
         }
-        self.publish(instance);
     }
 
     /// The second half of [`Engine::evaluate`]: runs everything which was
