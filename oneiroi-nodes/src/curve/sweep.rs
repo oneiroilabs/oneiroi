@@ -627,9 +627,10 @@ impl<P: Profile> Ports<P> {
         wgsl: P::SWEEP_WGSL,
         outputs: &[GpuOutput {
             entry: "sweep_patch",
-            len: |inputs| {
-                let pieces = P::pieces(inputs.len(1));
-                inputs.len(0) * slots(inputs) * pieces + inputs.group_count(0) * 2 * caps::<P>(inputs)
+            // No curve has no caps either.
+            len: |inputs| match inputs.len(0) {
+                0 => 0,
+                segments => segments * slots(inputs) * P::pieces(inputs.len(1)) + 2 * caps::<P>(inputs),
             },
             words: None,
         }],
@@ -678,7 +679,9 @@ impl<P: Profile> Ports<P> {
         // Whether there are caps, where the curves of the spine start, and
         // how long the curves of the scale are.
         reads: &[2, 4, 5],
-        accepts: None,
+        // An empty curve sweeps out nothing, not even caps, which only the
+        // CPU leaves out.
+        accepts: Some(|inputs| inputs.groups(0).iter().all(|curve| !curve.is_empty())),
         examples: P::SWEEP_EXAMPLES,
         stages: &[],
     }];
@@ -737,6 +740,10 @@ fn sweep<P: Profile>(inputs: &Inputs<'_>, outputs: &mut Outputs) {
     let scales = inputs.groups(3);
     let slots = slots(inputs);
     let (patches, offsets) = crate::parallel::per_group(inputs.groups(0), |group, curve| {
+        // No curve, no surface, and no caps of it either.
+        if curve.is_empty() {
+            return Vec::new();
+        }
         let scale = match scale.is_empty() {
             true => &[][..],
             false => &scale[scales[group.min(scales.len() - 1)].clone()],

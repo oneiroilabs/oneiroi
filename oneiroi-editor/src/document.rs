@@ -2200,7 +2200,7 @@ mod tests {
         let view = document.view(used).unwrap();
         assert_eq!(view.doc, "A circle of its own.");
         assert_eq!((view.inputs[0].label.as_str(), view.inputs[0].doc.as_str()), ("Size", "How large."));
-        assert_eq!(view.outputs[0].doc, "The circles.");
+        assert_eq!(view.outputs[0].doc, "The circle.");
 
         // And a note on the node in this graph wins over all of them.
         document.set_note(used, Side::Input, "radius", Note {
