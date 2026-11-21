@@ -124,6 +124,11 @@ pub struct TypeInfo {
     /// What those words are, which is how a value is written by hand.
     pub scalar: Scalar,
     pub layout: Layout,
+    /// Whether an element is only a part of a shape, and a whole group of
+    /// them is one: the segments of a curve, the patches of a surface. One
+    /// such shape is all elements of a value without offsets, and a list of
+    /// them comes with offsets, a group for each. See [`Items`].
+    pub parts: bool,
     /// For instances of a shape: the type of the shape they refer to. A
     /// value of such a type is a table of [`InstanceRow`]s, and the shape
     /// comes along with it as a value of its own, see
@@ -186,6 +191,8 @@ pub trait DataType: Pod {
     const WGSL: &'static str;
     const SCALAR: Scalar;
     const LAYOUT: Layout;
+    /// See [`TypeInfo::parts`].
+    const PARTS: bool = false;
 
     const INFO: TypeInfo = {
         assert!(
@@ -202,6 +209,7 @@ pub trait DataType: Pod {
             words: (size_of::<Self>() / 4) as u32,
             scalar: Self::SCALAR,
             layout: Self::LAYOUT,
+            parts: Self::PARTS,
             prototype: None,
         }
     };

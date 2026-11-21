@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    node::{Card, GenericNode, Groups, NodeDef, NodeRegistry, PortType},
+    node::{Card, GenericNode, Groups, Items, NodeDef, NodeRegistry, PortType},
     store::ContentKey,
     types::{DataType, TypeInfo},
 };
@@ -140,6 +140,12 @@ impl Program {
 
     pub fn slot(&self, slot: SlotId) -> &SlotDecl {
         &self.slots[slot.0 as usize]
+    }
+
+    /// How many things `slot` holds, see [`Card::items`].
+    pub fn items(&self, slot: SlotId) -> Items {
+        let slot = self.slot(slot);
+        slot.card.items(&slot.ty)
     }
 
     /// The parameters somebody sets, without the hidden ones.
@@ -396,6 +402,12 @@ impl ProgramBuilder {
         SlotId(self.slots.len() as u32 - 1)
     }
 
+    /// How many things `slot` holds, see [`Card::items`].
+    pub fn items(&self, slot: SlotId) -> Items {
+        let slot = self.slot(slot);
+        slot.card.items(&slot.ty)
+    }
+
     fn slot_mut(&mut self, slot: SlotId) -> &mut SlotDecl {
         &mut self.slots[slot.0 as usize]
     }
@@ -510,7 +522,7 @@ impl ProgramBuilder {
         }
         for (port, slot) in node.inputs.iter().zip(inputs) {
             self.check(node.id, port.name, port.ty, *slot)?;
-            if !self.slot(*slot).card.fits(port.card) {
+            if !self.items(*slot).fits(port.card.items(&port.ty)) {
                 return Err(BuildError::Card {
                     target: node.id.into(),
                     port: port.name.into(),
@@ -555,8 +567,11 @@ impl ProgramBuilder {
             };
             let prototype = port.prototype.map(|input| self.shape_of(inputs[input]));
             let total = port.ty.prototype.and_then(|_| totals.next().copied());
+            // A single thing in is a single thing out.
+            let single = port.follows != 0 && port.followed().all(|input| self.items(inputs[input]) == Items::One);
             let decl = self.slot_mut(*slot);
             decl.card = match (port.card, groups) {
+                _ if single => Card::One,
                 (Card::Grouped, None) => Card::Many,
                 (card, _) => card,
             };
@@ -691,7 +706,7 @@ impl ProgramBuilder {
             let slot = match arg {
                 Some(slot) => {
                     self.check(&program.name, &param.name, ty, slot)?;
-                    if !self.slot(slot).card.fits(program.slot(param.slot).card) {
+                    if !self.items(slot).fits(program.items(param.slot)) {
                         return Err(BuildError::Card {
                             target: program.name.clone(),
                             port: param.name.clone(),

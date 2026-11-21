@@ -347,6 +347,34 @@ fn in_{name}_group_of(index: u32) -> u32 {{
             at + 2,
         );
     }
+    // An input which is not grouped is a single group of everything, read
+    // the same way: a kernel which makes a thing for each group of a list
+    // makes the one thing of a single one with no change.
+    for (index, port) in node.inputs.iter().enumerate() {
+        if hidden.contains(&index) || port.ty.prototype.is_some() {
+            continue;
+        }
+        let name = port.name;
+        let _ = writeln!(
+            out,
+            "fn in_{name}_groups() -> u32 {{
+    return 1u;
+}}
+
+fn in_{name}_start(group: u32) -> u32 {{
+    return 0u;
+}}
+
+fn in_{name}_end(group: u32) -> u32 {{
+    return in_{name}_len();
+}}
+
+fn in_{name}_group_of(index: u32) -> u32 {{
+    return 0u;
+}}
+"
+        );
+    }
 
     // The shapes instances refer to, and their groups, read like inputs.
     for (place, index) in prototypes.iter().enumerate() {

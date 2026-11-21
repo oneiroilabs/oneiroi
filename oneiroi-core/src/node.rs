@@ -26,6 +26,9 @@ pub struct PortDecl {
     /// Only meaningful for inputs: the names of what a single `u32` can
     /// say, by its value. See [`PortDecl::choices`].
     pub choices: &'static [&'static str],
+    /// Only meaningful for outputs: the inputs which say how many things
+    /// it has, a bit for each. See [`PortDecl::follows`].
+    pub follows: u32,
 }
 
 impl PortDecl {
@@ -39,6 +42,7 @@ impl PortDecl {
             groups: Groups::Own,
             prototype: None,
             choices: &[],
+            follows: 0,
         }
     }
 
@@ -52,6 +56,7 @@ impl PortDecl {
             groups: Groups::Own,
             prototype: None,
             choices: &[],
+            follows: 0,
         }
     }
 
@@ -106,26 +111,78 @@ impl PortDecl {
     pub const fn grouped_like(mut self, input: usize) -> Self {
         self.card = Card::Grouped;
         self.groups = Groups::Like(input);
+        self.follows = 1 << input;
         self
+    }
+
+    /// An output with a thing for every thing of the inputs `inputs`: a
+    /// single one if each of them is a single one, else a list. A kernel
+    /// which makes one for each of a list serves a single one that way too.
+    pub const fn follows(mut self, inputs: &[usize]) -> Self {
+        let mut index = 0;
+        while index < inputs.len() {
+            self.follows |= 1 << inputs[index];
+            index += 1;
+        }
+        self
+    }
+
+    /// The inputs this output follows, see [`PortDecl::follows`].
+    pub fn followed(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..32).filter(|input| self.follows & (1 << input) != 0)
     }
 }
 
-/// How many elements a port carries.
+/// How a port hands its elements to the kernel. What that means to whoever
+/// links it depends on the type, see [`Card::items`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Card {
-    /// A single one. Only something which is single can be linked to it.
+    /// A single element.
     One,
-    /// A list. Groups of what is linked to it are dropped.
+    /// A list of elements, without offsets. Groups of what is linked to it
+    /// are dropped.
     Many,
-    /// A list of groups: elements with the offsets where every group starts.
+    /// Elements with the offsets where every group starts.
     Grouped,
 }
 
+/// How many things a port or a value carries, as whoever links it sees it:
+/// elements of most types, but whole groups of a type whose elements are
+/// only parts, like the segments of a curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Items {
+    One,
+    Many,
+    /// A list of lists: elements in groups, like the frames along each of
+    /// several curves.
+    Nested,
+}
+
 impl Card {
-    /// Whether a value of this card can go where `to` is wanted.
-    pub fn fits(self, to: Card) -> bool {
-        to != Card::One || self == Card::One
+    /// What a port of this card carries of `ty`. All elements of a type
+    /// made of parts are one shape, and only offsets make them several.
+    pub fn items(self, ty: &TypeInfo) -> Items {
+        self.items_of(ty.parts)
+    }
+
+    /// [`Card::items`] by whether the type is made of parts. A port which
+    /// takes any type of a trait is seen as one of shapes.
+    pub fn items_of(self, parts: bool) -> Items {
+        match (self, parts) {
+            (Card::One, _) | (Card::Many, true) => Items::One,
+            (Card::Many, false) | (Card::Grouped, true) => Items::Many,
+            (Card::Grouped, false) => Items::Nested,
+        }
+    }
+}
+
+impl Items {
+    /// Whether a value of these items can go where `to` are wanted. One
+    /// thing is a list of one, and a list of lists goes into a list as
+    /// all of its elements, but only one thing goes where one is wanted.
+    pub fn fits(self, to: Items) -> bool {
+        to != Items::One || self == Items::One
     }
 }
 
@@ -376,10 +433,14 @@ impl<'a> Outputs<'a> {
 
     /// Where the groups of a grouped output start, and where the last one
     /// ends. Leaving them out makes a single group of everything.
+    ///
+    /// An output which is not grouped is a single shape, and has no offsets
+    /// to set: they are left out. One kernel can serve a node which makes
+    /// one and a node which makes many that way.
     pub fn set_groups(&mut self, index: usize, offsets: &[u32]) {
-        let hidden = hidden_output(self.ports, index)
-            .expect("only an output which is grouped on its own has offsets to set");
-        self.words(hidden, offsets.len()).copy_from_slice(offsets);
+        if let Some(hidden) = hidden_output(self.ports, index) {
+            self.words(hidden, offsets.len()).copy_from_slice(offsets);
+        }
     }
 
     /// Makes everything written readable, and leaves what was not written
