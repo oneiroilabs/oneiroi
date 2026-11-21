@@ -106,3 +106,19 @@ expression: edits
     submits: 1
     downloads: 0
     buffers: 0
+- scenario: "scene, a few move"
+  counters:
+    gpu_nodes: 9
+    cpu_nodes: 0
+    dispatches: 6
+    submits: 1
+    downloads: 0
+    buffers: 0
+- scenario: "scene, all move"
+  counters:
+    gpu_nodes: 9
+    cpu_nodes: 0
+    dispatches: 6
+    submits: 1
+    downloads: 0
+    buffers: 0

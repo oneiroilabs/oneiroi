@@ -9,7 +9,7 @@ use oneiroi_core::{
     types::DataType,
 };
 use oneiroi_nodes::{
-    curve::{ControlPoint, NURBS, NURBS_BATCH, SAMPLE_CURVE_BATCH, TRANSLATE, swept, swept_batch},
+    curve::{ControlPoint, NURBS, NURBS_BATCH, SAMPLE_CURVE, SAMPLE_CURVE_BATCH, TRANSLATE, swept, swept_batch},
     instance::{INSTANCE, REALIZE},
     primitive::CIRCLE,
     surface,
@@ -44,13 +44,57 @@ pub struct Scenario {
     pub sizes: &'static [Size],
     /// A few of the sizes, for a quick look.
     pub quick: &'static [Size],
-    /// The program for a size, and any it calls, which go into `programs`.
-    pub build: fn(&NodeRegistry, &mut ProgramSet, Size) -> Program,
-    /// The parameters before the first edit.
-    pub setup: fn(Size) -> Params,
-    /// What edit `n` sets, starting at 1. Every edit sets values which
-    /// were not there before, so that nothing is found in the store.
-    pub edit: fn(Size, u32) -> Params,
+    pub work: Work,
+}
+
+/// What a scenario runs, and what an edit changes of it.
+pub enum Work {
+    /// One graph with one instance.
+    One {
+        /// The program for a size, and any it calls, which go into
+        /// `programs`.
+        build: fn(&NodeRegistry, &mut ProgramSet, Size) -> Program,
+        /// The parameters before the first edit.
+        setup: fn(Size) -> Params,
+        /// What edit `n` sets, starting at 1. Every edit sets values which
+        /// were not there before, so that nothing is found in the store.
+        edit: fn(Size, u32) -> Params,
+    },
+    /// Many graphs with many instances each, all evaluated together, as a
+    /// host does with what it shows.
+    Scene {
+        build: fn(&NodeRegistry, &mut ProgramSet, Size) -> Scene,
+        /// What edit `n` sets on which instances, by their index.
+        edit: fn(Size, u32) -> Vec<(usize, Params)>,
+    },
+}
+
+/// The graphs of a scene and its instances.
+pub struct Scene {
+    pub graphs: Vec<Program>,
+    /// Of which graph each instance is, by its index, and its parameters.
+    pub instances: Vec<(usize, Params)>,
+}
+
+impl Work {
+    /// The scene a scenario runs at `size`.
+    pub fn scene(&self, registry: &NodeRegistry, programs: &mut ProgramSet, size: Size) -> Scene {
+        match self {
+            Work::One { build, setup, .. } => Scene {
+                graphs: vec![build(registry, programs, size)],
+                instances: vec![(0, setup(size))],
+            },
+            Work::Scene { build, .. } => build(registry, programs, size),
+        }
+    }
+
+    /// What edit `n` sets, by the index of the instance.
+    pub fn edit(&self, size: Size, n: u32) -> Vec<(usize, Params)> {
+        match self {
+            Work::One { edit, .. } => vec![(0, edit(size, n))],
+            Work::Scene { edit, .. } => edit(size, n),
+        }
+    }
 }
 
 const CURVES: &[Size] = &[
@@ -85,219 +129,367 @@ pub const SCENARIOS: &[Scenario] = &[
         about: "NURBS Curve, the control points move",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_, _, _| {
-            let mut b = ProgramBuilder::new("nurbs");
-            let segments = curves(&mut b);
-            b.output("segments", segments);
-            b.finish()
+        work: Work::One {
+            build: |_, _, _| {
+                let mut b = ProgramBuilder::new("nurbs");
+                let segments = curves(&mut b);
+                b.output("segments", segments);
+                b.finish()
+            },
+            setup: points,
+            edit: moved_points,
         },
-        setup: points,
-        edit: moved_points,
     },
     Scenario {
         name: "translate",
         about: "Translate Curve of the curves, the offset changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_, _, _| {
-            let mut b = ProgramBuilder::new("translate");
-            let segments = curves(&mut b);
-            let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
-            let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
-            b.output("segments", moved);
-            b.finish()
+        work: Work::One {
+            build: |_, _, _| {
+                let mut b = ProgramBuilder::new("translate");
+                let segments = curves(&mut b);
+                let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
+                let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
+                b.output("segments", moved);
+                b.finish()
+            },
+            setup: points,
+            edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
         },
-        setup: points,
-        edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
     },
     Scenario {
         name: "sweep circle",
         about: "Sweep of a circle along the curves, the radius changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("sweep circle");
-            let spine = curves(&mut b);
-            let radius = b.param_one_of::<f32>("radius", 0.1);
-            let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = swept_batch(&mut b, registry, spine, circle).unwrap();
-            b.output("surface", surface);
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("sweep circle");
+                let spine = curves(&mut b);
+                let radius = b.param_one_of::<f32>("radius", 0.1);
+                let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+                let surface = swept_batch(&mut b, registry, spine, circle).unwrap();
+                b.output("surface", surface);
+                b.finish()
+            },
+            setup: points,
+            edit: |_, n| vec![("radius", words(&[0.1 + n as f32 * 1e-6]))],
         },
-        setup: points,
-        edit: |_, n| vec![("radius", words(&[0.1 + n as f32 * 1e-6]))],
     },
     Scenario {
         name: "sweep square",
         about: "Sweep of a square curve along the curves, the square changes",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("sweep square");
-            let spine = curves(&mut b);
-            let square = b.param_words("square", ControlPoint::INFO, &[]);
-            let knots = b.constant(&square_knots());
-            let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
-            let surface = swept_batch(&mut b, registry, spine, profile).unwrap();
-            b.output("surface", surface);
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("sweep square");
+                let spine = curves(&mut b);
+                let square = b.param_words("square", ControlPoint::INFO, &[]);
+                let knots = b.constant(&square_knots());
+                let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
+                let surface = swept_batch(&mut b, registry, spine, profile).unwrap();
+                b.output("surface", surface);
+                b.finish()
+            },
+            setup: |size| {
+                let mut params = points(size);
+                params.push(("square", words(&square(1.0))));
+                params
+            },
+            edit: |_, n| vec![("square", words(&square(1.0 + n as f32 * 1e-6)))],
         },
-        setup: |size| {
-            let mut params = points(size);
-            params.push(("square", words(&square(1.0))));
-            params
-        },
-        edit: |_, n| vec![("square", words(&square(1.0 + n as f32 * 1e-6)))],
     },
     Scenario {
         name: "sample",
         about: "Sample Curve, 64 frames per curve at places which change",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |_, _, _| {
-            let mut b = ProgramBuilder::new("sample");
-            let segments = curves(&mut b);
-            let count = b.constant::<u32>(&[SAMPLES as u32]);
-            let spacing = b.constant::<f32>(&[0.0]);
-            let t = b.param::<f32>("t", &[]);
-            let frames = b.node(&SAMPLE_CURVE_BATCH, &[segments, count, spacing, t]).unwrap()[0];
-            b.output("frames", frames);
-            b.finish()
+        work: Work::One {
+            build: |_, _, _| {
+                let mut b = ProgramBuilder::new("sample");
+                let segments = curves(&mut b);
+                let count = b.constant::<u32>(&[SAMPLES as u32]);
+                let spacing = b.constant::<f32>(&[0.0]);
+                let t = b.param::<f32>("t", &[]);
+                let frames = b.node(&SAMPLE_CURVE_BATCH, &[segments, count, spacing, t]).unwrap()[0];
+                b.output("frames", frames);
+                b.finish()
+            },
+            setup: |size| {
+                let mut params = points(size);
+                params.push(("t", words(&places(0))));
+                params
+            },
+            edit: |_, n| vec![("t", words(&places(n)))],
         },
-        setup: |size| {
-            let mut params = points(size);
-            params.push(("t", words(&places(0))));
-            params
-        },
-        edit: |_, n| vec![("t", words(&places(n)))],
     },
     Scenario {
         name: "chain",
         about: "NURBS, Translate, a Sweep of a circle and Sample Curve, the control points move",
         sizes: CURVES,
         quick: CURVES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("chain");
-            let segments = curves(&mut b);
-            let offset = b.constant(&[Vec3::new(0.0, 1.0, 0.0)]);
-            let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
-            let radius = b.constant::<f32>(&[0.1]);
-            let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let surface = swept_batch(&mut b, registry, moved, circle).unwrap();
-            let count = b.constant::<u32>(&[SAMPLES as u32]);
-            let spacing = b.constant::<f32>(&[0.0]);
-            let t = b.constant::<f32>(&[]);
-            let frames = b.node(&SAMPLE_CURVE_BATCH, &[moved, count, spacing, t]).unwrap()[0];
-            b.output("surface", surface);
-            b.output("frames", frames);
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("chain");
+                let segments = curves(&mut b);
+                let offset = b.constant(&[Vec3::new(0.0, 1.0, 0.0)]);
+                let moved = b.node(&TRANSLATE, &[segments, offset]).unwrap()[0];
+                let radius = b.constant::<f32>(&[0.1]);
+                let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+                let surface = swept_batch(&mut b, registry, moved, circle).unwrap();
+                let count = b.constant::<u32>(&[SAMPLES as u32]);
+                let spacing = b.constant::<f32>(&[0.0]);
+                let t = b.constant::<f32>(&[]);
+                let frames = b.node(&SAMPLE_CURVE_BATCH, &[moved, count, spacing, t]).unwrap()[0];
+                b.output("surface", surface);
+                b.output("frames", frames);
+                b.finish()
+            },
+            setup: points,
+            edit: moved_points,
         },
-        setup: points,
-        edit: moved_points,
     },
     Scenario {
         name: "instances",
         about: "A ring of 10 patches put onto 64 frames along every curve by reference, the control points move",
         sizes: INSTANCES,
         quick: INSTANCES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("instances");
-            let placed = rings_on_curves(&mut b, registry);
-            b.output("instances", placed);
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("instances");
+                let placed = rings_on_curves(&mut b, registry);
+                b.output("instances", placed);
+                b.finish()
+            },
+            setup: points,
+            edit: moved_points,
         },
-        setup: points,
-        edit: moved_points,
     },
     Scenario {
         name: "instances realized",
         about: "The rings of `instances`, copied to where each one is",
         sizes: INSTANCES,
         quick: INSTANCES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("instances realized");
-            let placed = rings_on_curves(&mut b, registry);
-            let copies = b.generic(registry, &REALIZE, &[placed]).unwrap()[0];
-            b.output("copies", copies);
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("instances realized");
+                let placed = rings_on_curves(&mut b, registry);
+                let copies = b.generic(registry, &REALIZE, &[placed]).unwrap()[0];
+                b.output("copies", copies);
+                b.finish()
+            },
+            setup: points,
+            edit: moved_points,
         },
-        setup: points,
-        edit: moved_points,
     },
     Scenario {
         name: "for each",
         about: "NURBS and Translate for every curve on its own, the control points of one curve move",
         sizes: ELEMENTS,
         quick: ELEMENTS_QUICK,
-        build: |_, programs, _| {
-            let mut b = ProgramBuilder::new("for each");
-            let moved = each_curve(&mut b, programs);
-            b.output("segments", moved);
-            b.finish()
+        work: Work::One {
+            build: |_, programs, _| {
+                let mut b = ProgramBuilder::new("for each");
+                let moved = each_curve(&mut b, programs);
+                b.output("segments", moved);
+                b.finish()
+            },
+            setup: points,
+            edit: moved_points,
         },
-        setup: points,
-        edit: moved_points,
     },
     Scenario {
         name: "for each, all",
         about: "NURBS and Translate for every curve on its own, the offset of all of them changes",
         sizes: ELEMENTS,
         quick: ELEMENTS_QUICK,
-        build: |_, programs, _| {
-            let mut b = ProgramBuilder::new("for each, all");
-            let moved = each_curve(&mut b, programs);
-            b.output("segments", moved);
-            b.finish()
+        work: Work::One {
+            build: |_, programs, _| {
+                let mut b = ProgramBuilder::new("for each, all");
+                let moved = each_curve(&mut b, programs);
+                b.output("segments", moved);
+                b.finish()
+            },
+            setup: points,
+            edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
         },
-        setup: points,
-        edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
     },
     Scenario {
         name: "mesh",
         about: "Mesh of a swept circle, the tolerance changes",
         sizes: MESHES,
         quick: MESHES_QUICK,
-        build: |registry, _, _| {
-            let mut b = ProgramBuilder::new("mesh");
-            let spine = curves(&mut b);
-            let radius = b.constant::<f32>(&[0.1]);
-            let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
-            let swept = swept_batch(&mut b, registry, spine, circle).unwrap();
-            let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
-            for (name, slot) in surface::mesh(&mut b, registry, swept, tolerance).unwrap() {
-                b.output(name, slot);
-            }
-            b.finish()
+        work: Work::One {
+            build: |registry, _, _| {
+                let mut b = ProgramBuilder::new("mesh");
+                let spine = curves(&mut b);
+                let radius = b.constant::<f32>(&[0.1]);
+                let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+                let swept = swept_batch(&mut b, registry, spine, circle).unwrap();
+                let tolerance = b.param_one_of::<f32>("tolerance", 0.01);
+                for (name, slot) in surface::mesh(&mut b, registry, swept, tolerance).unwrap() {
+                    b.output(name, slot);
+                }
+                b.finish()
+            },
+            setup: points,
+            edit: |_, n| vec![("tolerance", words(&[0.01 * (1.0 + n as f32 * 1e-6)]))],
         },
-        setup: points,
-        edit: |_, n| vec![("tolerance", words(&[0.01 * (1.0 + n as f32 * 1e-6)]))],
     },
     Scenario {
         name: "fence",
         about: "The picket fence of the editor, with as many pickets, gets a little longer",
         sizes: FENCES,
         quick: FENCES_QUICK,
-        build: |registry, programs, _| {
-            let context = oneiroi_graph::Context {
-                registry,
-                programs,
-                graphs: &std::collections::HashMap::new(),
-            };
-            oneiroi_graph::examples::fence().lower(context).expect("the fence is a whole graph")
+        work: Work::One {
+            build: |registry, programs, _| {
+                let context = oneiroi_graph::Context {
+                    registry,
+                    programs,
+                    graphs: &std::collections::HashMap::new(),
+                };
+                oneiroi_graph::examples::fence().lower(context).expect("the fence is a whole graph")
+            },
+            setup: |size| vec![("length", words(&[fence_length(size)])), ("spacing", words(&[PICKETS]))],
+            edit: |size, n| vec![("length", words(&[longer(fence_length(size), n)]))],
         },
-        setup: |size| vec![("length", words(&[fence_length(size)])), ("spacing", words(&[PICKETS]))],
-        edit: |size, n| vec![("length", words(&[longer(fence_length(size), n)]))],
     },
     Scenario {
         name: "mostly constant",
         about: "As many curves of constant points, each moved by a constant and an output of its own, and one curve moved by the only parameter, which changes",
         sizes: PARTS,
         quick: PARTS_QUICK,
-        build: |_, _, size| mostly_constant(size),
-        setup: |_| vec![("offset", words(&[Vec3::ZERO]))],
-        edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
+        work: Work::One {
+            build: |_, _, size| mostly_constant(size),
+            setup: |_| vec![("offset", words(&[Vec3::ZERO]))],
+            edit: |_, n| vec![("offset", words(&[Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))],
+        },
+    },
+    Scenario {
+        name: "scene, a few move",
+        about: "Instances of different graphs, all evaluated together, of which 4 move with every edit. A size is the instances × the graphs. Every graph makes a curve out of the points of its instance and moves it, then sweeps, samples or moves it again in its own way",
+        sizes: SCENES,
+        quick: SCENES_QUICK,
+        work: Work::Scene {
+            build: scene,
+            edit: |size, n| {
+                let instances = size.curves as usize;
+                (0..MOVED.min(instances))
+                    .map(|k| {
+                        let index = (n as usize * 7 + k * instances / MOVED) % instances;
+                        (index, offset(index as u32, n))
+                    })
+                    .collect()
+            },
+        },
+    },
+    Scenario {
+        name: "scene, all move",
+        about: "The instances of `scene, a few move`, all of which move with every edit",
+        sizes: SCENES,
+        quick: SCENES_QUICK,
+        work: Work::Scene {
+            build: scene,
+            edit: |size, n| (0..size.curves as usize).map(|index| (index, offset(index as u32, n))).collect(),
+        },
     },
 ];
+
+/// For the scenes, as many instances × as many graphs.
+const SCENES: &[Size] = &[
+    Size::new(16, 4),
+    Size::new(256, 16),
+    Size::new(4096, 16),
+    Size::new(4096, 64),
+    Size::new(16384, 64),
+];
+const SCENES_QUICK: &[Size] = &[Size::new(256, 16), Size::new(4096, 16)];
+/// How many instances an edit of `scene, a few move` moves.
+const MOVED: usize = 4;
+/// How many control points the curve of every instance of a scene has.
+const SCENE_POINTS: u32 = 8;
+
+/// `size.points` graphs, and `size.curves` instances of them, one after
+/// the other.
+fn scene(registry: &NodeRegistry, _: &mut ProgramSet, size: Size) -> Scene {
+    let graphs = (0..size.points).map(|graph| scene_graph(registry, graph)).collect();
+    let instances = (0..size.curves)
+        .map(|index| {
+            let points: Vec<ControlPoint> = (0..SCENE_POINTS)
+                .map(|i| {
+                    let t = i as f32;
+                    let phase = index as f32 * 0.37;
+                    ControlPoint::at(Vec3::new(t, (t * 0.9 + phase).sin(), (t * 1.3 + phase).cos()))
+                })
+                .collect();
+            let params = vec![("points", words(&points)), ("offset", words(&[place(index)]))];
+            ((index % size.points) as usize, params)
+        })
+        .collect();
+    Scene { graphs, instances }
+}
+
+/// Where instance `index` of a scene is, on a grid.
+fn place(index: u32) -> Vec3 {
+    Vec3::new((index % 128) as f32 * 10.0, 0.0, (index / 128) as f32 * 10.0)
+}
+
+/// The offset of instance `index` of a scene for edit `n`, which no edit
+/// had before.
+fn offset(index: u32, n: u32) -> Params {
+    vec![("offset", words(&[place(index) + Vec3::new(n as f32 * 1e-3, 0.0, 0.0)]))]
+}
+
+/// Graph `index` of a scene: a NURBS curve of the points of its instance,
+/// moved by its offset, and then one of four things, each with constants
+/// of its own. All graphs share the kinds of nodes, none of them shares a
+/// value.
+fn scene_graph(registry: &NodeRegistry, index: u32) -> Program {
+    let mut b = ProgramBuilder::new(format!("scene graph {index}"));
+    let points = b.param::<ControlPoint>("points", &[]);
+    let knots = b.constant::<f32>(&[]);
+    let curve = b.node(&NURBS, &[points, knots]).unwrap()[0];
+    let offset = b.param_one_of::<Vec3>("offset", Vec3::ZERO);
+    let moved = b.node(&TRANSLATE, &[curve, offset]).unwrap()[0];
+    let own = index as f32 * 1e-3;
+    match index % 4 {
+        // A tube.
+        0 => {
+            let radius = b.constant::<f32>(&[0.05 + own]);
+            let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+            let surface = swept(&mut b, registry, moved, circle).unwrap();
+            b.output("surface", surface);
+        }
+        // Frames along it.
+        1 => {
+            let count = b.constant::<u32>(&[8 + index]);
+            let spacing = b.constant::<f32>(&[0.0]);
+            let t = b.constant::<f32>(&[]);
+            let frames = b.node(&SAMPLE_CURVE, &[moved, count, spacing, t]).unwrap()[0];
+            b.output("frames", frames);
+        }
+        // A tube a little above it.
+        2 => {
+            let up = b.constant(&[Vec3::new(0.0, 1.0 + own, 0.0)]);
+            let lifted = b.node(&TRANSLATE, &[moved, up]).unwrap()[0];
+            let radius = b.constant::<f32>(&[0.1]);
+            let circle = b.node(&CIRCLE, &[radius]).unwrap()[0];
+            let surface = swept(&mut b, registry, lifted, circle).unwrap();
+            b.output("surface", surface);
+        }
+        // A square tube.
+        _ => {
+            let square = b.constant(&square(1.0 + own));
+            let knots = b.constant(&square_knots());
+            let profile = b.node(&NURBS, &[square, knots]).unwrap()[0];
+            let surface = swept(&mut b, registry, moved, profile).unwrap();
+            b.output("surface", surface);
+        }
+    }
+    b.finish()
+}
 
 /// For [`mostly_constant`], as many constant curves. The largest is the
 /// size of a scene, not of a node.

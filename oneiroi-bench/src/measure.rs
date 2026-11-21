@@ -233,18 +233,26 @@ fn micros(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1e6
 }
 
-/// Sets up `scenario` at `size` and evaluates it once, ready for edits.
-pub fn prepare<E: Measured>(engine: &mut Engine<E>, scenario: &Scenario, size: Size) -> Instance {
+/// Sets up `scenario` at `size` and evaluates it once, ready for edits:
+/// an instance of each of its graphs.
+pub fn prepare<E: Measured>(engine: &mut Engine<E>, scenario: &Scenario, size: Size) -> Vec<Instance> {
     let mut registry = oneiroi_core::node::NodeRegistry::new();
     oneiroi_nodes::register(&mut registry);
-    let program = (scenario.build)(&registry, engine.programs_mut(), size);
-    let id = engine.add_program(program);
-    let mut instance = engine.instantiate(id);
-    set(engine, &mut instance, &(scenario.setup)(size));
-    engine.evaluate([&mut instance]);
+    let scene = scenario.work.scene(&registry, engine.programs_mut(), size);
+    let ids: Vec<_> = scene.graphs.into_iter().map(|graph| engine.add_program(graph)).collect();
+    let mut instances: Vec<Instance> = scene
+        .instances
+        .iter()
+        .map(|(graph, params)| {
+            let mut instance = engine.instantiate(ids[*graph]);
+            set(engine, &mut instance, params);
+            instance
+        })
+        .collect();
+    engine.evaluate(instances.iter_mut());
     engine.executor_mut().wait();
     engine.end_frame(0);
-    instance
+    instances
 }
 
 /// One edit, timed.
@@ -258,13 +266,17 @@ struct Run {
     phases: [Duration; PHASES.len()],
 }
 
-fn edit<E: Measured>(engine: &mut Engine<E>, instance: &mut Instance, params: &Params) -> Run {
+/// Sets what an edit changes, and evaluates every instance, as a host
+/// does every frame with all it shows.
+fn edit<E: Measured>(engine: &mut Engine<E>, instances: &mut [Instance], edits: &[(usize, Params)]) -> Run {
     // Whatever was timed before belongs to no edit.
     engine.executor_mut().phases();
     let start = Instant::now();
-    set(engine, instance, params);
+    for (index, params) in edits {
+        set(engine, &mut instances[*index], params);
+    }
     let set_done = Instant::now();
-    engine.plan([&mut *instance]);
+    engine.plan(instances.iter_mut());
     let planned = Instant::now();
     engine.flush();
     let executed = Instant::now();
@@ -301,16 +313,16 @@ pub fn measure<E: Measured>(
     size: Size,
     settings: Settings,
 ) -> Measurement {
-    let mut instance = prepare(&mut engine, scenario, size);
+    let mut instances = prepare(&mut engine, scenario, size);
     let mut n = 0;
     let next = |n: &mut u32| {
         *n += 1;
-        (scenario.edit)(size, *n)
+        scenario.work.edit(size, *n)
     };
 
     for _ in 0..settings.warmup {
         let params = next(&mut n);
-        edit(&mut engine, &mut instance, &params);
+        edit(&mut engine, &mut instances, &params);
     }
 
     let mut runs = Vec::new();
@@ -326,7 +338,7 @@ pub fn measure<E: Measured>(
         }
         let params = next(&mut n);
         let before = engine.executor().stats();
-        runs.push(edit(&mut engine, &mut instance, &params));
+        runs.push(edit(&mut engine, &mut instances, &params));
         if counters.is_none() {
             counters = before.zip(engine.executor().stats()).map(|(a, b)| Counters::between(a, b));
         }
@@ -338,7 +350,7 @@ pub fn measure<E: Measured>(
         engine.executor_mut().device_time();
         for _ in 0..settings.profiled {
             let params = next(&mut n);
-            edit(&mut engine, &mut instance, &params);
+            edit(&mut engine, &mut instances, &params);
             if let Some(time) = engine.executor_mut().device_time() {
                 device.push(micros(time));
             }
