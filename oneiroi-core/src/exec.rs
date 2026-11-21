@@ -6,10 +6,9 @@
 //! the [`Executor`], which is the part that can run on the CPU or the GPU.
 
 use std::{
-    collections::HashMap,
     fmt,
     sync::{
-        Arc, Weak,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -434,20 +433,9 @@ struct Planner<'a> {
     defaults: bool,
     work: &'a mut Vec<Step>,
     scheduled: &'a mut KeySet,
-    /// What instances which are followed were last planned with.
-    sources: &'a HashMap<u64, Source>,
 }
 
-impl<'a> Planner<'a> {
-    /// The instance parameter `param` of `scope` follows, and the slot of
-    /// it, if it follows one which is planned and which gave it `key`.
-    fn followed(&self, scope: &Scope<'_>, param: usize, key: ContentKey) -> Option<(&'a Source, SlotId)> {
-        let link = scope.links.iter().find(|link| link.param == param)?;
-        let source = self.sources.get(&link.source)?;
-        let keys = source.keys.as_ref()?;
-        (keys.slots[link.slot.0 as usize] == key).then_some((source, link.slot))
-    }
-
+impl Planner<'_> {
     /// Makes sure `slot` is in the store once the planned work has run.
     /// Nothing is planned for values which are stored already, so only the
     /// part of the graph behind a missing value is ever visited.
@@ -463,16 +451,16 @@ impl<'a> Planner<'a> {
         match &scope.program.slot(slot).source {
             SlotSource::Param(index) => match scope.caller {
                 Some((caller, args)) => self.ensure(caller, args[*index as usize]),
-                None => match self.followed(scope, *index as usize, key) {
+                None => match followed(scope.links, *index as usize, key) {
                     // What it follows is planned as it was when it was last
                     // planned itself.
-                    Some((source, slot)) => {
+                    Some((program, keys, links, slot)) => {
                         let scope = Scope {
-                            program: self.programs.get(source.program),
-                            keys: source.keys.as_ref().unwrap(),
+                            program: self.programs.get(program),
+                            keys: &keys,
                             caller: None,
                             constant: None,
-                            links: &source.links,
+                            links: &links,
                         };
                         self.ensure(&scope, slot);
                     }
@@ -550,41 +538,31 @@ impl<'a> Planner<'a> {
     }
 }
 
-/// The order to plan `instances` in: every one after those of them it
-/// follows. Links never form a cycle.
-fn followed_first(instances: &[&mut Instance]) -> Vec<usize> {
-    let by_id: HashMap<u64, usize> = instances
-        .iter()
-        .enumerate()
-        .map(|(index, instance)| (instance.id, index))
-        .collect();
-    let mut order = Vec::with_capacity(instances.len());
-    let mut placed = vec![false; instances.len()];
-    for start in 0..instances.len() {
-        // Depth first, by hand: an instance, and how many of its links are
-        // looked at.
-        let mut stack = vec![(start, 0)];
-        while let Some((at, done)) = stack.pop() {
-            if placed[at] {
-                continue;
-            }
-            let next = instances[at].links[done..]
-                .iter()
-                .position(|link| by_id.get(&link.source).is_some_and(|source| !placed[*source]));
-            match next {
-                Some(offset) => {
-                    let source = by_id[&instances[at].links[done + offset].source];
-                    stack.push((at, done + offset + 1));
-                    stack.push((source, 0));
-                }
-                None => {
-                    placed[at] = true;
-                    order.push(at);
-                }
-            }
+/// What parameter `param` follows, if one of `links` is for it and gave it
+/// `key`: the program of the instance it follows, the keys and the links
+/// that one was last planned with, and the slot it follows of it.
+fn followed(links: &[Link], param: usize, key: ContentKey) -> Option<(ProgramId, Arc<Keys>, Vec<Link>, SlotId)> {
+    let link = links.iter().find(|link| link.param == param)?;
+    let snapshot = link.source.snapshot.lock().unwrap();
+    let (program, keys) = (snapshot.program?, snapshot.keys.clone()?);
+    (keys.slots[link.slot.0 as usize] == key).then(|| (program, keys, snapshot.links.clone(), link.slot))
+}
+
+/// Whether `instance` is `other`, or follows it, directly or through others.
+fn follows(instance: &Arc<Published>, other: &Arc<Published>) -> bool {
+    let mut next = vec![instance.clone()];
+    let mut seen: Vec<*const Published> = Vec::new();
+    while let Some(at) = next.pop() {
+        if Arc::ptr_eq(&at, other) {
+            return true;
         }
+        if seen.contains(&Arc::as_ptr(&at)) {
+            continue;
+        }
+        seen.push(Arc::as_ptr(&at));
+        next.extend(at.snapshot.lock().unwrap().links.iter().map(|link| link.source.clone()));
     }
-    order
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,32 +636,45 @@ impl fmt::Display for LinkError {
 impl std::error::Error for LinkError {}
 
 /// A parameter of an instance which follows a slot of another instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 struct Link {
     param: usize,
-    /// The id of the instance it follows.
-    source: u64,
+    /// What the instance it follows was last planned with.
+    source: Arc<Published>,
     /// The slot it follows, in the program of that instance.
     slot: SlotId,
+    /// The version of `source` it was set from last.
+    seen: u64,
 }
 
-/// An instance which others follow, as it was last planned: enough to plan
-/// what they follow of it even when it is not planned itself, or gone.
-struct Source {
-    program: ProgramId,
+/// What an instance was last planned with, shared with whoever follows it:
+/// enough to plan what they follow of it even when it is not planned
+/// itself, or gone. Whoever follows it only looks inside when its version
+/// changed.
+#[derive(Default)]
+struct Published {
+    /// Counts up every time it is planned with other keys.
+    version: AtomicU64,
+    /// The last plan it was given to, see [`Engine::plans`].
+    listed: AtomicU64,
+    /// The last plan it was planned in.
+    planned: AtomicU64,
+    snapshot: Mutex<Snapshot>,
+}
+
+#[derive(Default)]
+struct Snapshot {
     /// `None` until it is planned for the first time.
+    program: Option<ProgramId>,
     keys: Option<Arc<Keys>>,
+    /// The parameters it follows itself: a chain of them is followed to
+    /// its start, and never goes round in a circle.
     links: Vec<Link>,
     /// Holds its parameters, for as long as somebody follows it.
     holder: Arc<()>,
     /// The parameters it holds.
     params: Vec<ContentKey>,
-    /// Whoever follows it. Once all of them are gone, so is this.
-    followers: Vec<Weak<()>>,
 }
-
-/// Gives every instance an id of its own, across all engines.
-static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 /// One use of a program with its own parameter values.
 ///
@@ -691,8 +682,9 @@ static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 /// are shared with every other instance that asks for the same thing.
 pub struct Instance {
     program: ProgramId,
-    /// What links to it are known by.
-    id: u64,
+    /// What it was last planned with, for whoever follows it. Only made
+    /// once something does, so that the others never look at it.
+    published: OnceLock<Arc<Published>>,
     /// The values of the parameters are in the store, held there for as
     /// long as this lives.
     param_keys: Vec<ContentKey>,
@@ -728,10 +720,9 @@ pub struct Engine<E: Executor = CpuExecutor> {
     statics: Vec<Option<Statics>>,
     /// The programs whose constant edge is pinned once what was planned ran.
     to_pin: Vec<ProgramId>,
-    /// The instances others follow, by their id.
-    sources: HashMap<u64, Source>,
-    /// What each instance which follows others follows, by its id.
-    follows: HashMap<u64, (Weak<()>, Vec<u64>)>,
+    /// How many times anything was planned: whether an instance was given
+    /// to a plan, or planned in it, is known by this.
+    plans: u64,
 }
 
 impl Default for Engine {
@@ -755,8 +746,7 @@ impl<E: Executor> Engine<E> {
             overflows: Vec::new(),
             statics: Vec::new(),
             to_pin: Vec::new(),
-            sources: HashMap::new(),
-            follows: HashMap::new(),
+            plans: 0,
         }
     }
 
@@ -800,7 +790,7 @@ impl<E: Executor> Engine<E> {
             .collect();
         Instance {
             program,
-            id: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            published: OnceLock::new(),
             param_keys,
             alive: std::sync::Arc::new(()),
             keys: None,
@@ -889,22 +879,49 @@ impl<E: Executor> Engine<E> {
     pub fn plan<'a>(&mut self, instances: impl IntoIterator<Item = &'a mut Instance>) -> usize {
         let before = self.work.len();
         self.forget_removed();
-        let mut instances: Vec<&mut Instance> = instances.into_iter().collect();
-        if instances.iter().any(|instance| !instance.links.is_empty()) {
-            // Whatever is followed first, so that what follows it sees what
-            // it is now.
-            for index in followed_first(&instances) {
-                self.plan_one(instances[index]);
+        self.plans += 1;
+        let now = self.plans;
+        // What follows others comes after everything else, so that it sees
+        // what it follows as it is now.
+        let mut follow = Vec::new();
+        for instance in instances {
+            if let Some(published) = instance.published.get() {
+                published.listed.store(now, Ordering::Relaxed);
             }
-        } else {
-            for instance in instances.iter_mut() {
-                self.plan_one(instance);
+            match instance.links.is_empty() {
+                true => self.plan_one(instance, now),
+                false => follow.push(instance),
             }
+        }
+        // And each after what it follows, if that is planned here too.
+        while !follow.is_empty() {
+            let waiting = follow.len();
+            let mut index = 0;
+            while index < follow.len() {
+                let ready = follow[index].links.iter().all(|link| {
+                    link.source.listed.load(Ordering::Relaxed) != now
+                        || link.source.planned.load(Ordering::Relaxed) == now
+                });
+                if ready {
+                    let instance = follow.swap_remove(index);
+                    self.plan_one(instance, now);
+                } else {
+                    index += 1;
+                }
+            }
+            assert!(follow.len() < waiting, "links never go round in a circle");
         }
         self.work.len() - before
     }
 
-    fn plan_one(&mut self, instance: &mut Instance) {
+    fn plan_one(&mut self, instance: &mut Instance, now: u64) {
+        self.plan_instance(instance);
+        if let Some(published) = instance.published.get() {
+            published.planned.store(now, Ordering::Relaxed);
+        }
+    }
+
+    fn plan_instance(&mut self, instance: &mut Instance) {
         self.follow(instance);
         // Nothing changed, and its outputs are held: there is nothing to
         // plan, and nothing to keep from being evicted.
@@ -927,13 +944,14 @@ impl<E: Executor> Engine<E> {
                 instance.keys = Some(Arc::new(keys));
             }
             // Only copied while somebody who follows it still has them.
-            Some(keys) => Arc::make_mut(keys).update(
+            Some(keys) if !instance.changed.is_empty() => Arc::make_mut(keys).update(
                 statics,
                 &self.programs,
                 program,
                 &instance.param_keys,
                 &instance.changed,
             ),
+            Some(_) => {}
         }
         instance.changed.clear();
         let keys = instance.keys.as_ref().unwrap();
@@ -955,7 +973,6 @@ impl<E: Executor> Engine<E> {
             defaults: true,
             work: &mut self.work,
             scheduled: &mut self.scheduled,
-            sources: &self.sources,
         };
         // Once the edge is pinned, the constant outputs are there.
         let all: Vec<usize>;
@@ -995,12 +1012,18 @@ impl<E: Executor> Engine<E> {
     }
 
     /// Sets the parameters of `instance` which follow others to what they
-    /// follow is now.
+    /// follow is now. Only looks at those which were planned anew since.
     fn follow(&mut self, instance: &mut Instance) {
-        for link in &instance.links {
-            let Some(keys) = self.sources.get(&link.source).and_then(|source| source.keys.as_ref()) else {
+        for link in &mut instance.links {
+            let version = link.source.version.load(Ordering::Acquire);
+            if version == link.seen {
+                continue;
+            }
+            let snapshot = link.source.snapshot.lock().unwrap();
+            let Some(keys) = &snapshot.keys else {
                 continue;
             };
+            link.seen = version;
             let key = keys.slots[link.slot.0 as usize];
             if instance.param_keys[link.param] != key {
                 self.store.release(instance.param_keys[link.param], &instance.alive);
@@ -1016,28 +1039,39 @@ impl<E: Executor> Engine<E> {
     /// parameters are held for them, so that what they follow can be made
     /// again even once it is gone.
     fn publish(&mut self, instance: &Instance) {
-        let Some(source) = self.sources.get_mut(&instance.id) else {
+        // Nobody follows it.
+        let Some(published) = instance.published.get().filter(|published| Arc::strong_count(published) > 1) else {
             return;
         };
-        source.keys = instance.keys.clone();
-        source.links.clone_from(&instance.links);
-        if source.params != instance.param_keys {
+        let mut snapshot = published.snapshot.lock().unwrap();
+        let same = match (&snapshot.keys, &instance.keys) {
+            (Some(published), Some(keys)) => Arc::ptr_eq(published, keys),
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        snapshot.program = Some(instance.program);
+        snapshot.keys = instance.keys.clone();
+        if snapshot.params != instance.param_keys {
             for key in &instance.param_keys {
-                self.store.hold(*key, &source.holder);
+                self.store.hold(*key, &snapshot.holder);
             }
-            for key in &source.params {
+            for key in &snapshot.params {
                 if !instance.param_keys.contains(key) {
-                    self.store.release(*key, &source.holder);
+                    self.store.release(*key, &snapshot.holder);
                 }
             }
-            source.params.clone_from(&instance.param_keys);
+            snapshot.params.clone_from(&instance.param_keys);
         }
+        published.version.fetch_add(1, Ordering::Release);
     }
 
     /// Lets parameter `param` of `target` follow output `output` of
     /// `source`: whenever that changes, so does the parameter, without the
-    /// value being copied. Both are planned in the same
-    /// [`Engine::evaluate`], `source` first, or `source` on its own before.
+    /// value being copied. Planned in the same [`Engine::plan`], `source`
+    /// goes first. Planned on its own, `target` follows what `source` was
+    /// planned with last, even once it is gone.
     ///
     /// What comes along with the parameter, like its groups, follows what
     /// comes along with the output. An output without groups is a single
@@ -1067,7 +1101,11 @@ impl<E: Executor> Engine<E> {
                 found: found.name,
             });
         }
-        if source.id == target.id || self.depends_on(source.id, target.id) {
+        let (followed, following) = (
+            source.published.get_or_init(Arc::default).clone(),
+            target.published.get_or_init(Arc::default).clone(),
+        );
+        if follows(&followed, &following) {
             return Err(LinkError::Cycle);
         }
 
@@ -1097,8 +1135,10 @@ impl<E: Executor> Engine<E> {
             match slot {
                 Some(slot) => target.links.push(Link {
                     param,
-                    source: source.id,
+                    source: followed.clone(),
                     slot,
+                    // Seen nothing of it yet.
+                    seen: u64::MAX,
                 }),
                 None => {
                     let name = self.programs.get(target.program).params[param].name.clone();
@@ -1106,23 +1146,7 @@ impl<E: Executor> Engine<E> {
                 }
             }
         }
-        let follows = self
-            .follows
-            .entry(target.id)
-            .or_insert_with(|| (Arc::downgrade(&target.alive), Vec::new()));
-        if !follows.1.contains(&source.id) {
-            follows.1.push(source.id);
-        }
-
-        let followed = self.sources.entry(source.id).or_insert_with(|| Source {
-            program: source.program,
-            keys: None,
-            links: Vec::new(),
-            holder: Arc::new(()),
-            params: Vec::new(),
-            followers: Vec::new(),
-        });
-        followed.followers.push(Arc::downgrade(&target.alive));
+        following.snapshot.lock().unwrap().links.clone_from(&target.links);
         if source.keys.is_some() {
             self.publish(source);
         }
@@ -1148,7 +1172,7 @@ impl<E: Executor> Engine<E> {
     }
 
     fn unlink_params(&mut self, target: &mut Instance, params: &[usize]) {
-        if target.links.is_empty() {
+        if !target.links.iter().any(|link| params.contains(&link.param)) {
             return;
         }
         for link in target.links.iter().filter(|link| params.contains(&link.param)) {
@@ -1156,28 +1180,9 @@ impl<E: Executor> Engine<E> {
             self.store.hold(target.param_keys[link.param], &target.alive);
         }
         target.links.retain(|link| !params.contains(&link.param));
-        let sources: Vec<u64> = target.links.iter().map(|link| link.source).collect();
-        if let Some((_, follows)) = self.follows.get_mut(&target.id) {
-            follows.retain(|source| sources.contains(source));
+        if let Some(published) = target.published.get() {
+            published.snapshot.lock().unwrap().links.clone_from(&target.links);
         }
-    }
-
-    /// Whether `instance` follows `other`, directly or through others.
-    fn depends_on(&self, instance: u64, other: u64) -> bool {
-        let mut seen = vec![instance];
-        let mut next = vec![instance];
-        while let Some(at) = next.pop() {
-            for source in self.follows.get(&at).map_or(&[][..], |(_, sources)| sources) {
-                if *source == other {
-                    return true;
-                }
-                if !seen.contains(source) {
-                    seen.push(*source);
-                    next.push(*source);
-                }
-            }
-        }
-        false
     }
 
     /// The second half of [`Engine::evaluate`]: runs everything which was
@@ -1262,7 +1267,6 @@ impl<E: Executor> Engine<E> {
             defaults: true,
             work: &mut self.work,
             scheduled: &mut self.scheduled,
-            sources: &self.sources,
         };
         for slot in &needed {
             planner.ensure(&scope, *slot);
@@ -1292,26 +1296,6 @@ impl<E: Executor> Engine<E> {
                 *statics = None;
             }
         }
-    }
-
-    /// Lets go of the instances nobody follows anymore, and of what they
-    /// held for them.
-    fn forget_unfollowed(&mut self) {
-        if self.sources.is_empty() {
-            return;
-        }
-        self.follows.retain(|_, (alive, _)| alive.strong_count() > 0);
-        let store = &mut self.store;
-        self.sources.retain(|_, source| {
-            source.followers.retain(|follower| follower.strong_count() > 0);
-            let followed = !source.followers.is_empty();
-            if !followed {
-                for key in &source.params {
-                    store.release(*key, &source.holder);
-                }
-            }
-            followed
-        });
     }
 
     /// The calls for each element which had to leave elements out during
@@ -1423,7 +1407,6 @@ impl<E: Executor> Engine<E> {
                 defaults: false,
                 work: &mut steps,
                 scheduled: &mut scheduled,
-                sources: &self.sources,
             };
             for (parts, output) in parts.iter_mut().zip(&program.outputs) {
                 planner.ensure(&scope, output.slot);
@@ -1528,7 +1511,6 @@ impl<E: Executor> Engine<E> {
     /// the store fits into `budget_words`.
     pub fn end_frame(&mut self, budget_words: u64) {
         self.forget_removed();
-        self.forget_unfollowed();
         self.store.evict(budget_words);
         self.store.end_frame();
     }
@@ -1886,7 +1868,6 @@ mod tests {
         engine.end_frame(0);
         engine.end_frame(0);
         engine.end_frame(0);
-        assert!(engine.sources.is_empty());
         // Only the edges of the constant parts are left.
         let edges: usize = engine.statics.iter().flatten().map(|statics| statics.edge.len()).sum();
         assert_eq!(engine.store().len(), edges);
