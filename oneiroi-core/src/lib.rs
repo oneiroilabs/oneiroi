@@ -10,7 +10,6 @@
 pub mod exec;
 pub mod node;
 pub mod program;
-pub mod property;
 pub mod shader;
 pub mod store;
 pub mod types;
