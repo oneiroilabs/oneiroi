@@ -237,7 +237,7 @@ fn micros(duration: Duration) -> f64 {
 pub fn prepare<E: Measured>(engine: &mut Engine<E>, scenario: &Scenario, size: Size) -> Instance {
     let mut registry = oneiroi_core::node::NodeRegistry::new();
     oneiroi_nodes::register(&mut registry);
-    let program = (scenario.build)(&registry, engine.programs_mut());
+    let program = (scenario.build)(&registry, engine.programs_mut(), size);
     let id = engine.add_program(program);
     let mut instance = engine.instantiate(id);
     set(engine, &mut instance, &(scenario.setup)(size));
