@@ -421,6 +421,110 @@ fn words_to_value(words: &[u32], scalar: Scalar) -> Value {
     }
 }
 
+fn value_words(value: &Value) -> Vec<u32> {
+    match value {
+        Value::F32(values) => bytemuck::cast_slice(values).to_vec(),
+        Value::U32(values) => values.clone(),
+    }
+}
+
+/// One number of every element of a type, as it is typed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Component {
+    /// What it is called: the axis of a vector, the name of a field, both
+    /// for a vector which is one of many fields, or nothing at all for a
+    /// plain number.
+    pub label: String,
+    /// `x`, `y`, `z` or `w` if it is one of a vector.
+    pub axis: Option<&'static str>,
+    pub scalar: Scalar,
+}
+
+const AXES: [&str; 4] = ["x", "y", "z", "w"];
+
+/// The numbers an element of `ty` is typed in as, one after the other like
+/// its words. None for a type which is not typed in but linked, like a
+/// curve: one with matrices, padding or more than four numbers.
+pub fn components(ty: &TypeInfo) -> Option<Vec<Component>> {
+    use oneiroi_core::types::{FieldType, Layout};
+
+    fn of(field: &'static str, ty: FieldType, vectors: usize, out: &mut Vec<Component>) -> Option<()> {
+        let axes = match ty {
+            FieldType::F32 | FieldType::U32 => 0,
+            FieldType::Vec2 => 2,
+            FieldType::Vec3 => 3,
+            FieldType::Vec4 => 4,
+            FieldType::Mat4 | FieldType::Pad(_) | FieldType::Struct { .. } => return None,
+        };
+        let scalar = match ty {
+            FieldType::U32 => Scalar::U32,
+            _ => Scalar::F32,
+        };
+        if axes == 0 {
+            out.push(Component { label: field.into(), axis: None, scalar });
+        }
+        for axis in &AXES[..axes] {
+            // A vector among other vectors needs the name of its field.
+            let label = match vectors > 1 {
+                true => format!("{field} {axis}"),
+                false => axis.to_string(),
+            };
+            out.push(Component { label, axis: Some(axis), scalar });
+        }
+        Some(())
+    }
+
+    let mut out = Vec::new();
+    match ty.layout {
+        Layout::Value(field) => of("", field, 1, &mut out)?,
+        Layout::Struct(fields) => {
+            let is_vector = |field: &&oneiroi_core::types::Field| {
+                matches!(field.ty, FieldType::Vec2 | FieldType::Vec3 | FieldType::Vec4)
+            };
+            let vectors = fields.iter().filter(is_vector).count();
+            for field in fields {
+                of(field.name, field.ty, vectors, &mut out)?;
+            }
+        }
+    }
+    (out.len() <= 4 && out.len() == ty.words as usize).then_some(out)
+}
+
+/// A number as it is shown to edit.
+fn format_word(word: u32, scalar: Scalar) -> String {
+    match scalar {
+        Scalar::F32 => f32::from_bits(word).to_string(),
+        Scalar::U32 => word.to_string(),
+    }
+}
+
+/// A number typed in, as its word: a finite one for a float.
+pub fn parse_word(text: &str, scalar: Scalar) -> Option<u32> {
+    let text = text.trim();
+    match scalar {
+        Scalar::F32 => text.parse::<f32>().ok().filter(|value| value.is_finite()).map(f32::to_bits),
+        Scalar::U32 => text.parse::<u32>().ok(),
+    }
+}
+
+/// What can be typed in, number by number: an input of a node, or what a
+/// parameter of the open graph starts at.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Target {
+    Input(NodeId, String),
+    Param(String),
+}
+
+/// What a [`Target`] holds, to type in number by number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fields {
+    pub components: Vec<Component>,
+    /// The text of every component of every element.
+    pub elements: Vec<Vec<String>>,
+    /// Whether it takes a single element, or as many as there are.
+    pub card: Card,
+}
+
 /// Something which can be added to a graph as a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteEntry {
@@ -848,10 +952,7 @@ impl Document {
             None => source.as_ref().map_or(PinType::Unknown, |port| port.ty),
         };
         let default = match (&param.default, &ty) {
-            (Some(value), _) => match value {
-                Value::F32(values) => bytemuck::cast_slice(values).to_vec(),
-                Value::U32(values) => values.clone(),
-            },
+            (Some(value), _) => value_words(value),
             (None, _) => source.as_ref().map(|port| port.default.clone()).unwrap_or_default(),
         };
         PortView {
@@ -1277,6 +1378,9 @@ impl Document {
         let PinType::Exact(ty) = port.ty else {
             return Some(("needs a link".into(), false));
         };
+        if components(&ty).is_none() {
+            return Some(("needs a link".into(), false));
+        }
         Some(match stored {
             Some(Input::Value(value)) => (format_value(value), true),
             _ => (format_value(&words_to_value(&port.default, ty.scalar)), true),
@@ -1304,19 +1408,139 @@ impl Document {
         let PinType::Exact(ty) = view.ty else {
             return false;
         };
-        let Some(value) = parse_value(text, ty.scalar) else {
-            return false;
-        };
-        let len = match &value {
-            Value::F32(values) => values.len(),
-            Value::U32(values) => values.len(),
-        };
-        if len % ty.words as usize != 0 || (view.card == Card::One && len != ty.words as usize) {
+        match parse_value(text, ty.scalar) {
+            Some(value) => self.store(&Target::Param(name.into()), ty, view.card, &value_words(&value)),
+            None => false,
+        }
+    }
+
+    /// The type, card and words of what `target` holds, if numbers can be
+    /// typed into it: nothing is linked to it and its type is known.
+    fn typed(&self, target: &Target) -> Option<(TypeInfo, Card, Vec<u32>)> {
+        match target {
+            Target::Input(node, input) => {
+                let view = self.view(*node)?;
+                let port = view.inputs.into_iter().find(|port| port.name == *input)?;
+                let PinType::Exact(ty) = port.ty else {
+                    return None;
+                };
+                let words = match self.graph().node(*node)?.inputs.get(input) {
+                    Some(Input::Link { .. }) => return None,
+                    Some(Input::Value(value)) => value_words(value),
+                    None => port.default,
+                };
+                Some((ty, port.card, words))
+            }
+            Target::Param(name) => {
+                let view = self.param_view(self.graph().param(name)?);
+                let PinType::Exact(ty) = view.ty else {
+                    return None;
+                };
+                Some((ty, view.card, view.default))
+            }
+        }
+    }
+
+    /// Makes `target` hold `words`. Returns whether they are elements of its
+    /// type, and as many as it takes.
+    fn store(&mut self, target: &Target, ty: TypeInfo, card: Card, words: &[u32]) -> bool {
+        if words.len() % ty.words as usize != 0 || (card == Card::One && words.len() != ty.words as usize) {
             return false;
         }
-        self.graph_mut().param_mut(name).unwrap().default = Some(value);
+        let value = words_to_value(words, ty.scalar);
+        match target {
+            Target::Input(node, input) => {
+                if self.graph_mut().set(*node, input, value).is_err() {
+                    return false;
+                }
+            }
+            Target::Param(name) => match self.graph_mut().param_mut(name) {
+                Some(param) => param.default = Some(value),
+                None => return false,
+            },
+        }
         self.refresh();
         true
+    }
+
+    /// What `target` holds, number by number, if it can be typed into.
+    /// An input to pick from is picked from instead.
+    pub fn fields(&self, target: &Target) -> Option<Fields> {
+        let (ty, card, words) = self.typed(target)?;
+        if let Target::Input(node, input) = target
+            && self.input_choice(*node, input).is_some()
+        {
+            return None;
+        }
+        let components = components(&ty)?;
+        let elements = words
+            .chunks_exact(components.len())
+            .map(|element| element.iter().zip(&components).map(|(word, c)| format_word(*word, c.scalar)).collect())
+            .collect();
+        Some(Fields { components, elements, card })
+    }
+
+    /// Sets one number of one element of `target` from text. Returns
+    /// whether the text is a number of its kind.
+    pub fn set_component(&mut self, target: &Target, element: usize, component: usize, text: &str) -> bool {
+        let Some((ty, card, mut words)) = self.typed(target) else {
+            return false;
+        };
+        let Some(components) = components(&ty) else {
+            return false;
+        };
+        let (Some(c), Some(word)) = (components.get(component), words.get_mut(element * components.len() + component))
+        else {
+            return false;
+        };
+        match parse_word(text, c.scalar) {
+            Some(parsed) if parsed == *word => true,
+            Some(parsed) => {
+                *word = parsed;
+                self.store(target, ty, card, &words)
+            }
+            None => false,
+        }
+    }
+
+    /// Adds an element to the end of a list: a copy of the last one, or of
+    /// the first of its default, or zeros.
+    pub fn add_element(&mut self, target: &Target) -> bool {
+        let Some((ty, card, mut words)) = self.typed(target) else {
+            return false;
+        };
+        let size = ty.words as usize;
+        if card == Card::One {
+            return false;
+        }
+        let default = match target {
+            Target::Input(node, input) => self
+                .view(*node)
+                .and_then(|view| view.inputs.into_iter().find(|port| port.name == *input))
+                .map(|port| port.default)
+                .unwrap_or_default(),
+            Target::Param(_) => Vec::new(),
+        };
+        let element = match (words.len() >= size, default.len() >= size) {
+            (true, _) => words[words.len() - size..].to_vec(),
+            (false, true) => default[..size].to_vec(),
+            (false, false) => vec![0; size],
+        };
+        words.extend(element);
+        self.store(target, ty, card, &words)
+    }
+
+    /// Takes element `element` out of a list.
+    pub fn remove_element(&mut self, target: &Target, element: usize) -> bool {
+        let Some((ty, card, mut words)) = self.typed(target) else {
+            return false;
+        };
+        let size = ty.words as usize;
+        if card == Card::One || (element + 1) * size > words.len() {
+            return false;
+        }
+        words.drain(element * size..(element + 1) * size);
+        self.store(target, ty, card, &words)
     }
 
     /// What an input to pick from can say, and which of it is picked, if
@@ -1361,21 +1585,10 @@ impl Document {
         let Some((ty, card)) = port else {
             return false;
         };
-        let Some(value) = parse_value(text, ty.scalar) else {
-            return false;
-        };
-        let len = match &value {
-            Value::F32(values) => values.len(),
-            Value::U32(values) => values.len(),
-        };
-        if len % ty.words as usize != 0 || (card == Card::One && len != ty.words as usize) {
-            return false;
+        match parse_value(text, ty.scalar) {
+            Some(value) => self.store(&Target::Input(node, input.into()), ty, card, &value_words(&value)),
+            None => false,
         }
-        if self.graph_mut().set(node, input, value).is_err() {
-            return false;
-        }
-        self.refresh();
-        true
     }
 
     /// The engine and what it shows, for the preview to run and draw.
@@ -2347,6 +2560,68 @@ mod tests {
         assert_eq!(drawn.iter().filter(|drawn| drawn.shape.is_some()).count(), 5);
         assert!(document.set_param("length", "6"));
         assert!(matches!(document.shown(), Shown::Drawn(_)));
+    }
+
+    #[test]
+    fn types_are_typed_in_by_their_components() {
+        use oneiroi_nodes::curve::{ControlPoint, EvaluatedFrame, nurbs::CubicNurbsSegmentCache};
+
+        let labels = |ty: &TypeInfo| components(ty).map(|all| all.into_iter().map(|c| c.label).collect::<Vec<_>>());
+        assert_eq!(labels(&f32::INFO), Some(vec![String::new()]));
+        assert_eq!(labels(&Vec3::INFO), Some(vec!["x".into(), "y".into(), "z".into()]));
+        assert_eq!(components(&u32::INFO).unwrap()[0].scalar, Scalar::U32);
+        // The position is the only vector, so its numbers are its axes.
+        assert_eq!(labels(&ControlPoint::INFO), Some(vec!["x".into(), "y".into(), "z".into(), "weight".into()]));
+        // Curves and frames are linked, never typed in.
+        assert_eq!(labels(&CubicNurbsSegmentCache::INFO), None);
+        assert_eq!(labels(&EvaluatedFrame::INFO), None);
+    }
+
+    #[test]
+    fn inputs_are_typed_in_number_by_number() {
+        let (mut document, [curve, circle, sweep, mesh]) = meshed();
+        let points = Target::Input(curve, "points".into());
+        let fields = document.fields(&points).unwrap();
+        assert_eq!((fields.components.len(), fields.card), (4, Card::Grouped));
+        let count = fields.elements.len();
+        assert!(count >= 4);
+
+        // One number of one point.
+        assert!(document.set_component(&points, 1, 2, "0.75"));
+        assert_eq!(document.fields(&points).unwrap().elements[1][2], "0.75");
+        let generation = document.session().lock().unwrap().generation();
+        assert!(!document.set_component(&points, 1, 2, "0.7x"));
+        assert!(!document.set_component(&points, 1, 2, "inf"));
+        assert!(!document.set_component(&points, count, 0, "1"));
+        // The same number again changes nothing.
+        assert!(document.set_component(&points, 1, 2, "0.750"));
+        assert_eq!(document.session().lock().unwrap().generation(), generation);
+
+        // Another point copies the last one, and points can be taken out.
+        assert!(document.add_element(&points));
+        let elements = document.fields(&points).unwrap().elements;
+        assert_eq!((elements.len(), &elements[count]), (count + 1, &elements[count - 1]));
+        assert!(document.remove_element(&points, 1));
+        assert!(!document.remove_element(&points, count));
+        assert_eq!(document.fields(&points).unwrap().elements.len(), count);
+
+        // A single number has no elements to add or take out.
+        let tolerance = Target::Input(mesh, "tolerance".into());
+        assert_eq!(document.fields(&tolerance).unwrap().card, Card::One);
+        assert!(!document.add_element(&tolerance) && !document.remove_element(&tolerance, 0));
+        assert!(document.set_component(&tolerance, 0, 0, "0.05"));
+        assert_eq!(document.input_text(mesh, "tolerance").unwrap().0, "0.05");
+
+        // A link is no number, and a choice is picked instead.
+        assert!(document.fields(&Target::Input(sweep, "spine".into())).is_none());
+        assert!(document.fields(&Target::Input(sweep, "ends".into())).is_none());
+
+        // What a parameter starts at is typed in the same way.
+        assert!(document.toggle_exposed(circle, "radius"));
+        let radius = Target::Param("radius".into());
+        assert_eq!(document.fields(&radius).unwrap().elements, [["0.25"]]);
+        assert!(document.set_component(&radius, 0, 0, "0.5"));
+        assert_eq!(document.param_text("radius").as_deref(), Some("0.5"));
     }
 
     #[test]

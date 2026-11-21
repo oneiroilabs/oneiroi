@@ -10,7 +10,8 @@ use iced_nodegraph::{
     default_can_connect, default_edge_style,
     default_node_style, edge, node, node_header, pin,
 };
-use oneiroi_editor::document::{Document, PaletteEntry, Side};
+use oneiroi_core::node::Card;
+use oneiroi_editor::document::{Document, Fields, PaletteEntry, Side, Target, parse_word};
 use oneiroi_editor::look::{self, PinLook};
 use oneiroi_graph::Note;
 use oneiroi_editor::preview::{Detail, Preview};
@@ -84,6 +85,12 @@ enum Message {
     /// What a parameter starts at, typed in.
     ParamDefault(u32, String, String),
     ParamDefaultCommitted(u32, String),
+    /// A number of an element of an input or a parameter typed in: which
+    /// element, which of its numbers, and the text.
+    Component(Target, usize, usize, String),
+    /// Another element at the end of a list.
+    AddElement(Target),
+    RemoveElement(Target, usize),
     /// A link in documentation was clicked, which leads nowhere yet.
     Link,
 }
@@ -95,6 +102,10 @@ struct Editor {
     camera: (Point, f32),
     /// What is typed into an input and not committed yet.
     edits: HashMap<(NodeId, String), String>,
+    /// What is typed into a number of an element, by its target, element
+    /// and component. It is kept while it is typed, even when it is
+    /// already set, so a number can be typed as `1.` on the way to `1.5`.
+    typing: HashMap<(Target, usize, usize), String>,
     /// Counts up to aim the preview at the mesh again.
     frame: u64,
     /// What the last save, load or edit had to say.
@@ -142,6 +153,7 @@ impl Editor {
             selected: Vec::new(),
             camera: (Point::ORIGIN, 1.0),
             edits: HashMap::new(),
+            typing: HashMap::new(),
             frame: 0,
             note: None,
             detail: 1,
@@ -223,9 +235,11 @@ impl Editor {
             }
             Message::Selected(nodes) => {
                 self.selected = nodes.into_iter().map(NodeId::from).collect();
+                self.typing.clear();
             }
             Message::Panned(position, zoom) => self.camera = (position, zoom),
             Message::EdgesCut(edges) => {
+                self.typing.clear();
                 for edge in edges {
                     if let Some((node, input)) = edge.split_once(':')
                         && let Ok(node) = node.parse::<u32>()
@@ -252,12 +266,14 @@ impl Editor {
             }
             Message::Expose(node, input) => {
                 self.edits.remove(&(node.into(), input.clone()));
+                self.forget(&Target::Input(node.into(), input.clone()));
                 self.document.toggle_exposed(node.into(), &input);
             }
             Message::Export(node, output) => {
                 self.document.toggle_output(node.into(), &output);
             }
             Message::Each(node, input) => {
+                self.forget(&Target::Input(node.into(), input.clone()));
                 self.document.toggle_each(node.into(), &input);
             }
             Message::Display(node) => {
@@ -285,6 +301,7 @@ impl Editor {
             }
             Message::Reset(node, input) => {
                 self.edits.remove(&(node.into(), input.clone()));
+                self.forget(&Target::Input(node.into(), input.clone()));
                 self.document.reset(node.into(), &input);
             }
             Message::Frame => self.frame += 1,
@@ -362,8 +379,26 @@ impl Editor {
                     self.note = Some(format!("`{text}` is not a value for `{param}`"));
                 }
             }
+            Message::Component(target, element, component, text) => {
+                self.document.set_component(&target, element, component, &text);
+                self.typing.insert((target, element, component), text);
+            }
+            Message::AddElement(target) => {
+                self.forget(&target);
+                self.document.add_element(&target);
+            }
+            Message::RemoveElement(target, element) => {
+                self.forget(&target);
+                self.document.remove_element(&target, element);
+            }
             Message::Link => {}
         }
+    }
+
+    /// Lets go of what is typed into `target`, whose numbers changed some
+    /// other way.
+    fn forget(&mut self, target: &Target) {
+        self.typing.retain(|(typed, _, _), _| typed != target);
     }
 
     fn kind(&self, node: NodeId) -> Option<NodeKind> {
@@ -639,6 +674,9 @@ impl Editor {
             );
 
             let choice = self.document.input_choice(node, &port.name);
+            let fields = self.document.fields(&Target::Input(node, port.name.clone()));
+            // A list or a vector gets a line of its own, under its label.
+            let stacked = fields.as_ref().is_some_and(|fields| fields.card != Card::One || fields.components.len() > 1);
             let field: Element<'_, Message> = if let Some((choices, picked)) = choice {
                 let name = port.name.clone();
                 let picked = choices[picked].clone();
@@ -646,6 +684,8 @@ impl Editor {
                     .text_size(12)
                     .on_select(move |choice| Message::Chosen(node.raw(), name.clone(), choice))
                     .into()
+            } else if let Some(fields) = fields {
+                self.value_fields(Target::Input(node, port.name.clone()), fields)
             } else if editable {
                 let name = port.name.clone();
                 let shown = self.edits.get(&key).cloned().unwrap_or(stored);
@@ -679,7 +719,16 @@ impl Editor {
             } else {
                 expose.into()
             };
-            rows = rows.push(row![label, field, middle, reset].spacing(6).align_y(Center));
+            rows = match stacked {
+                true => rows.push(
+                    column![
+                        row![label, space::horizontal(), middle, reset].spacing(6).align_y(Center),
+                        container(field).padding(iced::Padding::ZERO.left(8)),
+                    ]
+                    .spacing(3),
+                ),
+                false => rows.push(row![label, field, middle, reset].spacing(6).align_y(Center)),
+            };
             if self.edit_notes {
                 rows = rows.push(self.note_fields(node, Side::Input, port));
             }
@@ -733,7 +782,22 @@ impl Editor {
                 .on_input(move |text| Message::PortName(raw, port.clone(), text))
                 .on_submit(Message::PortRenamed(raw, name.clone()));
             let mut row = row![field].spacing(6).align_y(Center);
-            if *kind == NodeKind::Input {
+            // What a parameter starts at, under its name if it is a list or
+            // a vector.
+            let mut below = None;
+            if *kind == NodeKind::Input
+                && let Some(fields) = self.document.fields(&Target::Param(name.clone()))
+            {
+                let stacked = fields.card != Card::One || fields.components.len() > 1;
+                let fields = self.value_fields(Target::Param(name.clone()), fields);
+                match stacked {
+                    true => {
+                        row = row.push(space::horizontal());
+                        below = Some(container(fields).padding(iced::Padding::ZERO.left(8)));
+                    }
+                    false => row = row.push(fields),
+                }
+            } else if *kind == NodeKind::Input {
                 let default = self
                     .edits
                     .get(&(node, format!("default:{name}")))
@@ -755,8 +819,93 @@ impl Editor {
                 .push(small("down", Message::PortMoved(raw, name.clone(), 1)))
                 .push(small("remove", Message::PortRemoved(raw, name.clone())));
             rows = rows.push(row);
+            if let Some(below) = below {
+                rows = rows.push(below);
+            }
         }
         rows
+    }
+
+    /// A field for every number of every element of `target`: in a row for
+    /// a single element, or in a table with a row per element, to take
+    /// out, and a button for another one.
+    fn value_fields(&self, target: Target, fields: Fields) -> Element<'_, Message> {
+        const INDEX: u32 = 22;
+        // As wide as the button which takes an element out.
+        const REMOVE: u32 = 24;
+        let Fields { components, elements, card } = fields;
+        let input = |element: usize, component: usize, stored: &str| -> Element<'_, Message> {
+            let key = (target.clone(), element, component);
+            let typed = self.typing.get(&key);
+            let scalar = components[component].scalar;
+            let invalid = typed.is_some_and(|typed| parse_word(typed, scalar).is_none());
+            let target = target.clone();
+            text_input("", typed.map_or(stored, String::as_str).to_string())
+                .size(12)
+                .width(Fill)
+                .padding([2, 4])
+                .on_input(move |text| Message::Component(target.clone(), element, component, text))
+                .style(move |theme: &Theme, status| {
+                    let mut style = text_input::default(theme, status);
+                    if invalid {
+                        style.border.color = theme.palette().danger.base.color;
+                    }
+                    style
+                })
+                .into()
+        };
+        let label = |component: &oneiroi_editor::document::Component| {
+            text(component.label.clone()).size(11).color(look::axis_color(component.axis))
+        };
+
+        if card == Card::One {
+            let mut line = row![].spacing(4).align_y(Center);
+            for (index, (component, stored)) in components.iter().zip(&elements[0]).enumerate() {
+                if !component.label.is_empty() {
+                    line = line.push(label(component));
+                }
+                line = line.push(input(0, index, stored));
+            }
+            return line.into();
+        }
+
+        let mut table = column![].spacing(2);
+        if components.iter().any(|component| !component.label.is_empty()) && !elements.is_empty() {
+            let mut header = row![space().width(INDEX)].spacing(4);
+            for component in &components {
+                header = header.push(container(label(component)).width(Fill).padding([0, 4]));
+            }
+            table = table.push(header.push(space().width(REMOVE)));
+        }
+        for (element, numbers) in elements.iter().enumerate() {
+            let mut line = row![text((element + 1).to_string()).size(11).width(INDEX)].spacing(4).align_y(Center);
+            for (component, stored) in numbers.iter().enumerate() {
+                line = line.push(input(element, component, stored));
+            }
+            line = line.push(
+                button(text("×").size(11).center())
+                    .width(REMOVE)
+                    .padding([1, 0])
+                    .style(button::text)
+                    .on_press(Message::RemoveElement(target.clone(), element)),
+            );
+            table = table.push(line);
+        }
+        let count = match elements.len() {
+            0 => "empty".to_string(),
+            1 => "1 element".to_string(),
+            len => format!("{len} elements"),
+        };
+        table = table.push(
+            row![
+                space().width(INDEX),
+                button(text("+ add").size(11)).padding([1, 6]).on_press(Message::AddElement(target.clone())),
+                text(count).size(11),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        );
+        table.width(Fill).into()
     }
 
     /// Fields for another name of `port` and how this node uses it. Left

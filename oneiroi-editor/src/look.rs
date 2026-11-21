@@ -9,6 +9,19 @@ use oneiroi_nodes::meta::Hue;
 
 use crate::document::{Document, PinType, PortView};
 
+/// The colour of the label of a number: red, green and blue for `x`, `y`
+/// and `z`, as axes are told apart by convention, and grey for anything
+/// else.
+pub fn axis_color(axis: Option<&str>) -> Color {
+    let rgb = match axis {
+        Some("x") => 0xf87171,
+        Some("y") => 0x4ade80,
+        Some("z") => 0x60a5fa,
+        _ => 0xa1a1aa,
+    };
+    Color::from_rgb8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
 /// The colour of `hue`, its shade 300 of the palette of Tailwind CSS: light
 /// enough to read on a dark node, and still telling the hues apart.
 pub fn color(hue: Hue) -> Color {
