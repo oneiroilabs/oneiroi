@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    button, checkbox, column, container, markdown, pick_list, row, scrollable, shader, space,
+    button, canvas, checkbox, column, container, markdown, pick_list, row, scrollable, shader, space,
     text, text_input, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Point, Theme, Vector};
@@ -11,7 +11,9 @@ use iced_nodegraph::{
     default_node_style, edge, node, node_header, pin,
 };
 use oneiroi_core::node::Card;
-use oneiroi_editor::document::{Document, Fields, PaletteEntry, Side, Target, parse_word};
+use oneiroi_editor::curve_edit::CurveEdit;
+use oneiroi_editor::document::{CurveDrawing, Document, Fields, PaletteEntry, Side, Target, parse_word};
+use oneiroi_nodes::curve::curve2d::INTERPOLATIONS;
 use oneiroi_editor::look::{self, PinLook};
 use oneiroi_graph::Note;
 use oneiroi_editor::preview::{Detail, Preview};
@@ -91,6 +93,12 @@ enum Message {
     /// Another element at the end of a list.
     AddElement(Target),
     RemoveElement(Target, usize),
+    /// The points of a curve drawn at an input, moved, added or taken out.
+    CurveEdited(u32, String, Vec<glam::Vec2>),
+    /// How a curve drawn at an input gets from point to point.
+    CurveInterpolation(u32, String, String),
+    /// A curve drawn right at an input which takes one.
+    DrawCurve(u32, String),
     /// A link in documentation was clicked, which leads nowhere yet.
     Link,
 }
@@ -391,6 +399,20 @@ impl Editor {
                 self.forget(&target);
                 self.document.remove_element(&target, element);
             }
+            Message::CurveEdited(node, input, points) => {
+                if let Some(drawing) = self.document.curve_drawing(node.into(), &input) {
+                    self.document.set_curve(node.into(), &input, &points, drawing.interpolation);
+                }
+            }
+            Message::CurveInterpolation(node, input, choice) => {
+                let index = INTERPOLATIONS.iter().position(|known| *known == choice);
+                if let (Some(index), Some(drawing)) = (index, self.document.curve_drawing(node.into(), &input)) {
+                    self.document.set_curve(node.into(), &input, &drawing.points, index);
+                }
+            }
+            Message::DrawCurve(node, input) => {
+                self.document.draw_curve(node.into(), &input);
+            }
             Message::Link => {}
         }
     }
@@ -675,9 +697,19 @@ impl Editor {
 
             let choice = self.document.input_choice(node, &port.name);
             let fields = self.document.fields(&Target::Input(node, port.name.clone()));
-            // A list or a vector gets a line of its own, under its label.
-            let stacked = fields.as_ref().is_some_and(|fields| fields.card != Card::One || fields.components.len() > 1);
-            let field: Element<'_, Message> = if let Some((choices, picked)) = choice {
+            let drawing = self.document.curve_drawing(node, &port.name);
+            // A list, a vector or a curve gets a line of its own, under its
+            // label.
+            let stacked = drawing.is_some()
+                || fields.as_ref().is_some_and(|fields| fields.card != Card::One || fields.components.len() > 1);
+            let field: Element<'_, Message> = if let Some(drawing) = drawing {
+                self.curve_field(node, &port.name, drawing)
+            } else if self.document.can_draw_curve(node, &port.name) {
+                button(text("draw a curve").size(11))
+                    .padding([1, 6])
+                    .on_press(Message::DrawCurve(node.raw(), port.name.clone()))
+                    .into()
+            } else if let Some((choices, picked)) = choice {
                 let name = port.name.clone();
                 let picked = choices[picked].clone();
                 pick_list(Some(picked), choices, |choice: &String| choice.clone())
@@ -824,6 +856,33 @@ impl Editor {
             }
         }
         rows
+    }
+
+    /// The editor of a curve drawn at `input` of `node`, and how it gets from
+    /// point to point if it is drawn right at the input.
+    fn curve_field(&self, node: NodeId, input: &str, drawing: CurveDrawing) -> Element<'_, Message> {
+        let inline = drawing.inline;
+        let picked = INTERPOLATIONS[drawing.interpolation].to_string();
+        let name = input.to_string();
+        let editor: Element<'_, Vec<glam::Vec2>> = canvas(CurveEdit { drawing }).width(Fill).height(110).into();
+        let editor = editor.map(move |points| Message::CurveEdited(node.raw(), name.clone(), points));
+        let mut column = column![editor].spacing(4);
+        if inline {
+            let name = input.to_string();
+            let choices: Vec<String> = INTERPOLATIONS.iter().map(|choice| choice.to_string()).collect();
+            column = column.push(
+                row![
+                    text("interpolation").size(11),
+                    pick_list(Some(picked), choices, |choice: &String| choice.clone())
+                        .text_size(11)
+                        .on_select(move |choice| Message::CurveInterpolation(node.raw(), name.clone(), choice)),
+                ]
+                .spacing(6)
+                .align_y(Center),
+            );
+        }
+        column = column.push(text("drag a point, click to add one, right click to take one out").size(10));
+        column.into()
     }
 
     /// A field for every number of every element of `target`: in a row for

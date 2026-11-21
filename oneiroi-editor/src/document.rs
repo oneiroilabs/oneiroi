@@ -8,21 +8,24 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use oneiroi_core::{
     exec::{Engine, Instance, Overflow},
-    node::{Card, Drawable, NodeRegistry, PortType, Topology},
+    node::{Card, Drawable, Items, NodeRegistry, PortType, Topology},
     store::ContentKey,
     types::{DataType, InstanceRow, Scalar, Trait, TypeInfo},
 };
 use oneiroi_wgpu::{DeferredExecutor, orbit::OrbitCamera};
 use oneiroi_core::program::ProgramId;
 use oneiroi_graph::{
-    About, Context, Graph, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
+    About, Context, Graph, Inline, Input, Library, LibraryError, LowerError, LowerErrorKind, NodeId, NodeKind,
     GraphParam, Note, Value,
 };
 use oneiroi_nodes::{
-    curve::nurbs::clamped_uniform_knots,
+    curve::{
+        CURVE_2D, curve2d::INTERPOLATIONS, curve_through,
+        nurbs::{CubicNurbsSegmentCache, clamped_uniform_knots},
+    },
     meta::{Hue, MetaRegistry, label_of, markdown},
 };
 
@@ -513,6 +516,29 @@ pub fn parse_word(text: &str, scalar: Scalar) -> Option<u32> {
 pub enum Target {
     Input(NodeId, String),
     Param(String),
+}
+
+/// A curve drawn as a graph over `x`, see [`Document::curve_drawing`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurveDrawing {
+    /// The points it goes through or is pulled by.
+    pub points: Vec<Vec2>,
+    /// Which of [`INTERPOLATIONS`] gets it from point to point.
+    pub interpolation: usize,
+    /// Whether it is drawn right at an input, without a node of its own.
+    pub inline: bool,
+}
+
+impl CurveDrawing {
+    /// The curve as points close enough together to draw it as straight
+    /// lines between them.
+    pub fn line(&self) -> Vec<Vec2> {
+        const STEPS: usize = 16;
+        curve_through(&self.points, self.interpolation as u32)
+            .iter()
+            .flat_map(|segment| (0..=STEPS).map(move |step| segment.evaluate(step as f32 / STEPS as f32).0.truncate()))
+            .collect()
+    }
 }
 
 /// What a [`Target`] holds, to type in number by number.
@@ -1373,6 +1399,10 @@ impl Document {
                     None => ("linked".into(), false),
                 });
             }
+            Some(Input::Inline(inline)) => {
+                let label = self.meta.node(&inline.node).map_or(inline.node.as_str(), |meta| meta.label);
+                return Some((format!("{label}, drawn here"), false));
+            }
             _ => {}
         }
         let PinType::Exact(ty) = port.ty else {
@@ -1425,7 +1455,7 @@ impl Document {
                     return None;
                 };
                 let words = match self.graph().node(*node)?.inputs.get(input) {
-                    Some(Input::Link { .. }) => return None,
+                    Some(Input::Link { .. } | Input::Inline(_)) => return None,
                     Some(Input::Value(value)) => value_words(value),
                     None => port.default,
                 };
@@ -1541,6 +1571,87 @@ impl Document {
         }
         words.drain(element * size..(element + 1) * size);
         self.store(target, ty, card, &words)
+    }
+
+    /// The curve drawn at `input` of `node`, if it is one: the points of a
+    /// Curve 2D node, or a Curve 2D drawn right at an input which takes a
+    /// curve.
+    pub fn curve_drawing(&self, node: NodeId, input: &str) -> Option<CurveDrawing> {
+        let stored = &self.graph().node(node)?.inputs;
+        let value = |port: &str, inputs: &dyn Fn(&str) -> Option<Value>| {
+            let declared = CURVE_2D.inputs.iter().find(|declared| declared.name == port).unwrap();
+            inputs(port).map_or_else(|| declared.default.words().to_vec(), |value| value_words(&value))
+        };
+        let drawing = |inputs: &dyn Fn(&str) -> Option<Value>, inline| {
+            let points = value("points", inputs);
+            let interpolation = value("interpolation", inputs).first().copied().unwrap_or(0) as usize;
+            CurveDrawing {
+                points: bytemuck::cast_slice::<u32, f32>(&points).chunks_exact(2).map(Vec2::from_slice).collect(),
+                interpolation: interpolation.min(INTERPOLATIONS.len() - 1),
+                inline,
+            }
+        };
+        let is_curve_2d = matches!(&self.graph().node(node)?.kind, NodeKind::Node(id) if id == CURVE_2D.id);
+        if is_curve_2d && input == "points" {
+            if matches!(stored.get("points"), Some(Input::Link { .. })) {
+                return None;
+            }
+            let values = |port: &str| match stored.get(port) {
+                Some(Input::Value(value)) => Some(value.clone()),
+                _ => None,
+            };
+            return Some(drawing(&values, false));
+        }
+        match stored.get(input) {
+            Some(Input::Inline(inline)) if inline.node == CURVE_2D.id => {
+                Some(drawing(&|port: &str| inline.inputs.get(port).cloned(), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a curve could be drawn right at `input` of `node`: it takes
+    /// a single curve, and nothing is linked to it or drawn there yet.
+    pub fn can_draw_curve(&self, node: NodeId, input: &str) -> bool {
+        let Some(port) = self.view(node).and_then(|view| view.inputs.into_iter().find(|port| port.name == input)) else {
+            return false;
+        };
+        let curve = matches!(port.ty, PinType::Exact(ty) if ty == CubicNurbsSegmentCache::INFO);
+        let free = self.graph().node(node).is_some_and(|node| node.inputs.get(input).is_none());
+        curve && port.card.items_of(true) == Items::One && free
+    }
+
+    /// Draws a curve right at `input` of `node`, flat at `1` from `x` of `0`
+    /// to `1`, to edit from there.
+    pub fn draw_curve(&mut self, node: NodeId, input: &str) -> bool {
+        if !self.can_draw_curve(node, input) {
+            return false;
+        }
+        self.set_curve(node, input, &[Vec2::new(0.0, 1.0), Vec2::new(1.0, 1.0)], 0)
+    }
+
+    /// Sets the curve drawn at `input` of `node`, see [`Document::curve_drawing`].
+    pub fn set_curve(&mut self, node: NodeId, input: &str, points: &[Vec2], interpolation: usize) -> bool {
+        let flat = Value::F32(points.iter().flat_map(|point| point.to_array()).collect());
+        let interpolation = Value::U32(vec![interpolation.min(INTERPOLATIONS.len() - 1) as u32]);
+        let is_curve_2d = matches!(
+            self.graph().node(node).map(|node| &node.kind),
+            Some(NodeKind::Node(id)) if id == CURVE_2D.id
+        );
+        let done = match is_curve_2d && input == "points" {
+            true => {
+                let graph = self.graph_mut();
+                graph.set(node, "points", flat).is_ok() && graph.set(node, "interpolation", interpolation).is_ok()
+            }
+            false => {
+                let inline = Inline::new(CURVE_2D.id).with("points", flat).with("interpolation", interpolation);
+                self.graph_mut().set_inline(node, input, inline).is_ok()
+            }
+        };
+        if done {
+            self.refresh();
+        }
+        done
     }
 
     /// What an input to pick from can say, and which of it is picked, if
@@ -1813,7 +1924,8 @@ impl Document {
                 }
                 true
             }
-            (None, Some(Input::Link { .. })) => false,
+            // A link, or a node drawn right at the input, is no value.
+            (None, Some(Input::Link { .. } | Input::Inline(_))) => false,
             (None, Some(Input::Value(value))) => graph.expose(node, input, input, Some(value)).is_ok(),
             (None, None) => graph.expose(node, input, input, None).is_ok(),
         };
@@ -2085,6 +2197,7 @@ mod tests {
             labels,
             [
                 "Curve / Circle",
+                "Curve / Curve 2D",
                 "Curve / Line",
                 "Curve / NURBS Curve",
                 "Curve / Points to Frames",
@@ -2624,6 +2737,50 @@ mod tests {
         assert_eq!(document.fields(&radius).unwrap().elements, [["0.25"]]);
         assert!(document.set_component(&radius, 0, 0, "0.5"));
         assert_eq!(document.param_text("radius").as_deref(), Some("0.5"));
+    }
+
+    #[test]
+    fn a_curve_is_drawn_right_at_an_input() {
+        let (mut document, [_, _, sweep, _]) = meshed();
+        // Nothing scales the sweep of the example yet, so a curve can be
+        // drawn there, flat at 1 to start with.
+        assert!(document.curve_drawing(sweep, "scale").is_none());
+        assert!(document.can_draw_curve(sweep, "scale"));
+        assert!(!document.can_draw_curve(sweep, "spine"));
+        let before = document.session().lock().unwrap().generation();
+        assert!(document.draw_curve(sweep, "scale"));
+        let drawing = document.curve_drawing(sweep, "scale").unwrap();
+        assert_eq!((drawing.points.len(), drawing.interpolation, drawing.inline), (2, 0, true));
+        assert!(!document.can_draw_curve(sweep, "scale"));
+        assert_eq!(document.input_text(sweep, "scale").unwrap(), ("Curve 2D, drawn here".into(), false));
+
+        // Down to a point: the surface changes.
+        let points = [Vec2::new(0.0, 1.0), Vec2::new(0.5, 0.8), Vec2::new(1.0, 0.0)];
+        assert!(document.set_curve(sweep, "scale", &points, 1));
+        assert_ne!(document.session().lock().unwrap().generation(), before);
+        assert!(document.error().is_none(), "{:?}", document.error());
+        let drawing = document.curve_drawing(sweep, "scale").unwrap();
+        assert_eq!((drawing.points, drawing.interpolation), (points.to_vec(), 1));
+        // As straight lines, the curve is drawn through its points.
+        let line = document.curve_drawing(sweep, "scale").unwrap().line();
+        assert!(points.iter().all(|point| line.iter().any(|drawn| drawn.distance(*point) < 1e-4)));
+
+        // Put back, there is nothing drawn there anymore.
+        document.reset(sweep, "scale");
+        assert!(document.curve_drawing(sweep, "scale").is_none());
+    }
+
+    #[test]
+    fn a_curve_2d_node_is_drawn_too() {
+        let mut document = Document::example();
+        let curve = document.add_node("curve.curve_2d", [0.0, 0.0]);
+        // At its default: flat at 1.
+        let drawing = document.curve_drawing(curve, "points").unwrap();
+        assert_eq!((drawing.points, drawing.inline), (vec![Vec2::new(0.0, 1.0), Vec2::ONE], false));
+        assert!(document.curve_drawing(curve, "interpolation").is_none());
+        assert!(document.set_curve(curve, "points", &[Vec2::ZERO, Vec2::new(1.0, 2.0)], 2));
+        assert_eq!(document.input_choice(curve, "interpolation").unwrap().1, 2);
+        assert_eq!(document.curve_drawing(curve, "points").unwrap().points[1], Vec2::new(1.0, 2.0));
     }
 
     #[test]
