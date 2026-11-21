@@ -98,3 +98,11 @@ expression: edits
     submits: 7
     downloads: 4
     buffers: 0
+- scenario: mostly constant
+  counters:
+    gpu_nodes: 1
+    cpu_nodes: 0
+    dispatches: 1
+    submits: 1
+    downloads: 0
+    buffers: 0
