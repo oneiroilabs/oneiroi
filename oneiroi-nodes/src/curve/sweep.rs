@@ -101,9 +101,8 @@ fn scale_at(scale: [f32; 4], u: f32) -> (f32, f32) {
 /// The frame of the spine at `u` of a patch which covers `span` of
 /// `segment`, and how fast the spine runs there per `u`.
 fn spine_at(segment: &CubicNurbsSegmentCache, span: [f32; 2], u: f32) -> (MovingFrame, f32) {
-    let t = lerp(span[0], span[1], u);
-    let frame = segment.frame(t);
-    (frame, segment.evaluate(t).1.length() * (span[1] - span[0]))
+    let (frame, velocity) = segment.frame_and_velocity(lerp(span[0], span[1], u));
+    (frame, velocity.length() * (span[1] - span[0]))
 }
 
 /// The normal of a swept surface where the profile, at `offset` from the

@@ -149,15 +149,11 @@ impl CubicNurbsSegmentCache {
         let (a, b, c, d) = (m.col(0), m.col(1), m.col(2), m.col(3));
 
         let at = |u: f32| {
-            let pos_hom = a
-                .mul_add(Vec4::splat(u), b)
-                .mul_add(Vec4::splat(u), c)
-                .mul_add(Vec4::splat(u), d);
+            let us = Vec4::splat(u);
+            let pos_hom = fused(fused(fused(a, us, b), us, c), us, d);
             let pos = pos_hom.xyz() / pos_hom.w;
 
-            let dp_du_hom = a
-                .mul_add(Vec4::splat(u * 3.0), b * 2.0)
-                .mul_add(Vec4::splat(u), c);
+            let dp_du_hom = fused(fused(a, Vec4::splat(u * 3.0), b * 2.0), us, c);
             let velocity = (dp_du_hom.xyz() - dp_du_hom.w * pos) / pos_hom.w;
             (pos, velocity)
         };
@@ -223,7 +219,12 @@ impl CubicNurbsSegmentCache {
     /// two results are blended, so the frame is defined for every `u` and
     /// never depends on how finely the segment gets tessellated.
     pub fn frame(&self, u: f32) -> MovingFrame {
-        let (position, _, tangent) = self.evaluate(u);
+        self.frame_and_velocity(u).0
+    }
+
+    /// The frame at `u` and the velocity there, out of one evaluation.
+    pub fn frame_and_velocity(&self, u: f32) -> (MovingFrame, Vec3) {
+        let (position, velocity, tangent) = self.evaluate(u);
 
         let carry = |normal: [f32; 2], from: Vec3| {
             Quat::from_rotation_arc(from, tangent) * decode_normal(normal, from)
@@ -237,13 +238,25 @@ impl CubicNurbsSegmentCache {
             .unwrap_or_else(|| reference_basis(tangent).0);
         let binormal = tangent.cross(normal).normalize_or_zero();
 
-        MovingFrame {
+        let frame = MovingFrame {
             position,
             tangent,
             normal,
             binormal,
-        }
+        };
+        (frame, velocity)
     }
+}
+
+/// `a * b + c`, fused where the CPU has an instruction for it. Without one
+/// a fused multiply-add is a call into software, slower than all the rest
+/// of evaluating a curve, so it is a plain one there.
+#[inline(always)]
+fn fused(a: Vec4, b: Vec4, c: Vec4) -> Vec4 {
+    #[cfg(target_feature = "fma")]
+    return a.mul_add(b, c);
+    #[cfg(not(target_feature = "fma"))]
+    return a * b + c;
 }
 
 /// The knots of a curve which starts at its first and ends at its last
