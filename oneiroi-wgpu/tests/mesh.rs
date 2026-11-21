@@ -4,7 +4,7 @@
 //! any they pass without having checked anything.
 
 use glam::Vec3;
-use oneiroi_core::{exec::Engine, node::NodeRegistry, program::ProgramBuilder};
+use oneiroi_core::{engine::Engine, node::NodeRegistry, program::ProgramBuilder};
 use oneiroi_nodes::{
     curve::{ControlPoint, NURBS, nurbs::clamped_uniform_knots, tube},
     surface::MESH,

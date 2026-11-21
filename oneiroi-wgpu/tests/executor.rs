@@ -4,7 +4,7 @@
 //! any they pass without having checked anything.
 
 use oneiroi_core::{
-    exec::{Engine, Executor, Instance},
+    engine::{Engine, Executor, Instance},
     program::{ProgramBuilder, ProgramId},
 };
 use oneiroi_core::program::SlotId;

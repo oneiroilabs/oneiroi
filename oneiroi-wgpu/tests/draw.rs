@@ -6,7 +6,7 @@
 
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
-    exec::{Engine, Instance},
+    engine::{Engine, Instance},
     node::NodeRegistry,
     program::{ProgramBuilder, SlotId},
     shader::LodColors,

@@ -979,7 +979,7 @@ pub fn describe(meta: &mut crate::meta::MetaRegistry) {
 
 #[cfg(test)]
 mod tests {
-    use oneiroi_core::{exec::Engine, program::ProgramBuilder};
+    use oneiroi_core::{engine::Engine, program::ProgramBuilder};
 
     use super::*;
     use crate::curve::{NURBS, SAMPLE_CURVE, nurbs::clamped_uniform_knots};

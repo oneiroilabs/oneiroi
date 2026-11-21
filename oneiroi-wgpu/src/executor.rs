@@ -3,7 +3,7 @@
 use std::{collections::HashMap, num::NonZeroU32};
 
 use oneiroi_core::{
-    exec::{CpuExecutor, Executor, Phases, Work},
+    engine::{CpuExecutor, Executor, Phases, Work},
     node::{Caps, GpuKernel, Inputs, NodeDef},
     shader::{self, CALL_WINDOW, GATHER, GATHER_CALL_WORDS, ShaderError, WORKGROUP_SIZE},
     store::{ContentKey, Handle, KeyMap, Store},
@@ -167,7 +167,7 @@ struct Bindless {
 ///
 /// A result stays on the device. It is only brought back when a node on
 /// the CPU reads it or somebody asks for it, see
-/// [`Engine::fetch`](oneiroi_core::exec::Engine::fetch).
+/// [`Engine::fetch`](oneiroi_core::engine::Engine::fetch).
 pub struct GpuExecutor {
     device: wgpu::Device,
     queue: wgpu::Queue,

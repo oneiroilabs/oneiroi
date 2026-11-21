@@ -13,7 +13,7 @@ use bevy::{
     prelude::*,
 };
 use oneiroi_core::{
-    exec::{Engine, Instance, ParamError},
+    engine::{Engine, Instance, ParamError},
     node::NodeRegistry,
     program::{Program, ProgramId, ProgramSet},
     store::ContentKey,

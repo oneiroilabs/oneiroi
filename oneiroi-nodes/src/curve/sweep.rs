@@ -779,7 +779,7 @@ pub fn tube(registry: &NodeRegistry) -> Program {
 mod tests {
     use glam::Vec4;
     use oneiroi_core::{
-        exec::{Engine, Instance},
+        engine::{Engine, Instance},
         program::BuildError,
     };
 

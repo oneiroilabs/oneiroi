@@ -787,7 +787,7 @@ pub fn register(registry: &mut NodeRegistry) {
 
 #[cfg(test)]
 mod tests {
-    use oneiroi_core::{exec::Engine, program::ProgramBuilder};
+    use oneiroi_core::{engine::Engine, program::ProgramBuilder};
 
     use super::*;
     use crate::curve::nurbs::{CubicNurbs, clamped_uniform_knots};

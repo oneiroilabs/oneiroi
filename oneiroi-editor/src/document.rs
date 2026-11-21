@@ -10,7 +10,7 @@ use std::{
 
 use glam::{Vec2, Vec3};
 use oneiroi_core::{
-    exec::{Engine, Instance, Overflow},
+    engine::{Engine, Instance, Overflow},
     node::{Card, Drawable, Items, NodeRegistry, PortType, Topology},
     store::ContentKey,
     types::{DataType, InstanceRow, Scalar, Trait, TypeInfo},

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use oneiroi_core::{
-    exec::Engine,
+    engine::Engine,
     node::{Card, NodeRegistry},
     program::{BuildError, ProgramBuilder, ProgramId},
 };
@@ -916,7 +916,7 @@ fn the_fence_stands() {
 
     let mut instance = engine.instantiate(id);
     engine.evaluate([&mut instance]);
-    fn rows(engine: &Engine, instance: &oneiroi_core::exec::Instance, name: &str) -> usize {
+    fn rows(engine: &Engine, instance: &oneiroi_core::engine::Instance, name: &str) -> usize {
         engine.read::<InstanceRow>(instance, name).map_or(0, <[_]>::len)
     }
     // A rail of 4 sides and 2 caps of 4 each, put at 3 heights; a post the

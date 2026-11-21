@@ -76,7 +76,7 @@ pub struct Scene {
     /// Of which graph each instance is, by its index, and its parameters.
     pub instances: Vec<(usize, Params)>,
     /// Parameters which follow outputs of other instances, see
-    /// [`Engine::link`](oneiroi_core::exec::Engine::link):
+    /// [`Engine::link`](oneiroi_core::engine::Engine::link):
     /// `(instance, parameter, instance it follows, output)`.
     pub links: Vec<(usize, &'static str, usize, &'static str)>,
 }

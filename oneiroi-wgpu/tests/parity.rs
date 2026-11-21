@@ -5,7 +5,7 @@
 //! it passes without having checked anything.
 
 use oneiroi_core::{
-    exec::{Engine, Executor, Instance},
+    engine::{Engine, Executor, Instance},
     node::{Card, NodeDef, NodeRegistry},
     program::{ProgramBuilder, ProgramId, groups_param, prototype_param, total_param},
     types::Scalar,

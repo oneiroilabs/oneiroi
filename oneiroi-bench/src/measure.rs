@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use oneiroi_core::exec::{CpuExecutor, Engine, Executor, Instance};
+use oneiroi_core::engine::{CpuExecutor, Engine, Executor, Instance};
 use oneiroi_wgpu::{GpuExecutor, GpuStats};
 use serde::{Deserialize, Serialize};
 
