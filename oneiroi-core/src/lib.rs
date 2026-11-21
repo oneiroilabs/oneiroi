@@ -8,6 +8,7 @@
 //! - [`shader`]: the shaders GPU backends run, generated around the kernels.
 
 pub mod exec;
+pub mod key;
 pub mod node;
 pub mod program;
 pub mod shader;
