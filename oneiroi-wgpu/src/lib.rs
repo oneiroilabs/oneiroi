@@ -8,9 +8,10 @@ use wgpu::{
 };
 use winit::{event_loop::OwnedDisplayHandle, window::Window};
 
-use crate::orbit::OrbitCamera;
+use crate::{orbit::OrbitCamera, profiling::Profiler};
 
 pub mod orbit;
+pub mod profiling;
 
 pub const DEBUG: bool = true;
 
@@ -124,6 +125,7 @@ pub struct State {
     curve: CubicNurbs,
 
     pipeline_state: PipelineState,
+    profiler: Profiler,
 }
 
 pub struct PipelineState {
@@ -720,6 +722,7 @@ impl PipelineState {
         &self,
         target: &wgpu::TextureView,
         encoder: &mut wgpu::CommandEncoder,
+        profiler: &Profiler,
         num_segments: u32,
         bounds: Option<(f32, f32, f32, f32)>,
     ) {
@@ -730,18 +733,22 @@ impl PipelineState {
         );
 
         {
+            let scope = profiler.begin_pass("NURBS Compute Pass", encoder);
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("NURBS Compute Pass"),
-                timestamp_writes: None,
+                timestamp_writes: scope.compute_writes(),
             });
             compute_pass.set_pipeline(&self.compute_pipeline);
             compute_pass.set_bind_group(0, &self.compute_bind_group_0, &[]);
             compute_pass.set_bind_group(1, &self.compute_bind_group_1, &[]);
 
             compute_pass.dispatch_workgroups(num_segments, 1, 1);
+            drop(compute_pass);
+            profiler.end_pass(encoder, scope);
         }
 
         {
+            let scope = profiler.begin_pass("Tube Render Pass", encoder);
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Tube Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -766,7 +773,7 @@ impl PipelineState {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: scope.render_writes(),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -788,9 +795,12 @@ impl PipelineState {
             //render_pass.set_pipeline(&self.mesh_pipeline);
             //render_pass.set_bind_group(0, &self.render_bind_group_0, &[]);
             //render_pass.draw_mesh_tasks(num_segments * 32 - 1, 1, 1);
+            drop(render_pass);
+            profiler.end_pass(encoder, scope);
         }
 
         {
+            let scope = profiler.begin_pass("SDF Render Pass", encoder);
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("SDF Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -803,7 +813,7 @@ impl PipelineState {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: scope.render_writes(),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -815,6 +825,8 @@ impl PipelineState {
             render_pass.set_pipeline(&self.sdf_pipeline);
             render_pass.set_bind_group(0, &self.sdf_bind_group, &[]);
             render_pass.draw(0..4, 0..1);
+            drop(render_pass);
+            profiler.end_pass(encoder, scope);
         }
     }
 }
@@ -835,7 +847,8 @@ impl State {
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::SUBGROUP
-                    | wgpu::Features::EXPERIMENTAL_MESH_SHADER,
+                    | wgpu::Features::EXPERIMENTAL_MESH_SHADER
+                    | Profiler::wanted_features(&adapter),
                 required_limits: adapter.limits(),
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -910,7 +923,10 @@ impl State {
 
         let camera = OrbitCamera::new(glam::Vec3::new(0., 0., 0.0), 10.0);
 
+        let profiler = Profiler::new(&adapter, &device, &queue);
+
         let state = State {
+            profiler,
             pipeline_state: PipelineState::new(&device, surface_format),
             instance,
             window,
@@ -1007,6 +1023,7 @@ impl State {
     }
 
     pub fn render(&mut self) {
+        cpu_zone!("State::render");
         println!("asgfoisdng");
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
@@ -1096,13 +1113,16 @@ impl State {
         self.pipeline_state.render(
             &texture_view,
             &mut encoder,
+            &self.profiler,
             //clip_bounds,
             self.curve.segments().len() as u32,
             None,
         );
 
+        self.profiler.resolve(&mut encoder);
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(surface_texture);
+        self.profiler.end_frame(&self.device, &self.queue);
     }
 }

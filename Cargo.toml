@@ -29,6 +29,13 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 
+# Release + symbols, for Tracy / Radeon GPU Profiler / samply.
+# Build with `--profile profiling`.
+[profile.profiling]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"
+
 [workspace.dependencies]
 oneiroi = { path = "./oneiroi" }
 oneiroi-core = { path = "./oneiroi-core" }
@@ -38,6 +45,9 @@ oneiroi-godot = { path = "./oneiroi-godot" }
 oneiroi-wgpu = { path = "./oneiroi-wgpu" }
 
 wgpu = { version = "30", features = ["trace"] }
+# Versions must match what wgpu-profiler 0.28 depends on.
+wgpu-profiler = { version = "0.28", features = ["tracy"] }
+tracy-client = "0.18"
 glam = { version = "=0.32.1", features = ["bytemuck"] }
 bytemuck = { version = "1.25" }
 encase = { version = "0.12" }

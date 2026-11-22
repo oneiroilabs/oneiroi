@@ -33,3 +33,11 @@ oneiroi-core.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 wgpu.workspace = true
+
+# Profiling, off by default. See src/profiling.rs.
+tracy-client = { workspace = true, optional = true }
+wgpu-profiler = { workspace = true, optional = true }
+
+[features]
+# Tracy CPU zones + GPU timestamp zones. `cargo run -p oneiroi-wgpu --profile profiling --features tracy`
+tracy = ["dep:tracy-client", "dep:wgpu-profiler"]
